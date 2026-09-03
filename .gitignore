@@ -1,0 +1,49 @@
+# Binaries
+/bin/
+/xetd
+/xet
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Test outputs and logs
+*.log
+test-results/
+
+# IDE and Tools
+.claude
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Local server data (chunks + manifests) generated at runtime
+/xet-data/
+/xet-test-data/
