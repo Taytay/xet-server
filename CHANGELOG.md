@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Pipfile`/`Pipfile.lock` and `make install`/`make install-deps` to manage
+  the optional `huggingface_hub`/`hf_xet` dependencies for
+  `hf_cli_roundtrip.sh` via `pipenv`, instead of a hand-rolled venv.
+- `scripts/build_docs.go`: a self-contained Go program (own module,
+  `scripts/go.mod`) that regenerates `docs/godoc/*.md` via `go doc -all`
+  and renders all Markdown docs to browsable HTML in `docs/build/`, using
+  `goldmark` (GFM/tables/TOC anchors), `chroma` (pygments-equivalent
+  syntax highlighting), and `goldmark-mermaid` (Mermaid diagram
+  rendering via `merman-cli` or `mmdc`, whichever is available and
+  functional, with a styled source + mermaid.live-link fallback
+  otherwise). `make docs`/`make docs-serve` now just run this program;
+  `make pre-check` reports which Mermaid renderer (if any) is available.
+
+### Changed
+- Integration test default timeout lowered from 60s to 10s
+  (`XET_IT_TEST_TIMEOUT`); `hf_cli_roundtrip.sh` now also wraps each `hf`
+  invocation in its own tighter internal timeout (`XET_HF_CLI_CMD_TIMEOUT`,
+  default 4s) so a proxy-hang fails fast instead of consuming the outer
+  budget. The full suite (5 fast tests + the hf CLI test failing/skipping)
+  now completes in well under 10 seconds.
+
+### Removed
+- `scripts/build_docs.py` and `scripts/gen-docs.sh` (Python/pipenv +
+  bash), replaced by `scripts/build_docs.go`. `markdown`/`pygments`
+  dropped from `Pipfile`'s dev-packages — pipenv is now only needed for
+  the optional `hf` CLI integration test, not docs.
+
+### Fixed
+- The Mermaid diagram fallback link (shown when no working Mermaid
+  renderer is available) pointed to a `mermaid.live/edit#pako:` fragment
+  built from a plain URL-encoded diagram source; mermaid.live actually
+  expects that fragment to be a zlib-deflated, base64url-encoded JSON
+  envelope (`{"code": ..., "mermaid": {...}}`), so the link never
+  decoded. Fixed to build the correct payload.
+- `docs/ARCHITECTURE.md`'s CAS-upload sequence diagram used `→` and a
+  stray `;` inside a `Note over` line, which some Mermaid parsers
+  (including `merman-cli`) reject — replaced with plain ASCII.
+
 ### Planned
 - ByteGrouping4LZ4 verification against a real captured chunk (currently only
   the codec itself is verified against zig-xet's reference vector; no real

@@ -17,7 +17,8 @@ make pre-check
 `make pre-check` verifies Go and Bash are present and prints their versions.
 This project has **zero external Go dependencies** beyond the standard
 library plus `github.com/zeebo/blake3` (a pure-Go BLAKE3 implementation
-required for wire compatibility with real Xet hashes) — no proxy config, no network access needed to build.
+required for wire compatibility with real Xet hashes) — no proxy config,
+no network access needed to build.
 
 Build both binaries:
 
@@ -60,10 +61,10 @@ make integration-test TEST=integration-tests/push_pull_roundtrip.sh
 
 `integrationTests.sh` starts one `xetd` instance (both the CAS server and
 the Hub API shim) and runs every `integration-tests/*.sh` script against
-it, with a per-test timeout (`XET_IT_TEST_TIMEOUT`, default 60s) so a
+it, with a per-test timeout (`XET_IT_TEST_TIMEOUT`, default 10s) so a
 single hanging test doesn't block the whole suite. Scripts receive `$XET`,
-`$XETD_URL`, `$HUB_URL`, and `$WORKDIR` — see the header comment in
-`integrationTests.sh` for the full contract.
+`$XETD_URL`, `$HUB_URL`, `$WORKDIR`, and `$PYTHON_VERSION` — see the header
+comment in `integrationTests.sh` for the full contract.
 
 A test script can `exit 77` to **SKIP** instead of fail, for cases that
 depend on an optional external dependency not being present (see
@@ -72,16 +73,15 @@ depend on an optional external dependency not being present (see
 ### Real `hf` CLI round-trip
 
 `integration-tests/hf_cli_roundtrip.sh` drives the actual `hf upload`/
-`hf download` shell commands (via `huggingface_hub` + `hf_xet`, not this
-project's own client) against the shared test server. This is the
-strongest possible compatibility check, since it never touches this
-repo's own code on the client side. It's optional and skips cleanly if the
-dependencies aren't installed:
+`hf download` shell commands (via `huggingface_hub` + `hf_xet`, installed
+through `pipenv` — not this project's own client) against the shared test
+server. This is the strongest possible compatibility check, since it never
+touches this repo's own code on the client side. It's optional and skips
+cleanly if `pipenv`/its environment aren't set up:
 
 ```bash
-python3 -m venv .venv-hf
-.venv-hf/bin/pip install huggingface_hub hf_xet
-make integration-test   # will now include and run hf_cli_roundtrip.sh
+make install             # pipenv --python 3.14 && pipenv install
+make integration-test    # will now include and run hf_cli_roundtrip.sh
 ```
 
 If it hangs or times out in a sandboxed/proxied network environment, that's

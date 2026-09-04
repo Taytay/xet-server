@@ -92,8 +92,8 @@ and the key design decisions). Short version:
 - Go 1.21 or later
 - GNU Make
 - Bash (for integration tests)
-- (Optional, for the real `hf` CLI round-trip test) Python 3 with
-  `huggingface_hub` + `hf_xet` installed in a venv
+- (Optional, for the real `hf` CLI round-trip test) `pipenv`, to install
+  `huggingface_hub` + `hf_xet`
 
 ## Build
 
@@ -204,12 +204,11 @@ every script in `integration-tests/`, with a per-test timeout so a hang
 doesn't block the suite. `integration-tests/hf_cli_roundtrip.sh` drives the
 **real, unmodified `hf` CLI** through a full upload+download round-trip —
 the strongest compatibility check available — and skips cleanly (not a
-failure) if `huggingface_hub`/`hf_xet` aren't installed:
+failure) if `pipenv`/its environment aren't set up:
 
 ```bash
-python3 -m venv .venv-hf
-.venv-hf/bin/pip install huggingface_hub hf_xet
-make integration-test   # now includes hf_cli_roundtrip.sh
+make install             # pipenv --python 3.14 && pipenv install
+make integration-test    # now includes hf_cli_roundtrip.sh
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#2-running-tests) for the full test

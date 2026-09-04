@@ -1,12 +1,24 @@
 GO_VERSION ?= 1.21
+PYTHON_VERSION ?= 3.14
+
+DOCS_PORT ?= 8000
+
+# Optional local overrides (e.g. PIPENV_PYPI_MIRROR for a private index
+# mirror); see .env.example. Never committed — .env is gitignored.
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
 
 .DEFAULT_GOAL := help
 
 .PHONY: help \
 	pre-check \
-	format vet build \
+	install \
+	format lint build \
 	test tests \
 	integration-test integration-tests \
+	docs docs-serve \
 	run clean \
 	all
 
@@ -25,12 +37,21 @@ pre-check: ## Verify Go toolchain and required shell tools are present
 		echo "ERROR: bash not found — required by integrationTests.sh"; exit 1; }
 	@echo "bash $$(bash --version | head -1 | awk '{print $$4}') ✓"
 	@echo "No external Go modules or network access required to build ✓"
+	@cd scripts && go run build_docs.go -check-mermaid
 
-format: pre-check ## Format Go code
+install: ## Install pipenv Python deps (huggingface_hub/hf_xet, for the real hf CLI integration test)
+	@command -v pipenv >/dev/null 2>&1 || { \
+		echo "ERROR: pipenv not found. Install from https://pipenv.pypa.io/"; exit 1; }
+	@pipenv --python $(PYTHON_VERSION)
+	@pipenv install --dev
+
+format: pre-check ## Run Formatter on Packages
 	go fmt ./...
 
-vet: pre-check ## Run go vet across all packages
+vet: pre-check
 	go vet ./...
+
+lint: vet ## Run Linter on Packages
 
 build: pre-check ## Build the xetd server and xet CLI binaries into bin/
 	go build -o bin/xetd ./cmd/xetd
@@ -44,14 +65,23 @@ test: pre-check ## Run unit tests
 integration-tests: integration-test
 
 integration-test: build ## Run integration tests (usage: make integration-test TEST=integration-tests/push_pull_roundtrip.sh)
-	./integrationTests.sh ./bin/xetd ./bin/xet $(if $(TEST),$(TEST),integration-tests)
+	@PYTHON_VERSION=$(PYTHON_VERSION) ./integrationTests.sh ./bin/xetd ./bin/xet $(if $(TEST),$(TEST),integration-tests)
 
 run: build ## Run xetd locally on :8420 with data in ./xet-data
 	./bin/xetd -addr :8420 -data ./xet-data
 
-clean: ## Clean build artifacts and local server data
+docs: pre-check ## Regenerate docs/godoc/*.md and render all docs (README, CONTRIBUTING, CHANGELOG, docs/*.md) to browsable HTML in docs/build/
+	cd scripts && go run build_docs.go
+
+docs-serve: pre-check ## Build docs and serve docs/build/ locally for browsing
+	@(command -v open >/dev/null 2>&1 && sleep 1 && open "http://localhost:$(DOCS_PORT)/") & \
+	cd scripts && go run build_docs.go -serve ":$(DOCS_PORT)"
+
+clean: ## Clean build artifacts, local server data, generated docs HTML, and the pipenv virtualenv
 	rm -rf bin
 	rm -rf xet-data
+	rm -rf docs/build
+	@pipenv --venv >/dev/null 2>&1 && pipenv --rm || true
 
 all: format vet build test integration-test ## Run format, vet, build, unit tests, and integration tests
 	@echo "All tasks completed successfully."

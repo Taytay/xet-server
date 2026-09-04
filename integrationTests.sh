@@ -7,16 +7,19 @@
 # integration-tests/ (or a single script if given) as an independent test
 # case. Each test script gets:
 #
-#   $XET        - path to the built xet CLI binary
-#   $XETD_URL   - base URL of the running xetd CAS server
-#   $HUB_URL    - base URL of the running xetd Hub API shim
-#   $WORKDIR    - a fresh scratch directory, unique to this test
+#   $XET             - path to the built xet CLI binary
+#   $XETD_URL        - base URL of the running xetd CAS server
+#   $HUB_URL         - base URL of the running xetd Hub API shim
+#   $WORKDIR         - a fresh scratch directory, unique to this test
+#   $PYTHON_VERSION  - Python version to request via `pipenv --python`
+#                      (defaults to "3"; set by `make integration-test`
+#                      from the Makefile's PYTHON_VERSION variable)
 #
 # A test passes if the script exits 0, and fails otherwise. Scripts should
 # use `set -euo pipefail` and assert with plain shell (e.g. `[ "$a" = "$b" ]
 # || { echo "mismatch"; exit 1; }`) or `cmp`/`diff` for file comparisons.
 #
-# Each test runs under a timeout (default 60s, override with
+# Each test runs under a timeout (default 10s, override with
 # XET_IT_TEST_TIMEOUT) so a single hanging test — e.g. a network client that
 # doesn't respect NO_PROXY for localhost in a proxied environment — fails
 # that one test instead of blocking the whole suite indefinitely.
@@ -26,8 +29,8 @@ set -u
 
 # ---- locate binaries -------------------------------------------------------
 
-XETD_BIN="$1"
-XET_BIN="$2"
+XETD_BIN="${1:-bin/xetd}"
+XET_BIN="${2:-bin/xet}"
 TARGET="${3:-integration-tests}"
 
 if [[ -z "$XETD_BIN" || -z "$XET_BIN" ]]; then
@@ -60,8 +63,14 @@ logError() { echo -e "${RED}ERROR:${NC} $1"; }
 logTest()  { echo -e "${BLUE}TEST:${NC} $1"; }
 
 # ---- timeout helper ----------------------------------------------------------
+#
+# Every test must complete in a handful of seconds — this is a local
+# integration suite, not an end-to-end network test bed. 10s is generous for
+# any of these tests under normal conditions; a test that needs longer than
+# that is either hung (see hf_cli_roundtrip.sh's proxy-hang note) or doing
+# too much for this suite.
 
-TEST_TIMEOUT="${XET_IT_TEST_TIMEOUT:-60}"
+TEST_TIMEOUT="${XET_IT_TEST_TIMEOUT:-10}"
 
 # Prefer GNU coreutils' `timeout` (Linux, or `brew install coreutils` on
 # macOS); fall back to `gtimeout`; if neither exists, run without a timeout
@@ -119,6 +128,7 @@ logInfo "xetd is ready (pid $SERVER_PID)"
 export XET="$XET_BIN"
 export XETD_URL
 export HUB_URL
+export PYTHON_VERSION="${PYTHON_VERSION:-3}"
 
 # ---- discover tests ----------------------------------------------------------
 

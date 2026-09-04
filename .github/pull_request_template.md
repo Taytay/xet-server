@@ -29,7 +29,7 @@ Types: feat, fix, docs, test, refactor, perf, style, build, ci, chore, revert
 <!-- What did you run, and what passed? -->
 - [ ] `make test` (unit tests)
 - [ ] `make integration-test` (bash integration suite)
-- [ ] `make integration-test` with `.venv-hf` present (real `hf` CLI round-trip via `hf_cli_roundtrip.sh`)
+- [ ] `make integration-test` after `make install` (real `hf` CLI round-trip via `hf_cli_roundtrip.sh`)
 - [ ] If this touches wire format/protocol behavior: verified against a real captured client payload (see `internal/*/testdata/`), not just synthetic fixtures
 
 <!-- If you captured new real-client bytes to add as a regression fixture, say so here and where they came from. -->

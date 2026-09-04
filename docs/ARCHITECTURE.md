@@ -80,7 +80,7 @@ sequenceDiagram
     CAS-->>Client: {was_inserted}
 
     Client->>CAS: POST /v1/shards  (no footer,<br/>verification+metadata_ext flags set)
-    Note over CAS: index file→xorb/chunk-range entries;<br/>record sha256→Xet-hash mapping
+    Note over CAS: index file to xorb/chunk-range entries,<br/>record sha256 to Xet-hash mapping
     CAS-->>Client: {result: 1}
 
     Client->>Hub: POST /api/{type}s/{repo}/commit/{rev}  (ndjson, lfsFile.oid = sha256)

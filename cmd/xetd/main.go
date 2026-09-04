@@ -11,7 +11,10 @@ package main
 import (
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
+	"time"
 
 	"xet-server/internal/api"
 	"xet-server/internal/casserver"
@@ -25,6 +28,10 @@ func main() {
 	casURL := flag.String("cas-url", "", "externally-reachable CAS base URL to hand out from the Hub shim (defaults to http://localhost<addr>)")
 	dataDir := flag.String("data", "./xet-data", "directory for chunks, xorbs, and manifests")
 	flag.Parse()
+
+	if os.Getenv("DEBUG") != "" {
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
 
 	demoSrv, err := api.New(*dataDir)
 	if err != nil {
@@ -50,14 +57,43 @@ func main() {
 		hubSrv := hubserver.New(resolvedCASURL, casSrv)
 		go func() {
 			log.Printf("xetd Hub API shim listening on %s (CAS base URL: %s)", *hubAddr, resolvedCASURL)
-			if err := http.ListenAndServe(*hubAddr, hubSrv); err != nil {
+			if err := http.ListenAndServe(*hubAddr, logRequests(hubSrv)); err != nil {
 				log.Fatal(err)
 			}
 		}()
 	}
 
 	log.Printf("xetd listening on %s, data dir %s (CAS protocol at /v1,/v2; demo API at /upload,/files)", *addr, *dataDir)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	if err := http.ListenAndServe(*addr, logRequests(mux)); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// logRequests wraps a handler to log every request at debug level: the
+// request line as soon as it's received (before any handler code runs, so
+// a hung/slow handler still shows up as "received" in the log), and the
+// response status/duration once it completes. Only active when DEBUG is
+// set (see slog.SetLogLoggerLevel above) — slog.Debug is a no-op call
+// otherwise, so this has no cost in normal operation.
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		slog.Debug("request received", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Debug("request completed", "method", r.Method, "path", r.URL.Path, "status", sw.status, "duration", time.Since(start))
+	})
+}
+
+// statusWriter captures the status code passed to WriteHeader so
+// logRequests can log it after the handler runs; http.ResponseWriter
+// itself exposes no way to read back what a handler wrote.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
