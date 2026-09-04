@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"xet-lite/internal/manifest"
+	"xet-server/internal/manifest"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {

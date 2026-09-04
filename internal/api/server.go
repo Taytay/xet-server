@@ -15,31 +15,49 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
-	"xet-lite/internal/chunk"
-	"xet-lite/internal/manifest"
-	"xet-lite/internal/store"
+	"xet-server/internal/chunk"
+	"xet-server/internal/manifest"
+	"xet-server/internal/storage"
+	"xet-server/internal/storage/fsstore"
 )
 
 type Server struct {
-	chunks       *store.Store
+	chunks       storage.Store
 	manifestsDir string
 	chunker      *chunk.Chunker
 	mux          *http.ServeMux
+
+	statsMu     sync.Mutex
+	uniqueBytes int64
+	uniqueCount int64
+	filesStored int64
 }
 
+// New creates a Server backed by a local filesystem chunk store rooted at
+// <dataRoot>/chunks. Use NewWithStore to supply a different storage.Store
+// backend (e.g. S3/MinIO).
 func New(dataRoot string) (*Server, error) {
 	chunksDir := filepath.Join(dataRoot, "chunks")
+	cs, err := fsstore.New(chunksDir)
+	if err != nil {
+		return nil, err
+	}
+	return NewWithStore(dataRoot, cs)
+}
+
+// NewWithStore creates a Server whose chunk bytes live in the given
+// storage.Store backend. Manifests always live on the local filesystem
+// under <dataRoot>/manifests, since they're small CAS metadata rather than
+// the bulk data the storage backend abstraction is for.
+func NewWithStore(dataRoot string, chunks storage.Store) (*Server, error) {
 	manifestsDir := filepath.Join(dataRoot, "manifests")
 	if err := os.MkdirAll(manifestsDir, 0o755); err != nil {
 		return nil, err
 	}
-	cs, err := store.New(chunksDir)
-	if err != nil {
-		return nil, err
-	}
 	s := &Server{
-		chunks:       cs,
+		chunks:       chunks,
 		manifestsDir: manifestsDir,
 		chunker:      chunk.NewChunker(chunk.DefaultMinSize, chunk.DefaultAvgSize, chunk.DefaultMaxSize),
 		mux:          http.NewServeMux(),
@@ -71,6 +89,7 @@ type UploadResult struct {
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
+	ctx := r.Context()
 
 	fullHash := sha256.New()
 	var chunks []manifest.ChunkRef
@@ -80,7 +99,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	tee := io.TeeReader(r.Body, fullHash)
 	err := s.chunker.Split(tee, func(c chunk.Chunk) error {
-		written, err := s.chunks.Put(c.Hash, c.Data)
+		written, err := s.chunks.Put(ctx, c.Hash, c.Data)
 		if err != nil {
 			return err
 		}
@@ -104,6 +123,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	s.statsMu.Lock()
+	s.uniqueCount += int64(newChunks)
+	s.uniqueBytes += bytesStored
+	s.filesStored++
+	s.statsMu.Unlock()
 
 	res := UploadResult{
 		FileID:      fileID,
@@ -141,8 +166,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", m.Size))
+	ctx := r.Context()
 	for _, c := range m.Chunks {
-		data, err := s.chunks.Get(c.Hash)
+		data, err := s.chunks.Get(ctx, c.Hash)
 		if err != nil {
 			http.Error(w, "missing chunk "+c.Hash, http.StatusInternalServerError)
 			return
@@ -165,21 +191,14 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	var chunkCount int
-	var chunkBytes int64
-	filepath.Walk(s.chunks.Root, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && !strings.Contains(info.Name(), ".tmp-") {
-			chunkCount++
-			chunkBytes += info.Size()
-		}
-		return nil
-	})
-	manifestFiles, _ := filepath.Glob(filepath.Join(s.manifestsDir, "*.json"))
+	s.statsMu.Lock()
+	chunkCount, chunkBytes, filesStored := s.uniqueCount, s.uniqueBytes, s.filesStored
+	s.statsMu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"unique_chunks":      chunkCount,
 		"unique_chunk_bytes": chunkBytes,
-		"files_stored":       len(manifestFiles),
+		"files_stored":       filesStored,
 	})
 }

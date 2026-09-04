@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# xet-lite Integration Test Runner
+# xet-server Integration Test Runner
 # =============================================================================
 # Starts a single xetd instance against a scratch data directory, then runs
 # every *.sh script in integration-tests/ (or a single script if given) as an
@@ -54,7 +54,7 @@ logTest()  { echo -e "${BLUE}TEST:${NC} $1"; }
 
 # ---- server lifecycle -------------------------------------------------------
 
-RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xet-lite-it.XXXXXX")"
+RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xet-server-it.XXXXXX")"
 SERVER_DATA="$RUN_ROOT/server-data"
 SERVER_LOG="$RUN_ROOT/xetd.log"
 SERVER_PORT="${XETD_PORT:-18420}"

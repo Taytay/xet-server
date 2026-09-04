@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"xet-lite/internal/client"
+	"xet-server/internal/client"
 )
 
 func main() {

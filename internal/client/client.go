@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"os"
 
-	"xet-lite/internal/manifest"
+	"xet-server/internal/manifest"
 )
 
 type Client struct {

@@ -9,7 +9,7 @@ import (
 	"log"
 	"net/http"
 
-	"xet-lite/internal/api"
+	"xet-server/internal/api"
 )
 
 func main() {
