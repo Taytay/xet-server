@@ -1,4 +1,4 @@
-.PHONY: help format build test tests clean integration-test integration-tests run all
+.PHONY: help format build test tests clean integration-test integration-tests integration-test-hf-cli run all
 
 # Default target
 help: ## Show this help message
@@ -21,6 +21,9 @@ integration-tests: integration-test
 
 integration-test: build ## Run integration tests (usage: make integration-test TEST=integration-tests/push_pull_roundtrip.sh)
 	./integrationTests.sh ./bin/xetd ./bin/xet $(if $(TEST),$(TEST),integration-tests)
+
+integration-test-hf-cli: build ## Run the real `hf` CLI upload/download round-trip (usage: make integration-test-hf-cli HF_VENV=.venv-hf)
+	./integrationTestHfCli.sh $(if $(HF_VENV),$(HF_VENV),.venv-hf) ./bin/xetd
 
 run: build ## Run xetd locally on :8420 with data in ./xet-data
 	./bin/xetd -addr :8420 -data ./xet-data

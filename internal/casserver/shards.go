@@ -2,6 +2,7 @@ package casserver
 
 import (
 	"bytes"
+	"encoding/hex"
 	"io"
 	"net/http"
 
@@ -29,6 +30,15 @@ func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	for _, f := range shard.Files {
 		s.fileRecon[f.Header.FileHash] = f.Entries
+		if f.MetadataExt != nil {
+			// FileMetadataExt.SHA256 is a plain SHA-256, not a Xet/Merkle
+			// hash, even though it's stored in the wire-compatible 32-byte
+			// merklehash.Hash type — encode via its raw bytes, not Hex()
+			// (which applies Xet's word-reversal transform and would not
+			// match the plain lowercase hex huggingface_hub sends as the
+			// commit payload's lfsFile.oid).
+			s.sha256ToXet[hex.EncodeToString(f.MetadataExt.SHA256.Bytes())] = f.Header.FileHash
+		}
 	}
 	s.mu.Unlock()
 
