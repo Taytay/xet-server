@@ -84,6 +84,77 @@ func ReadFileDataSequenceHeader(r io.Reader) (FileDataSequenceHeader, error) {
 	return h, nil
 }
 
+// FileVerificationEntry mirrors file_structs.rs's FileVerificationEntry:
+// one range-hash per file segment, present only when
+// FileDataSequenceHeader.ContainsVerification() is true (real hf_xet
+// clients always set this flag).
+type FileVerificationEntry struct {
+	RangeHash merklehash.Hash
+	// _unused [u64;2] omitted; always zero on write, ignored on read.
+}
+
+func WriteFileVerificationEntry(w io.Writer, e FileVerificationEntry) error {
+	if _, err := w.Write(e.RangeHash.Bytes()); err != nil {
+		return err
+	}
+	return writeU64s(w, 0, 0)
+}
+
+func ReadFileVerificationEntry(r io.Reader) (FileVerificationEntry, error) {
+	var e FileVerificationEntry
+	b, err := readN(r, 32)
+	if err != nil {
+		return e, err
+	}
+	if e.RangeHash, err = merklehash.FromRawBytes(b); err != nil {
+		return e, err
+	}
+	if _, err := readN(r, 16); err != nil { // _unused
+		return e, err
+	}
+	return e, nil
+}
+
+// FileMetadataExt mirrors file_structs.rs's FileMetadataExt: a file's plain
+// SHA-256 (distinct from its Xet/Merkle hash), present only when
+// FileDataSequenceHeader.ContainsMetadataExt() is true (real hf_xet
+// clients always set this flag).
+type FileMetadataExt struct {
+	SHA256 merklehash.Hash // reuses the 32-byte Hash type; not a Merkle hash here, just storage
+	// _unused [u64;2] omitted; always zero on write, ignored on read.
+}
+
+func WriteFileMetadataExt(w io.Writer, e FileMetadataExt) error {
+	if _, err := w.Write(e.SHA256.Bytes()); err != nil {
+		return err
+	}
+	return writeU64s(w, 0, 0)
+}
+
+func ReadFileMetadataExt(r io.Reader) (FileMetadataExt, error) {
+	var e FileMetadataExt
+	b, err := readN(r, 32)
+	if err != nil {
+		return e, err
+	}
+	if e.SHA256, err = merklehash.FromRawBytes(b); err != nil {
+		return e, err
+	}
+	if _, err := readN(r, 16); err != nil { // _unused
+		return e, err
+	}
+	return e, nil
+}
+
+func writeU64s(w io.Writer, vs ...uint64) error {
+	for _, v := range vs {
+		if err := writeU64(w, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // FileDataSequenceEntry mirrors file_structs.rs's FileDataSequenceEntry:
 // one xorb chunk-range reference within a file's reconstruction sequence.
 type FileDataSequenceEntry struct {

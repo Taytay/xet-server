@@ -2,6 +2,7 @@ package shardformat
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
 	"xet-server/internal/merklehash"
@@ -175,5 +176,58 @@ func TestFooterSize_ConstantMatchesActualWrite(t *testing.T) {
 	}
 	if buf.Len() != footerSize {
 		t.Errorf("WriteFooter() wrote %d bytes, footerSize constant = %d", buf.Len(), footerSize)
+	}
+}
+
+// TestReadShard_RealHFXetCapture parses an actual shard upload captured
+// from a live hf_xet client session. This is what surfaced the bug this
+// package's verification/metadata_ext support fixes: real clients always
+// set MDB_FILE_FLAG_WITH_VERIFICATION and MDB_FILE_FLAG_WITH_METADATA_EXT,
+// and a reader that ignores those flags misparses every byte after the
+// first file header.
+func TestReadShard_RealHFXetCapture(t *testing.T) {
+	f, err := os.Open("testdata/real_upload_shard.bin")
+	if err != nil {
+		t.Fatalf("open testdata error = %v", err)
+	}
+	defer f.Close()
+
+	shard, err := ReadShard(f)
+	if err != nil {
+		t.Fatalf("ReadShard() error = %v", err)
+	}
+
+	if len(shard.Files) != 1 {
+		t.Fatalf("parsed %d files, want 1", len(shard.Files))
+	}
+	file := shard.Files[0]
+	if !file.Header.ContainsVerification() {
+		t.Error("real capture's file header does not have the verification flag set (test fixture assumption wrong?)")
+	}
+	if !file.Header.ContainsMetadataExt() {
+		t.Error("real capture's file header does not have the metadata_ext flag set (test fixture assumption wrong?)")
+	}
+	if len(file.Verification) != len(file.Entries) {
+		t.Errorf("got %d verification entries, want %d (one per FileDataSequenceEntry)", len(file.Verification), len(file.Entries))
+	}
+	if file.MetadataExt == nil {
+		t.Fatal("MetadataExt = nil, want a parsed FileMetadataExt")
+	}
+
+	if len(file.Entries) != 1 {
+		t.Fatalf("got %d FileDataSequenceEntry, want 1", len(file.Entries))
+	}
+	if file.Entries[0].UnpackedSegmentBytes != 500000 {
+		t.Errorf("UnpackedSegmentBytes = %d, want 500000 (the uploaded file's actual size)", file.Entries[0].UnpackedSegmentBytes)
+	}
+	if file.Entries[0].ChunkIndexEnd != 9 {
+		t.Errorf("ChunkIndexEnd = %d, want 9 (matches the paired real xorb capture's chunk count)", file.Entries[0].ChunkIndexEnd)
+	}
+
+	if len(shard.Xorbs) != 1 {
+		t.Fatalf("parsed %d xorbs, want 1", len(shard.Xorbs))
+	}
+	if len(shard.Xorbs[0].Chunks) != 9 {
+		t.Errorf("xorb has %d chunks, want 9", len(shard.Xorbs[0].Chunks))
 	}
 }

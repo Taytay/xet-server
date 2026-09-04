@@ -7,12 +7,16 @@ import (
 )
 
 // FileEntry is one file's reconstruction sequence: a header plus its
-// ordered xorb-chunk-range references, mirroring xet-core's MDBFileInfo
-// (verification entries and metadata_ext are not modeled — this server
-// never emits or requires them).
+// ordered xorb-chunk-range references, plus optional per-segment
+// verification entries and a metadata_ext (whole-file SHA-256), gated by
+// the corresponding flag bits on Header.FileFlags. Real hf_xet clients
+// always set both flags, so a reader that ignores them misparses every
+// subsequent byte in the file-info section.
 type FileEntry struct {
-	Header  FileDataSequenceHeader
-	Entries []FileDataSequenceEntry
+	Header       FileDataSequenceHeader
+	Entries      []FileDataSequenceEntry
+	Verification []FileVerificationEntry // present iff Header.ContainsVerification()
+	MetadataExt  *FileMetadataExt        // present iff Header.ContainsMetadataExt()
 }
 
 // XorbEntry is one xorb's chunk list within the xorb-info section,
@@ -52,7 +56,15 @@ func WriteShard(w io.Writer, files []FileEntry, xorbs []XorbEntry) (Footer, erro
 	var fileIndex uint32
 	for _, f := range files {
 		fileLookup = append(fileLookup, FileLookupEntry{Key: f.Header.FileHash.TruncateHash(), Index: fileIndex})
-		if err := WriteFileDataSequenceHeader(cw, f.Header); err != nil {
+
+		header := f.Header
+		if len(f.Verification) > 0 {
+			header.FileFlags |= fileFlagVerification
+		}
+		if f.MetadataExt != nil {
+			header.FileFlags |= fileFlagMetadataExt
+		}
+		if err := WriteFileDataSequenceHeader(cw, header); err != nil {
 			return Footer{}, err
 		}
 		for _, e := range f.Entries {
@@ -60,7 +72,22 @@ func WriteShard(w io.Writer, files []FileEntry, xorbs []XorbEntry) (Footer, erro
 				return Footer{}, err
 			}
 		}
-		fileIndex += 1 + uint32(len(f.Entries))
+		numInfoEntries := uint32(len(f.Entries))
+		if len(f.Verification) > 0 {
+			for _, v := range f.Verification {
+				if err := WriteFileVerificationEntry(cw, v); err != nil {
+					return Footer{}, err
+				}
+			}
+			numInfoEntries += uint32(len(f.Verification))
+		}
+		if f.MetadataExt != nil {
+			if err := WriteFileMetadataExt(cw, *f.MetadataExt); err != nil {
+				return Footer{}, err
+			}
+			numInfoEntries++
+		}
+		fileIndex += 1 + numInfoEntries
 	}
 	if err := WriteFileDataSequenceHeader(cw, BookendFileHeader()); err != nil {
 		return Footer{}, err
@@ -119,8 +146,15 @@ func WriteShard(w io.Writer, files []FileEntry, xorbs []XorbEntry) (Footer, erro
 }
 
 // ReadShard parses a complete shard file from r, which must support
-// seeking (the footer is read from the end first, then used to locate
-// everything else).
+// seeking. Real hf_xet clients upload a shard with its footer stripped —
+// header.FooterSize reads as 0, and the byte stream ends right after the
+// xorb-info section's bookend header (see
+// read_shard_to_bytes_remove_footer in xet-core's
+// shard_interface/native.rs) — so this reads the two content sections
+// sequentially to EOF in that case, deriving the footer's offsets/counts
+// itself rather than trusting a footer that was never sent. If
+// header.FooterSize is nonzero (e.g. a shard this package wrote via
+// WriteShard), the footer is read from its normal location at EOF instead.
 func ReadShard(r io.ReadSeeker) (*Shard, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -130,6 +164,38 @@ func ReadShard(r io.ReadSeeker) (*Shard, error) {
 		return nil, err
 	}
 
+	if header.FooterSize == 0 {
+		return readShardWithoutFooter(r, header)
+	}
+	return readShardWithFooter(r, header)
+}
+
+// readShardWithoutFooter reads the file-info and xorb-info content
+// sections sequentially from r's current position (immediately after the
+// header) through to EOF, with no footer or lookup tables present on the
+// wire.
+func readShardWithoutFooter(r io.ReadSeeker, header Header) (*Shard, error) {
+	s := &Shard{Header: header}
+
+	files, err := readFileInfoSection(r)
+	if err != nil {
+		return nil, err
+	}
+	s.Files = files
+
+	xorbs, err := readXorbInfoSection(r)
+	if err != nil {
+		return nil, err
+	}
+	s.Xorbs = xorbs
+
+	return s, nil
+}
+
+// readShardWithFooter reads a shard that carries a real footer (offsets
+// for both content sections plus the three lookup tables), as produced by
+// this package's own WriteShard.
+func readShardWithFooter(r io.ReadSeeker, header Header) (*Shard, error) {
 	if _, err := r.Seek(-int64(footerSize), io.SeekEnd); err != nil {
 		return nil, err
 	}
@@ -143,13 +209,35 @@ func ReadShard(r io.ReadSeeker) (*Shard, error) {
 	if _, err := r.Seek(int64(footer.FileInfoOffset), io.SeekStart); err != nil {
 		return nil, err
 	}
+	files, err := readFileInfoSection(r)
+	if err != nil {
+		return nil, err
+	}
+	s.Files = files
+
+	if _, err := r.Seek(int64(footer.XorbInfoOffset), io.SeekStart); err != nil {
+		return nil, err
+	}
+	xorbs, err := readXorbInfoSection(r)
+	if err != nil {
+		return nil, err
+	}
+	s.Xorbs = xorbs
+
+	return s, nil
+}
+
+// readFileInfoSection reads FileDataSequenceHeader+entries records from r's
+// current position until the bookend header, per file.
+func readFileInfoSection(r io.Reader) ([]FileEntry, error) {
+	var files []FileEntry
 	for {
 		fh, err := ReadFileDataSequenceHeader(r)
 		if err != nil {
 			return nil, err
 		}
 		if fh.IsBookend() {
-			break
+			return files, nil
 		}
 		entries := make([]FileDataSequenceEntry, fh.NumEntries)
 		for i := range entries {
@@ -159,19 +247,42 @@ func ReadShard(r io.ReadSeeker) (*Shard, error) {
 			}
 			entries[i] = e
 		}
-		s.Files = append(s.Files, FileEntry{Header: fh, Entries: entries})
-	}
 
-	if _, err := r.Seek(int64(footer.XorbInfoOffset), io.SeekStart); err != nil {
-		return nil, err
+		fe := FileEntry{Header: fh, Entries: entries}
+		if fh.ContainsVerification() {
+			verification := make([]FileVerificationEntry, fh.NumEntries)
+			for i := range verification {
+				v, err := ReadFileVerificationEntry(r)
+				if err != nil {
+					return nil, err
+				}
+				verification[i] = v
+			}
+			fe.Verification = verification
+		}
+		if fh.ContainsMetadataExt() {
+			ext, err := ReadFileMetadataExt(r)
+			if err != nil {
+				return nil, err
+			}
+			fe.MetadataExt = &ext
+		}
+
+		files = append(files, fe)
 	}
+}
+
+// readXorbInfoSection reads XorbChunkSequenceHeader+entries records from
+// r's current position until the bookend header, per xorb.
+func readXorbInfoSection(r io.Reader) ([]XorbEntry, error) {
+	var xorbs []XorbEntry
 	for {
 		xh, err := ReadXorbChunkSequenceHeader(r)
 		if err != nil {
 			return nil, err
 		}
 		if xh.IsBookend() {
-			break
+			return xorbs, nil
 		}
 		chunks := make([]XorbChunkSequenceEntry, xh.NumEntries)
 		for i := range chunks {
@@ -181,10 +292,8 @@ func ReadShard(r io.ReadSeeker) (*Shard, error) {
 			}
 			chunks[i] = c
 		}
-		s.Xorbs = append(s.Xorbs, XorbEntry{Header: xh, Chunks: chunks})
+		xorbs = append(xorbs, XorbEntry{Header: xh, Chunks: chunks})
 	}
-
-	return s, nil
 }
 
 // FindFile returns the FileEntry for fileHash, or false if not present.
