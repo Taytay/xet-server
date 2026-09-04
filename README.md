@@ -1,232 +1,303 @@
 # Xet Server
 
-A simplified, local re-implementation of the core idea behind Hugging Face's
-[Xet storage](https://huggingface.co/docs/hub/en/xet/index): instead of
-storing whole files (as Git LFS does), files are split into
-**content-defined chunks**, each chunk is stored once by content hash, and a
-per-file **manifest** records which chunks (in which order) reconstruct the
-original bytes. Re-uploading a file that shares most of its content with one
-already stored — e.g. a fine-tuned or pruned/sparse checkpoint — only needs
-to store the *new* chunks.
+A Go server that is **wire-compatible** with Hugging Face's real [Xet
+storage protocol](https://huggingface.co/docs/hub/en/xet/index) — the
+content-defined-chunking, dedup-first storage layer that replaces Git LFS
+for large model files on the Hub. Point the real `hf` CLI
+(`huggingface_hub` + `hf_xet`) at this server and it works: `hf upload`,
+`hf download`, byte-identical round-trips, real BLAKE3 hashing, real
+xorb/shard binary formats, real LZ4/byte-grouping compression.
 
-This is not protocol-compatible with real Xet (no CAS/xorb/shard wire
-format), but it captures the same mechanism: **content-defined chunking +
-hash-based dedup + manifest-based reconstruction**, running entirely on your
-machine with a small Go server and CLI.
+This started as a simplified, non-wire-compatible chunking/dedup demo
+(kept in `internal/chunk`, `internal/manifest`, `internal/api`, `cmd/xet`
+for quick manual testing) and grew into a from-scratch, spec-driven
+reimplementation of the actual protocol — verified end-to-end against a
+live `hf_xet` client, with several real wire-format quirks discovered only
+by capturing and replaying genuine client traffic. See
+[docs/PROTOCOL.md](docs/PROTOCOL.md) for that story.
 
-## Features
+---
 
-- **Content-Defined Chunking**: Gear-hash rolling-hash chunker cuts chunk
-  boundaries based on local content, not fixed offsets — an edit in the
-  middle of a file only changes the chunk(s) around that edit
-- **Content-Addressed Dedup**: Chunks are stored once by SHA-256; uploading
-  a near-duplicate file only writes the chunks that don't already exist
-- **Manifest-Based Reconstruction**: Each uploaded file gets a JSON manifest
-  (ordered chunk refs) used to stream the exact original bytes back on
-  download
-- **HTTP API**: Simple `POST /upload` / `GET /files/{id}` / `GET
-  /files/{id}/manifest` / `GET /stats` surface, easy to script or curl
-- **CLI Client**: `xet push` / `xet pull` / `xet stats` for everyday use
-- **Zero External Dependencies**: Pure Go standard library — no modules to
-  fetch, no network access required to build
-- **Comprehensive Testing**: Unit tests across all packages plus end-to-end
-  integration tests that exercise a live server (push/pull round-trip,
-  dedup behavior, error paths)
+# Table of Contents
 
-## Architecture
+- [Features](#features)
+- [Architecture](#architecture)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Run the wire-compatible server](#run-the-wire-compatible-server)
+  - [Point the real `hf` CLI at it](#point-the-real-hf-cli-at-it)
+  - [Simple demo API + CLI](#simple-demo-api--cli)
+- [HTTP API](#http-api)
+- [Storage backends](#storage-backends)
+- [Testing](#testing)
+- [Documentation](#documentation)
+- [Where this diverges from real Xet](#where-this-diverges-from-real-xet)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+- [Contributing](#contributing)
+- [Related Projects](#related-projects)
 
-- `internal/chunk` — gear-hash rolling-hash chunker (~64 KiB average chunk
-  size, bounded to [4 KiB, 256 KiB])
-- `internal/store` — content-addressed filesystem store for chunk blobs
-  (`<data-dir>/chunks/<hash prefix>/<hash>`)
-- `internal/manifest` — per-file JSON manifest: full-file SHA-256, size, and
-  ordered `{hash, offset, length}` chunk references
-- `internal/api` + `cmd/xetd` — HTTP server exposing upload/download/stats
-- `internal/client` + `cmd/xet` — CLI that talks to `xetd`
+---
 
-## Installation
+# Features
 
-### Prerequisites
+- **Wire-compatible CAS HTTP API** (`internal/casserver`): xorb
+  upload/fetch, shard upload, file reconstruction with Range-based paging,
+  matching xet-core's own `openapi/cas.openapi.yaml` — verified
+  byte-identical against a real `hf_xet` client, for both compressible and
+  incompressible content.
+- **Hub API shim** (`internal/hubserver`): enough of huggingface.co's Hub
+  REST API (repo create, preupload, `xet-{read,write}-token`, commit,
+  resolve/HEAD) that the real `hf upload`/`hf download` shell commands work
+  against this server via `HF_ENDPOINT`.
+- **Real BLAKE3-keyed Merkle hashing** (`internal/merklehash`): a
+  byte-for-byte port of xet-core's `DataHash`, verified against xet-core's
+  own published reference vectors — not an approximation.
+- **Real xorb and shard binary formats** (`internal/xorbformat`,
+  `internal/shardformat`), each verified against real bytes captured from
+  a live `hf_xet` upload, including the footer-less upload behavior real
+  clients actually use (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
+- **From-scratch LZ4 decoder and ByteGrouping4 codec** (`internal/lz4`,
+  `internal/bg4`): written directly from the public LZ4 spec / verified
+  against a third-party reference implementation, so chunk hashes can be
+  independently re-verified regardless of compression scheme.
+- **Pluggable storage** (`internal/storage`): a `Store` interface with
+  filesystem (`fsstore`) and S3-compatible (`s3store`) backends — the S3
+  backend uses a from-scratch AWS SigV4 signer (`internal/sigv4`), no AWS
+  SDK dependency.
+- **Zero required external dependencies to build the demo path**; the
+  protocol path adds exactly one pure-Go module
+  (`github.com/zeebo/blake3`), pinned in `go.sum`.
+- **Real-client regression fixtures**: several packages carry
+  `testdata/` captured directly from a live `hf_xet` session, replayed in
+  unit tests — the strongest guard against silently regressing wire
+  compatibility.
+
+# Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system
+diagram (upload/download sequence diagrams, package responsibility table,
+and the key design decisions). Short version:
+
+- `cmd/xetd` runs the CAS server, and — with `-hub-addr` — the Hub API shim
+  as a second HTTP listener, matching how huggingface.co's real Hub and
+  CAS are actually separate services.
+- `cmd/xet` is a small CLI for the original simple demo API only (not the
+  wire-compatible protocol — use the real `hf` CLI for that).
+
+# Installation
+
+## Prerequisites
 
 - Go 1.21 or later
 - GNU Make
 - Bash (for integration tests)
+- (Optional, for the real `hf` CLI round-trip test) Python 3 with
+  `huggingface_hub` + `hf_xet` installed in a venv
 
-### Build
+## Build
 
 ```bash
-make build
+make pre-check   # verify Go/bash are present
+make build       # -> bin/xetd, bin/xet
 ```
 
-This produces `bin/xetd` (server) and `bin/xet` (CLI). No external Go
-modules are required.
+# Usage
 
-## Usage
-
-### Run the server
+## Run the wire-compatible server
 
 ```bash
-make run
-# or directly:
+# CAS server only, on :8420
 ./bin/xetd -addr :8420 -data ./xet-data
+
+# CAS server + Hub API shim (needed for the real hf CLI), on :8420 / :8421
+./bin/xetd -addr :8420 -hub-addr :8421 -data ./xet-data
 ```
 
-`./xet-data/chunks/` holds deduplicated chunk blobs; `./xet-data/manifests/`
-holds one JSON manifest per uploaded file.
-
-### Use the CLI
+## Point the real `hf` CLI at it
 
 ```bash
-# upload (chunks + dedups against everything already stored)
+export HF_ENDPOINT="http://localhost:8421"   # the Hub shim's address
+export HF_TOKEN="anything"                    # auth isn't enforced
+
+hf upload myuser/my-model ./model.safetensors model.safetensors
+hf download myuser/my-model model.safetensors --local-dir ./downloaded
+cmp ./model.safetensors ./downloaded/model.safetensors   # byte-identical
+```
+
+You can also drive `hf_xet`'s low-level `XetSession` Python API directly
+against the CAS server's own address (`:8420` above) with no Hub API
+involved at all — useful for isolating whether an issue is in the CAS
+protocol or the Hub shim.
+
+## Simple demo API + CLI
+
+The original, non-wire-compatible gear-hash-CDC + JSON-manifest demo is
+still available for quick manual testing, mounted on the same `xetd`
+process at `/upload`, `/files`, `/stats`:
+
+```bash
 ./bin/xet push /path/to/model.safetensors
 # -> file_id:  2d53223aa33715f0eff757537ed9cf8f
-#    size:     2000000 bytes
 #    chunks:   28 total, 28 new
 #    stored:   2000000 bytes (0.0% deduplicated)
 
-# upload a near-duplicate (e.g. a fine-tuned checkpoint sharing most weights)
-./bin/xet push /path/to/model-v2.safetensors
+./bin/xet push /path/to/model-v2.safetensors   # a near-duplicate checkpoint
 # -> chunks:   30 total, 4 new
 #    stored:   436017 bytes (81.0% deduplicated)
 
-# download by file_id, verify round-trip
 ./bin/xet pull -out ./restored.safetensors 2d53223aa33715f0eff757537ed9cf8f
-cmp /path/to/model.safetensors ./restored.safetensors   # no output = identical
-
-# see store-wide dedup stats
 ./bin/xet stats
 ```
 
-All commands take `-server http://host:port` (defaults to
-`http://localhost:8420`).
+# HTTP API
 
-## HTTP API
+## CAS protocol (wire-compatible, mounted at `/v1`, `/v2`)
 
-- `POST /upload?name=<optional>` — body is the raw file; response is JSON
-  with `file_id`, chunk counts, and dedup percentage.
-- `GET /files/{id}` — streams the reconstructed file.
-- `GET /files/{id}/manifest` — returns the manifest JSON.
-- `GET /stats` — store-wide unique chunk count/bytes and file count.
+- `POST /v1/xorbs/{prefix}/{hash}` — upload a serialized xorb (chunk
+  headers + payloads, no footer — see PROTOCOL.md)
+- `GET /v1/xorbs/{prefix}/{hash}` — fetch raw (possibly compressed) xorb
+  bytes, honors `Range`
+- `POST /v1/shards` — upload a serialized shard (file/xorb info sections,
+  no footer)
+- `GET /v1/reconstructions/{file_id}` — file → xorb/chunk-range map,
+  honors `Range`, returns `416` at EOF
+- `GET /v1/chunks/{prefix}/{hash}` — global chunk-dedup lookup (always
+  `404`: no global dedup index is maintained)
+- `GET /v2/reconstructions/{file_id}` — always `501` (signals clients to
+  fall back to V1)
+- `POST /v1/telemetry` — no-op ack
 
-### Manual testing with curl
+## Hub API shim (mounted on a separate port via `-hub-addr`)
 
-```bash
-curl -s -X POST --data-binary @model.safetensors "http://localhost:8420/upload?name=model.safetensors"
-curl -s -o restored.safetensors "http://localhost:8420/files/<file_id>"
-curl -s "http://localhost:8420/files/<file_id>/manifest" | jq .
-curl -s "http://localhost:8420/stats" | jq .
-```
+- `POST /api/repos/create`
+- `POST /api/{repo_type}s/{repo_id}/preupload/{revision}`
+- `GET /api/{repo_type}s/{repo_id}/xet-{read,write}-token/{revision}`
+- `POST /api/{repo_type}s/{repo_id}/commit/{revision}`
+- `HEAD`/`GET /{repo_id}/resolve/{revision}/{filename}`
 
-## Testing
+## Simple demo API (mounted at `/`)
 
-### Unit Tests
+- `POST /upload?name=<optional>` — chunks + dedups the uploaded file
+- `GET /files/{id}` / `GET /files/{id}/manifest` / `GET /stats`
 
-```bash
-make test
-```
+# Storage backends
 
-Covers the chunker (determinism, boundary sizing, local-edit isolation), the
-content-addressed store (dedup, sharded layout), the manifest (save/load
-round-trip), and the HTTP API (upload/download round-trip, dedup across
-uploads, error paths like unknown file IDs and path traversal attempts).
+`internal/storage.Store` is the abstraction both `casserver` and the demo
+API store chunk/xorb bytes through:
 
-### Integration Tests
+- **`fsstore`** — content-addressed filesystem directory (the default)
+- **`s3store`** — any S3-compatible endpoint (AWS S3, MinIO), signed with
+  the from-scratch `internal/sigv4` signer. Set `XET_S3STORE_LIVE_TEST=1`
+  plus `XET_TEST_S3_*` env vars to run its tests against a real MinIO
+  instance.
 
-```bash
-# Run all integration tests
-make integration-test
-
-# Run a single test script
-make integration-test TEST=integration-tests/dedup_near_duplicate.sh
-```
-
-Each integration test is a standalone bash script under `integration-tests/`
-run against a live `xetd` instance (started and torn down automatically by
-`integrationTests.sh`). Tests cover:
-
-- `push_pull_roundtrip.sh` — upload then download reproduces the original
-  file exactly
-- `dedup_near_duplicate.sh` — a near-duplicate upload dedups most chunks
-  against a prior upload, and both versions still restore correctly
-- `identical_reupload.sh` — re-uploading identical content reuses the same
-  `file_id` with zero new chunks
-- `pull_unknown_id_fails.sh` — pulling a nonexistent file ID fails cleanly
-- `stats_reflect_uploads.sh` — `/stats` accounts for new uploads
-
-## Examples
-
-### Verify dedup on a modified model checkpoint
+# Testing
 
 ```bash
-./bin/xet push checkpoint-epoch1.safetensors
-./bin/xet push checkpoint-epoch2.safetensors   # shares most weights with epoch1
-./bin/xet stats                                 # unique_chunk_bytes << sum of both file sizes
+make test               # unit tests, all packages
+make integration-test   # bash integration suite against a live server
 ```
 
-### Fetch just the manifest to inspect chunking
+`integrationTests.sh` starts one `xetd` instance (CAS + Hub shim) and runs
+every script in `integration-tests/`, with a per-test timeout so a hang
+doesn't block the suite. `integration-tests/hf_cli_roundtrip.sh` drives the
+**real, unmodified `hf` CLI** through a full upload+download round-trip —
+the strongest compatibility check available — and skips cleanly (not a
+failure) if `huggingface_hub`/`hf_xet` aren't installed:
 
 ```bash
-curl -s "http://localhost:8420/files/<file_id>/manifest" | jq '.chunks | length'
+python3 -m venv .venv-hf
+.venv-hf/bin/pip install huggingface_hub hf_xet
+make integration-test   # now includes hf_cli_roundtrip.sh
 ```
 
-## Development
+See [CONTRIBUTING.md](CONTRIBUTING.md#2-running-tests) for the full test
+layer breakdown, including why several packages carry real-client
+`testdata/` fixtures.
 
-### Code Formatting
+# Documentation
+
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system diagram,
+  upload/download sequence diagrams, package responsibility table, design
+  decisions
+- **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — wire-compatibility deep dive:
+  every place the real client's behavior diverges from the documented spec,
+  how each was discovered, and why the fix is correct
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev setup, test layers, doc-comment
+  conventions, branching/PR conventions
+- **[CHANGELOG.md](CHANGELOG.md)** — release history
+
+Package-level godoc comments are the source of truth for implementation
+details not covered above:
+
 ```bash
-make format
+go doc ./internal/merklehash
+go doc ./internal/casserver
 ```
 
-### Clean Build
-```bash
-make clean
-make build
-```
+# Where this diverges from real Xet
 
-### All Checks
-```bash
-make all
-```
+- No revisions/branches in the Hub shim — every repo has one implicit
+  `main`.
+- No auth enforcement — any bearer token is accepted.
+- `GET /v2/reconstructions` always signals fall-back to V1 rather than
+  implementing the multi-range-optimized V2 response shape.
+- No global chunk-dedup index (`GET /v1/chunks/...` is always `404`).
+- Single-node, in-memory reconstruction/repo indices — bulk chunk data
+  persists in the storage backend, but the file→chunk mapping does not
+  survive a restart.
 
-Runs formatting, build, unit tests, and integration tests in sequence.
+# Troubleshooting
 
-## Where this diverges from real Xet
-
-- No merkle/shard aggregation — manifests list raw chunk refs directly.
-- No range-request/partial-file support on download.
-- No compression of chunks at rest.
-- Single-node, no auth — this is for local experimentation only.
-
-## Troubleshooting
+### `hf upload`/`hf download` hangs or times out
+If you're in a sandboxed/corporate network that proxies all outbound
+traffic (including `localhost`), `hf_xet`'s Rust HTTP client may not
+consistently honor `NO_PROXY`/`no_proxy` for localhost, and the upload call
+hangs. This is an environment limitation, not a xetd bug — the identical
+upload/download flow works when driven directly against the CAS server via
+`hf_xet`'s low-level Python API. Try setting
+`NO_PROXY=localhost,127.0.0.1` / `no_proxy=localhost,127.0.0.1`, or run
+outside the proxied environment. `integration-tests/hf_cli_roundtrip.sh`
+enforces a timeout so this fails visibly instead of hanging the test suite.
 
 ### Integration tests fail to start the server
-The test runner picks port `18420` by default to avoid colliding with a
-`make run` instance on `8420`. Override with `XETD_PORT=<port> make
-integration-test` if that port is also taken.
+The runner picks ports `18420`/`18421` by default to avoid colliding with a
+`make run`-style instance on `8420`/`8421`. Override with
+`XETD_PORT=<port> XETD_HUB_PORT=<port> make integration-test` if those are
+also taken.
 
 ### `make integration-test` reports "Operation not permitted" creating temp files
 The runner uses `$TMPDIR` (or `/tmp` if unset) for all scratch state. Make
 sure your environment allows writes there.
 
-### Chunk counts differ between two very similar files more than expected
-The chunker targets an average chunk size of 64 KiB; edits smaller than that
-still land inside one chunk boundary, and byte-level insertions can shift
-downstream boundaries until the rolling hash resynchronizes. This is
-expected content-defined-chunking behavior, not a bug — dedup improves with
-larger files and edits that don't disturb chunk boundaries.
+### Chunk counts differ between two very similar files more than expected (demo API only)
+The demo API's chunker targets an average chunk size of 64 KiB; edits
+smaller than that still land inside one chunk boundary, and byte-level
+insertions can shift downstream boundaries until the rolling hash
+resynchronizes. Expected content-defined-chunking behavior, not a bug.
 
-## License
+# License
 
-MIT License - See [LICENSE](LICENSE.md) for details.
+MIT License — see [LICENSE.md](LICENSE.md) for details.
 
-## Contributing
+# Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass (`make all`)
-5. Submit a pull request
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. Short version:
 
-## Related Projects
+1. Fork the repository, branch from `main`
+2. `make all` before opening a PR (format, vet, build, unit tests,
+   integration tests)
+3. PR titles follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+4. If you touch protocol/wire-format behavior, read
+   [docs/PROTOCOL.md](docs/PROTOCOL.md) first
+
+# Related Projects
 
 - [Hugging Face Xet](https://huggingface.co/docs/hub/en/xet/index)
+- [xet-core](https://github.com/huggingface/xet-core) (the real Rust
+  implementation this project is wire-compatible with)
+- [zig-xet](https://github.com/jedisct1/zig-xet) (an independent
+  third-party reference implementation, used to verify the ByteGrouping4
+  codec)
 - [Git LFS](https://git-lfs.com/)

@@ -1,0 +1,109 @@
+name: Bug Report
+description: Report a bug in xetd, the xet CLI, or the wire protocol implementation
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to fill out this bug report! Please provide as much detail as possible.
+
+  - type: markdown
+    attributes:
+      value: "### Environment"
+
+  - type: input
+    id: go-version
+    attributes:
+      label: "Go version"
+      description: "Output of `go version`"
+      placeholder: "e.g., go1.27.1 darwin/arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: "Which component?"
+      options:
+        - "casserver (CAS HTTP API)"
+        - "hubserver (Hub API shim)"
+        - "merklehash / xorbformat / shardformat (wire format)"
+        - "lz4 / bg4 (compression codecs)"
+        - "storage (fsstore / s3store)"
+        - "sigv4 (S3 request signing)"
+        - "cmd/xetd or cmd/xet"
+        - "Other / not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: "How did you connect?"
+      description: "Which client hit the bug?"
+      options:
+        - "This project's own xet CLI"
+        - "Real hf CLI / huggingface_hub / hf_xet"
+        - "Direct HTTP (curl, custom script)"
+        - "Not applicable"
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: "---"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A summary of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Exact commands, including how the server was started (flags, data dir).
+      placeholder: |
+        1. ./bin/xetd -addr :8420 -data ./xet-data
+        2. ./bin/xet push some-file.bin
+        3. ...
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server logs / error output
+      description: xetd logs errors via the standard `log` package to stderr; paste the relevant lines.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: capture
+    attributes:
+      label: Captured wire bytes (if a protocol/wire-format bug)
+      description: >
+        If this looks like a wire-compatibility issue (a real client's request gets rejected or misparsed),
+        a captured raw request body is the single most useful thing you can attach — see
+        docs/PROTOCOL.md for how earlier bugs like this were diagnosed and fixed.
+    validations:
+      required: false

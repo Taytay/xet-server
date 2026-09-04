@@ -2,17 +2,24 @@
 # =============================================================================
 # xet-server Integration Test Runner
 # =============================================================================
-# Starts a single xetd instance against a scratch data directory, then runs
-# every *.sh script in integration-tests/ (or a single script if given) as an
-# independent test case. Each test script gets:
+# Starts a single xetd instance (both the CAS server and the Hub API shim)
+# against a scratch data directory, then runs every *.sh script in
+# integration-tests/ (or a single script if given) as an independent test
+# case. Each test script gets:
 #
 #   $XET        - path to the built xet CLI binary
-#   $XETD_URL   - base URL of the running xetd instance
+#   $XETD_URL   - base URL of the running xetd CAS server
+#   $HUB_URL    - base URL of the running xetd Hub API shim
 #   $WORKDIR    - a fresh scratch directory, unique to this test
 #
 # A test passes if the script exits 0, and fails otherwise. Scripts should
 # use `set -euo pipefail` and assert with plain shell (e.g. `[ "$a" = "$b" ]
 # || { echo "mismatch"; exit 1; }`) or `cmp`/`diff` for file comparisons.
+#
+# Each test runs under a timeout (default 60s, override with
+# XET_IT_TEST_TIMEOUT) so a single hanging test — e.g. a network client that
+# doesn't respect NO_PROXY for localhost in a proxied environment — fails
+# that one test instead of blocking the whole suite indefinitely.
 # =============================================================================
 
 set -u
@@ -52,13 +59,31 @@ logInfo()  { echo -e "${GREEN}INFO:${NC} $1"; }
 logError() { echo -e "${RED}ERROR:${NC} $1"; }
 logTest()  { echo -e "${BLUE}TEST:${NC} $1"; }
 
+# ---- timeout helper ----------------------------------------------------------
+
+TEST_TIMEOUT="${XET_IT_TEST_TIMEOUT:-60}"
+
+# Prefer GNU coreutils' `timeout` (Linux, or `brew install coreutils` on
+# macOS); fall back to `gtimeout`; if neither exists, run without a timeout
+# and warn once, since a hang then blocks the whole suite.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout ${TEST_TIMEOUT}s"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout ${TEST_TIMEOUT}s"
+else
+    echo -e "${YELLOW}WARN:${NC} no 'timeout' or 'gtimeout' found — tests cannot self-terminate if one hangs."
+fi
+
 # ---- server lifecycle -------------------------------------------------------
 
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xet-server-it.XXXXXX")"
 SERVER_DATA="$RUN_ROOT/server-data"
 SERVER_LOG="$RUN_ROOT/xetd.log"
 SERVER_PORT="${XETD_PORT:-18420}"
+HUB_PORT="${XETD_HUB_PORT:-18421}"
 XETD_URL="http://127.0.0.1:${SERVER_PORT}"
+HUB_URL="http://127.0.0.1:${HUB_PORT}"
 
 mkdir -p "$SERVER_DATA"
 
@@ -71,8 +96,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-logInfo "Starting xetd on $XETD_URL (data: $SERVER_DATA)"
-"$XETD_BIN" -addr ":${SERVER_PORT}" -data "$SERVER_DATA" >"$SERVER_LOG" 2>&1 &
+logInfo "Starting xetd on $XETD_URL (Hub shim: $HUB_URL, data: $SERVER_DATA)"
+"$XETD_BIN" -addr ":${SERVER_PORT}" -hub-addr ":${HUB_PORT}" -data "$SERVER_DATA" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 # Wait for the server to accept connections (up to ~5s).
@@ -93,6 +118,7 @@ logInfo "xetd is ready (pid $SERVER_PID)"
 
 export XET="$XET_BIN"
 export XETD_URL
+export HUB_URL
 
 # ---- discover tests ----------------------------------------------------------
 
@@ -118,6 +144,7 @@ logInfo "Found ${#testFiles[@]} integration test(s)"
 
 passed=0
 failed=0
+skipped=0
 declare -a failedNames=()
 
 for testFile in "${testFiles[@]}"; do
@@ -129,16 +156,28 @@ for testFile in "${testFiles[@]}"; do
     export WORKDIR
 
     startTime=$(date +%s%N 2>/dev/null || echo 0)
-    output=$(bash "$testFile" 2>&1)
+    output=$($TIMEOUT_CMD bash "$testFile" 2>&1)
     exitCode=$?
     endTime=$(date +%s%N 2>/dev/null || echo 0)
     durationMs=$(( (endTime - startTime) / 1000000 ))
 
-    if [[ $exitCode -eq 0 ]]; then
+    # Exit code 77 is this suite's "SKIP" convention (a test that can't run
+    # in the current environment, e.g. a missing optional dependency) —
+    # counted separately from pass/fail so an environment gap doesn't look
+    # like a regression.
+    if [[ $exitCode -eq 77 ]]; then
+        echo -e "  Result: ${YELLOW}SKIP${NC}"
+        echo "$output" | sed 's/^/  | /'
+        ((skipped++))
+    elif [[ $exitCode -eq 0 ]]; then
         echo -e "  Result: ${GREEN}PASS${NC}"
         ((passed++))
     else
-        echo -e "  Result: ${RED}FAIL${NC}"
+        if [[ $exitCode -eq 124 ]]; then
+            echo -e "  Result: ${RED}TIMEOUT${NC} (exceeded ${TEST_TIMEOUT}s)"
+        else
+            echo -e "  Result: ${RED}FAIL${NC}"
+        fi
         echo "$output" | sed 's/^/  | /'
         failedNames+=("$testName")
         ((failed++))
@@ -150,8 +189,9 @@ done
 echo "========================================"
 echo "INTEGRATION TEST SUMMARY"
 echo "========================================"
-echo "Total: $((passed + failed))"
+echo "Total: $((passed + failed + skipped))"
 echo -e "Passed: ${GREEN}${passed}${NC}"
+echo -e "Skipped: ${YELLOW}${skipped}${NC}"
 echo -e "Failed: ${RED}${failed}${NC}"
 
 if [[ $failed -gt 0 ]]; then

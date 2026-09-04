@@ -1,0 +1,60 @@
+name: Feature Request
+description: Suggest an idea or enhancement for Xet Server
+title: "[Feature]: "
+labels: ["enhancement", "feature-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an idea! Please provide as much detail as possible.
+
+  - type: textarea
+    id: feature-summary
+    attributes:
+      label: Describe the feature and the problem it solves
+      description: What capability are you proposing, and why?
+      placeholder: |
+        **The Feature:** A brief description of the new capability.
+        **The Motivation:** The problem it solves or the workflow it improves.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Roughly which area does this touch?
+      options:
+        - label: CAS HTTP API (internal/casserver) — reconstruction, xorb/shard upload, dedup
+        - label: Hub API shim (internal/hubserver) — repo/commit/resolve, revisions, auth
+        - label: Wire format (merklehash / xorbformat / shardformat)
+        - label: Storage backend (internal/storage) — new backend, presigning, etc.
+        - label: CLI / demo API (cmd/xet, internal/api)
+        - label: Docs / tooling
+    validations:
+      required: false
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution (optional)
+      description: >
+        If you have an idea of how this could be implemented, share it here. If this relates to real
+        Xet protocol behavior, a link to the relevant xet-core source (or a captured real-client
+        payload) is especially useful — see docs/PROTOCOL.md for how prior wire-format work was
+        grounded in real captures rather than guesswork.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+    validations:
+      required: false

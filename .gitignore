@@ -47,3 +47,7 @@ temp/
 # Local server data (chunks + manifests) generated at runtime
 /xet-data/
 /xet-test-data/
+
+# Optional Python venv for the real hf CLI integration test
+.venv-hf/
+
