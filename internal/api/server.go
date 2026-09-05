@@ -5,12 +5,13 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -99,7 +100,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	tee := io.TeeReader(r.Body, fullHash)
 	err := s.chunker.Split(tee, func(c chunk.Chunk) error {
-		written, err := s.chunks.Put(ctx, c.Hash, c.Data)
+		written, err := s.chunks.Put(ctx, c.Hash, bytes.NewReader(c.Data), int64(len(c.Data)))
 		if err != nil {
 			return err
 		}
@@ -143,8 +144,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if size > 0 {
 		res.DedupPercent = 100 * (1 - float64(bytesStored)/float64(size))
 	}
-	log.Printf("upload %s: %d chunks (%d new), %d bytes -> %d bytes stored (%.1f%% dedup)",
-		fileID, res.ChunksTotal, res.ChunksNew, res.Size, res.BytesStored, res.DedupPercent)
+	slog.Info("upload", "fileID", fileID, "chunksTotal", res.ChunksTotal, "chunksNew", res.ChunksNew,
+		"size", res.Size, "bytesStored", res.BytesStored, "dedupPercent", res.DedupPercent)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
@@ -173,7 +174,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing chunk "+c.Hash, http.StatusInternalServerError)
 			return
 		}
-		if _, err := w.Write(data); err != nil {
+		_, err = io.Copy(w, data)
+		data.Close()
+		if err != nil {
 			return
 		}
 	}

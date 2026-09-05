@@ -5,23 +5,54 @@
 // server can run against either without any caller-side branching.
 package storage
 
-import "context"
+import (
+	"context"
+	"errors"
+	"io"
+)
+
+// ErrNotFound is returned (via errors.Is) by Get/GetRange when no blob
+// exists under the requested key. Every backend must wrap its native
+// not-found signal (os.ErrNotExist, an S3 404) in this sentinel so callers
+// can branch on it without knowing which backend is in use.
+var ErrNotFound = errors.New("storage: blob not found")
+
+// ErrSizeMismatch is returned (via errors.Is) by Put when the number of
+// bytes actually read from r does not match the declared size. This is a
+// client protocol error (a wrong Content-Length or a truncated body), not
+// a storage fault; the caller should treat it as non-retryable without a
+// corrected size.
+var ErrSizeMismatch = errors.New("storage: reader did not match declared size")
 
 // Store is a content-addressed blob store: Put is a no-op if the key
-// already exists (the basis for dedup), Get/GetRange read back what was
+// already exists (the basis for dedup), Get/GetRange stream back what was
 // stored, and Has checks existence without transferring data.
+//
+// Put is atomic with respect to failure: if r returns an error, ctx is
+// canceled, or the read stops short of size, no partial blob is left
+// visible under key — implementations must stage writes (e.g. a temp file
+// renamed into place, or an upload that is only finalized on success) so a
+// caller can safely retry the same key after a failed attempt without a
+// prior partial write corrupting the retry. Get/GetRange never observe a
+// partially-written blob as a result.
 type Store interface {
-	// Put writes data under key if not already present. Returns true if the
-	// blob was newly written, false if it already existed (deduplicated).
-	Put(ctx context.Context, key string, data []byte) (written bool, err error)
+	// Put streams exactly size bytes from r into key if not already
+	// present. Returns true if the blob was newly written, false if it
+	// already existed (deduplicated) — in the deduplicated case, r is
+	// drained/ignored without being stored again.
+	Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error)
 
-	// Get reads back the full blob stored under key.
-	Get(ctx context.Context, key string) ([]byte, error)
+	// Get returns a reader for the full blob stored under key. The caller
+	// must Close it. Returns an error satisfying errors.Is(err,
+	// ErrNotFound) if no blob exists under key.
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 
-	// GetRange reads back [offset, offset+length) of the blob stored under
-	// key. Backends that cannot do a partial read efficiently may fall back
-	// to a full Get followed by a slice.
-	GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error)
+	// GetRange returns a reader for [offset, offset+length) of the blob
+	// stored under key. The caller must Close it. Backends that cannot do
+	// a partial read natively may fall back to a full read followed by a
+	// bounded copy. Returns an error satisfying errors.Is(err,
+	// ErrNotFound) if no blob exists under key.
+	GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 
 	// Has reports whether a blob is already stored under key.
 	Has(ctx context.Context, key string) (bool, error)

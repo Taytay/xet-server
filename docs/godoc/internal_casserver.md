@@ -35,6 +35,15 @@ type Server struct {
     they are metadata derived from uploaded shards/xorbs, cheap to rebuild,
     and small relative to the bulk chunk data in Store.
 
+    Each index has its own mutex rather than one shared lock: none of the four
+    maps are ever read or written together under one critical section (confirmed
+    — no code path needs a consistent snapshot across more than one of them), so
+    a single global lock only serialized unrelated concurrent uploads/downloads
+    without buying any actual consistency guarantee. Splitting them lets a
+    large xorb upload (which only touches xorbFooters/xorbRawLength) proceed
+    concurrently with an unrelated reconstruction lookup (which only touches
+    fileRecon).
+
 func New(xorbs storage.Store) *Server
 
 func (s *Server) FileSize(fileHash merklehash.Hash) (int64, bool)

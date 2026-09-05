@@ -1,11 +1,42 @@
 package fsstore
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func put(t *testing.T, s *Store, ctx context.Context, key string, data []byte) bool {
+	t.Helper()
+	written, err := s.Put(ctx, key, bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	return written
+}
+
+func get(t *testing.T, s *Store, ctx context.Context, key string) ([]byte, error) {
+	t.Helper()
+	rc, err := s.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func getRange(t *testing.T, s *Store, ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	t.Helper()
+	rc, err := s.GetRange(ctx, key, offset, length)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
 
 func TestStore_PutAndGet(t *testing.T) {
 	ctx := context.Background()
@@ -17,15 +48,11 @@ func TestStore_PutAndGet(t *testing.T) {
 	key := "abcd1234"
 	data := []byte("hello chunk")
 
-	written, err := s.Put(ctx, key, data)
-	if err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
-	if !written {
+	if written := put(t, s, ctx, key, data); !written {
 		t.Error("Put() written = false, want true for first write")
 	}
 
-	got, err := s.Get(ctx, key)
+	got, err := get(t, s, ctx, key)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -42,20 +69,15 @@ func TestStore_PutDeduplicatesExistingKey(t *testing.T) {
 	}
 
 	key := "deadbeef"
-	first, err := s.Put(ctx, key, []byte("original data"))
-	if err != nil || !first {
-		t.Fatalf("first Put() = (%v, %v), want (true, nil)", first, err)
+	if first := put(t, s, ctx, key, []byte("original data")); !first {
+		t.Fatalf("first Put() written = %v, want true", first)
 	}
 
-	second, err := s.Put(ctx, key, []byte("different data, same key"))
-	if err != nil {
-		t.Fatalf("second Put() error = %v", err)
-	}
-	if second {
+	if second := put(t, s, ctx, key, []byte("different data, same key")); second {
 		t.Error("second Put() written = true, want false (already deduplicated)")
 	}
 
-	got, err := s.Get(ctx, key)
+	got, err := get(t, s, ctx, key)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -79,9 +101,7 @@ func TestStore_Has(t *testing.T) {
 		t.Error("Has() = true for a key that was never stored")
 	}
 
-	if _, err := s.Put(ctx, "cafef00d", []byte("data")); err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	put(t, s, ctx, "cafef00d", []byte("data"))
 	has, err = s.Has(ctx, "cafef00d")
 	if err != nil {
 		t.Fatalf("Has() error = %v", err)
@@ -111,11 +131,9 @@ func TestStore_GetRange(t *testing.T) {
 
 	key := "range-test"
 	data := []byte("0123456789abcdef")
-	if _, err := s.Put(ctx, key, data); err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	put(t, s, ctx, key, data)
 
-	got, err := s.GetRange(ctx, key, 3, 5)
+	got, err := getRange(t, s, ctx, key, 3, 5)
 	if err != nil {
 		t.Fatalf("GetRange() error = %v", err)
 	}
@@ -125,7 +143,7 @@ func TestStore_GetRange(t *testing.T) {
 	}
 
 	// Range extending to (but not past) EOF should return the tail, not error.
-	got, err = s.GetRange(ctx, key, 12, 4)
+	got, err = getRange(t, s, ctx, key, 12, 4)
 	if err != nil {
 		t.Fatalf("GetRange() at EOF boundary error = %v", err)
 	}
@@ -143,9 +161,7 @@ func TestStore_ShardedLayout(t *testing.T) {
 	}
 
 	key := "0123456789abcdef"
-	if _, err := s.Put(ctx, key, []byte("x")); err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	put(t, s, ctx, key, []byte("x"))
 
 	want := filepath.Join(root, "01", "23", key)
 	if _, err := os.Stat(want); err != nil {
@@ -160,12 +176,34 @@ func TestStore_NoTempFileLeftBehindOnSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if _, err := s.Put(ctx, "ff00ff00", []byte("payload")); err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	put(t, s, ctx, "ff00ff00", []byte("payload"))
 
 	matches, _ := filepath.Glob(filepath.Join(root, "*", "*", "*.tmp-*"))
 	if len(matches) != 0 {
 		t.Errorf("found leftover temp files after successful Put: %v", matches)
+	}
+}
+
+func TestStore_PutSizeMismatchLeavesNoBlob(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	key := "short-read"
+	// Declare a larger size than the reader actually provides.
+	_, err = s.Put(ctx, key, bytes.NewReader([]byte("short")), 100)
+	if err == nil {
+		t.Fatal("Put() error = nil, want an error for a reader shorter than declared size")
+	}
+
+	if has, _ := s.Has(ctx, key); has {
+		t.Error("Has() = true after a failed Put; a partial blob must not be visible")
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "*", "*", "*.tmp-*"))
+	if len(matches) != 0 {
+		t.Errorf("found leftover temp files after failed Put: %v", matches)
 	}
 }

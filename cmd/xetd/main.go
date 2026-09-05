@@ -56,14 +56,14 @@ func main() {
 		}
 		hubSrv := hubserver.New(resolvedCASURL, casSrv)
 		go func() {
-			log.Printf("xetd Hub API shim listening on %s (CAS base URL: %s)", *hubAddr, resolvedCASURL)
+			slog.Info("xetd Hub API shim listening", "addr", *hubAddr, "casBaseURL", resolvedCASURL)
 			if err := http.ListenAndServe(*hubAddr, logRequests(hubSrv)); err != nil {
 				log.Fatal(err)
 			}
 		}()
 	}
 
-	log.Printf("xetd listening on %s, data dir %s (CAS protocol at /v1,/v2; demo API at /upload,/files)", *addr, *dataDir)
+	slog.Info("xetd listening", "addr", *addr, "dataDir", *dataDir)
 	if err := http.ListenAndServe(*addr, logRequests(mux)); err != nil {
 		log.Fatal(err)
 	}

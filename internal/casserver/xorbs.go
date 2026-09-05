@@ -1,11 +1,11 @@
 package casserver
 
 import (
-	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 
 	"xet-server/internal/bg4"
@@ -14,8 +14,18 @@ import (
 	"xet-server/internal/xorbformat"
 )
 
+// httpError writes an HTTP error response and logs it at a level matching
+// its cause: a 5xx reflects a server-side fault worth surfacing at Warn by
+// default, while a 4xx is a client protocol/input error — expected to
+// happen under normal operation (a bad hash, a truncated upload) and only
+// useful for debugging, so it logs at Debug to avoid every malformed
+// request from a client spamming the default log level.
 func httpError(w http.ResponseWriter, msg string, code int) {
-	log.Printf("casserver: %d %s", code, msg)
+	if code >= 500 {
+		slog.Warn("casserver: request failed", "status", code, "error", msg)
+	} else {
+		slog.Debug("casserver: request rejected", "status", code, "error", msg)
+	}
 	http.Error(w, msg, code)
 }
 
@@ -55,13 +65,26 @@ func decompressChunkPayload(scheme xorbformat.CompressionScheme, payload []byte,
 	}
 }
 
-// handleUploadXorb implements POST /v1/xorbs/{prefix}/{hash}: store the
-// serialized xorb bytes as-is, then independently reconstruct the xorb's
-// chunk hash list and footer by scanning chunk headers and decompressing
-// each payload — real hf_xet clients upload xorbs *without* a footer
-// ("XORBs are sent without footer - the server/client reconstructs it from
-// chunk data", per xet-core's file_upload_session.rs) — and verify the
-// claimed hash against the resulting Merkle aggregation.
+// maxXorbBytes caps a single xorb upload's body size. Real xet-core targets
+// ~64 MiB per xorb before cutting a new one (MAX_XORB_BYTES in
+// xet-core's constants), so this is generous headroom above what a
+// well-behaved client ever sends in one xorb — its purpose here is purely
+// to bound how large a temp file a single hostile/misbehaving request can
+// force the server to stage, not to constrain normal traffic.
+const maxXorbBytes = 128 * 1024 * 1024
+
+// handleUploadXorb implements POST /v1/xorbs/{prefix}/{hash}: stream the
+// serialized xorb body to a temp file (xorbformat.ScanChunks needs seek,
+// which an HTTP request body doesn't support), then independently
+// reconstruct the xorb's chunk hash list and footer by scanning chunk
+// headers and decompressing each payload — real hf_xet clients upload
+// xorbs *without* a footer ("XORBs are sent without footer - the
+// server/client reconstructs it from chunk data", per xet-core's
+// file_upload_session.rs) — and verify the claimed hash against the
+// resulting Merkle aggregation. The temp file is only handed to the
+// storage backend (which streams it onward) once the whole body has been
+// received and validated, so a client that disconnects mid-upload never
+// leaves a partial xorb stored.
 func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 	if r.PathValue("prefix") != xorbPrefix {
 		httpError(w, "unsupported xorb prefix", http.StatusBadRequest)
@@ -73,13 +96,27 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	r.Body = http.MaxBytesReader(w, r.Body, maxXorbBytes)
+
+	tmp, err := os.CreateTemp("", "xet-xorb-upload-*")
 	if err != nil {
-		httpError(w, "read body: "+err.Error(), http.StatusBadRequest)
+		httpError(w, "stage upload: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
+	size, err := io.Copy(tmp, r.Body)
+	if err != nil {
+		httpError(w, "read body (exceeds max xorb size or connection error): "+err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		httpError(w, "malformed xorb: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	entries, err := xorbformat.ScanChunks(bytes.NewReader(body))
+	entries, err := xorbformat.ScanChunks(tmp)
 	if err != nil {
 		httpError(w, "malformed xorb: "+err.Error(), http.StatusBadRequest)
 		return
@@ -93,7 +130,11 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 	var chunkEntries []merklehash.ChunkEntry
 	var boundaryOffsets, unpackedOffsets []uint32
 	for i, e := range entries {
-		payload := body[e.DataOffset : e.DataOffset+int64(e.Header.CompressedLength)]
+		payload := make([]byte, e.Header.CompressedLength)
+		if _, err := tmp.ReadAt(payload, e.DataOffset); err != nil {
+			httpError(w, fmt.Sprintf("chunk %d: read payload: %s", i, err), http.StatusBadRequest)
+			return
+		}
 		decoded, err := decompressChunkPayload(e.Header.CompressionScheme, payload, e.Header.UncompressedLength)
 		if err != nil {
 			httpError(w, fmt.Sprintf("chunk %d: %s", i, err), http.StatusBadRequest)
@@ -116,13 +157,17 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	written, err := s.xorbs.Put(r.Context(), claimedHash.Hex(), body)
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		httpError(w, "store xorb: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	written, err := s.xorbs.Put(r.Context(), claimedHash.Hex(), tmp, size)
 	if err != nil {
 		httpError(w, "store xorb: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	s.mu.Lock()
+	s.xorbMu.Lock()
 	s.xorbFooters[claimedHash] = xorbformat.FooterV1{
 		XorbHash:             computedHash,
 		ChunkHashes:          chunkHashes,
@@ -130,8 +175,8 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 		UnpackedChunkOffsets: unpackedOffsets,
 		NumChunks:            uint32(len(entries)),
 	}
-	s.xorbRawLength[claimedHash] = int64(len(body))
-	s.mu.Unlock()
+	s.xorbRawLength[claimedHash] = size
+	s.xorbMu.Unlock()
 
 	writeJSON(w, uploadXorbResponse{WasInserted: written})
 }
@@ -150,9 +195,9 @@ func (s *Server) handleFetchXorb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
+	s.xorbMu.RLock()
 	total, known := s.xorbRawLength[hash]
-	s.mu.RUnlock()
+	s.xorbMu.RUnlock()
 	if !known {
 		http.NotFound(w, r)
 		return
@@ -164,9 +209,11 @@ func (s *Server) handleFetchXorb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var data []byte
+	contentLength := total
+	var data io.ReadCloser
 	if hasRange {
-		data, err = s.xorbs.GetRange(r.Context(), hash.Hex(), start, end-start+1)
+		contentLength = end - start + 1
+		data, err = s.xorbs.GetRange(r.Context(), hash.Hex(), start, contentLength)
 	} else {
 		data, err = s.xorbs.Get(r.Context(), hash.Hex())
 	}
@@ -174,14 +221,15 @@ func (s *Server) handleFetchXorb(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "fetch xorb: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer data.Close()
 
 	if hasRange {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 		w.WriteHeader(http.StatusPartialContent)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
-	w.Write(data)
+	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	io.Copy(w, data)
 }
 
 func (s *Server) handleHeadXorb(w http.ResponseWriter, r *http.Request) {
@@ -190,9 +238,9 @@ func (s *Server) handleHeadXorb(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "invalid hash", http.StatusBadRequest)
 		return
 	}
-	s.mu.RLock()
+	s.xorbMu.RLock()
 	total, known := s.xorbRawLength[hash]
-	s.mu.RUnlock()
+	s.xorbMu.RUnlock()
 	if !known {
 		http.NotFound(w, r)
 		return

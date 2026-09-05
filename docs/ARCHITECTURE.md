@@ -154,7 +154,13 @@ PROTOCOL.md).
   spec-valid; production Xet always uses the presigned-URL path.
 - **In-memory indices, not a persisted database.** `casserver.Server` and
   `hubserver.Server` hold their reconstruction/repo state in memory,
-  protected by a `sync.RWMutex`. This is a deliberate simplification for a
-  local/single-node server — bulk chunk data lives in the pluggable
-  `storage.Store`, but the metadata that maps files to chunks does not
-  survive a restart.
+  each behind its own `sync.RWMutex` (one per index map in `casserver`; one
+  per repo, plus one for the top-level repo registry, in `hubserver`) rather
+  than a single shared lock — no code path needs a consistent snapshot
+  across more than one index, so finer-grained locks let unrelated
+  concurrent uploads/downloads/repos proceed without serializing on each
+  other. This is a deliberate simplification for a local/single-node
+  server — bulk chunk data lives in the pluggable `storage.Store` (streamed
+  via `io.Reader`/`io.ReadCloser`, never buffered whole in memory, so a
+  multi-GB xorb costs a fixed amount of memory to upload/download), but the
+  metadata that maps files to chunks does not survive a restart.

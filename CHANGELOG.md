@@ -5,6 +5,74 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-05
+
+### Added
+- Sentinel storage errors `storage.ErrNotFound` and `storage.ErrSizeMismatch`
+  (`errors.Is`-checkable), returned consistently by both `fsstore` and
+  `s3store` instead of backend-specific ad hoc errors — a caller no longer
+  needs to know which backend it's talking to to detect "not found" vs. a
+  real fault.
+- `casserver`'s xorb and shard upload handlers now cap request body size
+  (`http.MaxBytesReader`, 128 MiB for xorbs — well above real xet-core's
+  ~64 MiB per-xorb target, 16 MiB for shards — metadata bounded by chunk
+  count, not file size) and return `413 Request Entity Too Large` instead
+  of allowing an unbounded read.
+- `log/slog` is now used consistently for all runtime logging across
+  `casserver`, `hubserver`, and `cmd/xetd` (previously a mix of `log.Printf`
+  and `slog.Debug`). 4xx responses (client protocol/input errors — a bad
+  hash, a truncated upload) log at `Debug`; 5xx responses (server-side
+  faults) log at `Warn`; startup/lifecycle events log at `Info`. `log.Fatal`
+  remains for unrecoverable startup errors in `cmd/xetd`, since `slog` has
+  no equivalent terminate-and-exit call.
+
+### Changed
+- **`storage.Store` is now streaming.** `Put(ctx, key, data []byte)` became
+  `Put(ctx, key, r io.Reader, size int64)`; `Get`/`GetRange` now return
+  `io.ReadCloser` instead of `[]byte`. Neither `fsstore` nor `s3store` ever
+  buffers a full xorb in memory anymore — a multi-gigabyte upload/download
+  now costs a fixed, small amount of memory regardless of file size,
+  verified end-to-end with real GGUF model files up to 27.6 GB
+  (`~/.ollama/models/blobs`) round-tripped byte-identical through the
+  actual `hf` CLI, and unit-benchmarked at ~500-575 MB/s sustained write
+  throughput to a local filesystem store.
+  - `fsstore.Put` stages each write to a per-attempt temp file and only
+    renames it into place once the full declared size has been copied —
+    a failed, canceled, or short read leaves no partial blob visible under
+    the key, and the caller can simply retry with a fresh reader.
+  - `casserver.handleUploadXorb` streams the request body to a temp file
+    (`xorbformat.ScanChunks` needs `io.Seeker`, which an `http.Request.Body`
+    doesn't support) and only hands it to the storage backend once the
+    whole body is received and its claimed hash verified — a client that
+    disconnects mid-upload never leaves a partial xorb stored.
+  - `s3store.Put` signs with `sigv4.UnsignedPayload` instead of a
+    precomputed SHA-256 content hash, since computing that hash would
+    require buffering the whole body up front, defeating the point of
+    streaming a multi-GB xorb.
+- **`casserver.Server`'s single global `sync.RWMutex` is now three
+  independent locks** (`fileReconMu`, `xorbMu`, `sha256Mu`), one per index
+  map. No code path ever needed a consistent snapshot across more than one
+  map, so the shared lock only serialized unrelated concurrent
+  uploads/downloads without buying any real consistency guarantee — a large
+  xorb upload (touching only `xorbFooters`/`xorbRawLength`) can now proceed
+  concurrently with an unrelated reconstruction lookup (touching only
+  `fileRecon`).
+- **`hubserver.Server`'s single global mutex now only guards the top-level
+  `repos` map**; each `repoState` has its own mutex for its files and commit
+  metadata, so a commit or resolve request against one repo no longer
+  blocks on unrelated activity in a different repo.
+
+### Fixed
+- `handleUploadXorb` seeks its staging temp file back to the start before
+  scanning chunk headers — a regression introduced while switching from
+  `bytes.NewReader` (which was implicitly at the correct offset) to a
+  temp file (left at EOF after `io.Copy` from the request body), caught by
+  the existing xorb-upload regression tests before it shipped.
+- `hubserver.resolve.go`'s `commitOIDOrPlaceholder` read `repoState.commitOID`
+  /`commitSeen` without holding `repoState`'s mutex — a pre-existing data
+  race, now fixed as part of introducing per-repo locking. Confirmed the
+  full test suite (unit + integration) passes clean under `go test -race`.
+
 ## [0.3.0] - 2026-09-04
 
 ### Added

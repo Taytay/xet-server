@@ -5,7 +5,6 @@
 package s3store
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -77,24 +76,43 @@ func (s *Store) Has(ctx context.Context, key string) (bool, error) {
 // content and both report "written" — the CAS dedup logic that matters
 // for cost/perf still works because the vast majority of calls hit an
 // existing key on Has and skip the PUT entirely.
-func (s *Store) Put(ctx context.Context, key string, data []byte) (written bool, err error) {
+// Put uploads size bytes from r under key if not already present. S3 has no
+// native "create if absent" semantic, so this does a HEAD-then-PUT; a
+// benign race (two callers uploading the identical bytes for the same
+// content-addressed key concurrently) just means both write the same
+// content and both report "written" — the CAS dedup logic that matters
+// for cost/perf still works because the vast majority of calls hit an
+// existing key on Has and skip the PUT entirely.
+//
+// The upload signs with sigv4.UnsignedPayload rather than a SHA-256 content
+// hash: computing that hash would require buffering the full body before
+// the request even starts, which defeats streaming a multi-GB xorb. S3 and
+// MinIO both accept UNSIGNED-PAYLOAD for PUT; the object's own ETag/hash
+// verification on the read side (this project's own chunk/xorb hashing)
+// still catches corruption in transit.
+//
+// A failed or canceled PUT is not retried or cleaned up here — S3 has no
+// partial-object visibility (a PUT either lands in full or the object
+// doesn't exist), so unlike fsstore there is no staging file to remove; the
+// caller can simply retry Put with a fresh reader.
+func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error) {
 	exists, err := s.Has(ctx, key)
 	if err != nil {
 		return false, err
 	}
 	if exists {
+		io.Copy(io.Discard, io.LimitReader(r, size))
 		return false, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.objectURL(key), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.objectURL(key), io.NopCloser(io.LimitReader(r, size)))
 	if err != nil {
 		return false, err
 	}
-	req.ContentLength = int64(len(data))
-	payloadHash := sigv4.HashPayload(data)
+	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := s.do(req, payloadHash)
+	resp, err := s.do(req, sigv4.UnsignedPayload)
 	if err != nil {
 		return false, err
 	}
@@ -106,7 +124,7 @@ func (s *Store) Put(ctx context.Context, key string, data []byte) (written bool,
 	return true, nil
 }
 
-func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.objectURL(key), nil)
 	if err != nil {
 		return nil, err
@@ -115,15 +133,19 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return nil, storage.ErrNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		return nil, fmt.Errorf("s3store: GET %s: unexpected status %s: %s", key, resp.Status, body)
 	}
-	return io.ReadAll(resp.Body)
+	return resp.Body, nil
 }
 
-func (s *Store) GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+func (s *Store) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.objectURL(key), nil)
 	if err != nil {
 		return nil, err
@@ -135,12 +157,16 @@ func (s *Store) GetRange(ctx context.Context, key string, offset, length int64) 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return nil, storage.ErrNotFound
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		return nil, fmt.Errorf("s3store: GET %s (range): unexpected status %s: %s", key, resp.Status, body)
 	}
-	return io.ReadAll(resp.Body)
+	return resp.Body, nil
 }
 
 // PresignGet implements storage.URLPresigner: returns a SigV4

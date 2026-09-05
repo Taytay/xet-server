@@ -28,7 +28,7 @@ package casserver
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 
@@ -44,15 +44,28 @@ const xorbPrefix = "default"
 // xorb bytes. File-reconstruction and xorb-footer indexes are held in
 // memory: they are metadata derived from uploaded shards/xorbs, cheap to
 // rebuild, and small relative to the bulk chunk data in Store.
+//
+// Each index has its own mutex rather than one shared lock: none of the
+// four maps are ever read or written together under one critical section
+// (confirmed — no code path needs a consistent snapshot across more than
+// one of them), so a single global lock only serialized unrelated
+// concurrent uploads/downloads without buying any actual consistency
+// guarantee. Splitting them lets a large xorb upload (which only touches
+// xorbFooters/xorbRawLength) proceed concurrently with an unrelated
+// reconstruction lookup (which only touches fileRecon).
 type Server struct {
 	xorbs storage.Store
 	mux   *http.ServeMux
 
-	mu            sync.RWMutex
-	fileRecon     map[merklehash.Hash][]shardformat.FileDataSequenceEntry
+	fileReconMu sync.RWMutex
+	fileRecon   map[merklehash.Hash][]shardformat.FileDataSequenceEntry
+
+	xorbMu        sync.RWMutex
 	xorbFooters   map[merklehash.Hash]xorbformat.FooterV1
 	xorbRawLength map[merklehash.Hash]int64
-	sha256ToXet   map[string]merklehash.Hash // hex SHA-256 -> Xet/Merkle file hash
+
+	sha256Mu    sync.RWMutex
+	sha256ToXet map[string]merklehash.Hash // hex SHA-256 -> Xet/Merkle file hash
 }
 
 func New(xorbs storage.Store) *Server {
@@ -74,8 +87,8 @@ func New(xorbs storage.Store) *Server {
 // commit API's plain-SHA-256 file identity to the Xet hash the CAS layer
 // indexes reconstructions under.
 func (s *Server) XetHashForSHA256(sha256Hex string) (merklehash.Hash, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.sha256Mu.RLock()
+	defer s.sha256Mu.RUnlock()
 	h, ok := s.sha256ToXet[sha256Hex]
 	return h, ok
 }
@@ -83,9 +96,9 @@ func (s *Server) XetHashForSHA256(sha256Hex string) (merklehash.Hash, bool) {
 // FileSize returns the total unpacked size of a file known to this
 // server's reconstruction index, or false if fileHash is unknown.
 func (s *Server) FileSize(fileHash merklehash.Hash) (int64, bool) {
-	s.mu.RLock()
+	s.fileReconMu.RLock()
 	entries, ok := s.fileRecon[fileHash]
-	s.mu.RUnlock()
+	s.fileReconMu.RUnlock()
 	if !ok {
 		return 0, false
 	}
@@ -150,7 +163,7 @@ type reconstructionResponseV1 struct {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("casserver: encode response: %v", err)
+		slog.Error("casserver: encode response", "error", err)
 	}
 }
 

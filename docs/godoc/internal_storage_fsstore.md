@@ -15,11 +15,16 @@ type Store struct {
 
 func New(root string) (*Store, error)
 
-func (s *Store) Get(_ context.Context, key string) ([]byte, error)
+func (s *Store) Get(_ context.Context, key string) (io.ReadCloser, error)
 
-func (s *Store) GetRange(_ context.Context, key string, offset, length int64) ([]byte, error)
+func (s *Store) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, error)
 
 func (s *Store) Has(_ context.Context, key string) (bool, error)
 
-func (s *Store) Put(_ context.Context, key string, data []byte) (written bool, err error)
+func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error)
+    Put stages the write to a per-attempt temp file and only renames it into
+    place once size bytes have been fully copied from r. If r errs, ctx is
+    canceled, or the copy stops short of size, the temp file is removed and no
+    partial blob is ever visible under key — a caller can retry Put with a fresh
+    reader afterward with no cleanup of its own required.
 ```

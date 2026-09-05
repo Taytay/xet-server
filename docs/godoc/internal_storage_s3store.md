@@ -25,9 +25,9 @@ func (s *Store) EnsureBucket(ctx context.Context) error
     EnsureBucket creates the bucket if it doesn't already exist. MinIO and S3
     both accept an empty-body PUT to the bucket root for this.
 
-func (s *Store) Get(ctx context.Context, key string) ([]byte, error)
+func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, error)
 
-func (s *Store) GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error)
+func (s *Store) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 
 func (s *Store) Has(ctx context.Context, key string) (bool, error)
 
@@ -36,12 +36,30 @@ func (s *Store) PresignGet(_ context.Context, key string, expirySeconds int) (st
     query-authenticated URL a client can GET directly against the S3/MinIO
     endpoint, bypassing our own server for the bytes themselves.
 
-func (s *Store) Put(ctx context.Context, key string, data []byte) (written bool, err error)
+func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error)
     Put uploads data under key if not already present. S3 has no native
     "create if absent" semantic, so this does a HEAD-then-PUT; a benign race
     (two callers uploading the identical bytes for the same content-addressed
     key concurrently) just means both write the same content and both report
     "written" — the CAS dedup logic that matters for cost/perf still works
-    because the vast majority of calls hit an existing key on Has and skip the
-    PUT entirely.
+    because the vast majority of calls hit an existing key on Has and skip
+    the PUT entirely. Put uploads size bytes from r under key if not already
+    present. S3 has no native "create if absent" semantic, so this does a
+    HEAD-then-PUT; a benign race (two callers uploading the identical bytes for
+    the same content-addressed key concurrently) just means both write the same
+    content and both report "written" — the CAS dedup logic that matters for
+    cost/perf still works because the vast majority of calls hit an existing key
+    on Has and skip the PUT entirely.
+
+    The upload signs with sigv4.UnsignedPayload rather than a SHA-256 content
+    hash: computing that hash would require buffering the full body before
+    the request even starts, which defeats streaming a multi-GB xorb. S3 and
+    MinIO both accept UNSIGNED-PAYLOAD for PUT; the object's own ETag/hash
+    verification on the read side (this project's own chunk/xorb hashing) still
+    catches corruption in transit.
+
+    A failed or canceled PUT is not retried or cleaned up here — S3 has no
+    partial-object visibility (a PUT either lands in full or the object doesn't
+    exist), so unlike fsstore there is no staging file to remove; the caller can
+    simply retry Put with a fresh reader.
 ```

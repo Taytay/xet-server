@@ -57,13 +57,13 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, 
 		if cl.Key != "lfsFile" {
 			continue
 		}
-		s.mu.Lock()
+		rs.mu.Lock()
 		rs.files[cl.Value.Path] = &fileRef{
 			Path:      cl.Value.Path,
 			SHA256Hex: cl.Value.OID,
 			Size:      cl.Value.Size,
 		}
-		s.mu.Unlock()
+		rs.mu.Unlock()
 		fileCount++
 	}
 	if err := scanner.Err(); err != nil {
@@ -78,10 +78,10 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, 
 		return
 	}
 
-	s.mu.Lock()
+	rs.mu.Lock()
 	rs.commitOID = oid
 	rs.commitSeen = true
-	s.mu.Unlock()
+	rs.mu.Unlock()
 
 	writeJSON(w, commitResponse{
 		CommitOID: oid,

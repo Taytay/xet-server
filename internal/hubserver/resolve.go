@@ -20,9 +20,9 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 	rs := s.getOrCreateRepo("model", repoID) // repo type is not encoded in the resolve URL; default assumption
 	_ = revision                             // single implicit "main" revision
 
-	s.mu.RLock()
+	rs.mu.RLock()
 	ref, ok := rs.files[filename]
-	s.mu.RUnlock()
+	rs.mu.RUnlock()
 	slog.Debug("resolve lookup", "repoID", repoID, "filename", filename, "found", ok)
 	if !ok {
 		http.NotFound(w, r)
@@ -76,6 +76,8 @@ func refreshRouteURL(r *http.Request, repoID, revision string) string {
 }
 
 func commitOIDOrPlaceholder(rs *repoState) string {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
 	if rs.commitSeen {
 		return rs.commitOID
 	}

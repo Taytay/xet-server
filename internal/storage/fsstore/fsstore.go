@@ -5,7 +5,6 @@ package fsstore
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -45,18 +44,40 @@ func (s *Store) Has(_ context.Context, key string) (bool, error) {
 	return false, err
 }
 
-func (s *Store) Put(_ context.Context, key string, data []byte) (written bool, err error) {
+// Put stages the write to a per-attempt temp file and only renames it into
+// place once size bytes have been fully copied from r. If r errs, ctx is
+// canceled, or the copy stops short of size, the temp file is removed and
+// no partial blob is ever visible under key — a caller can retry Put with a
+// fresh reader afterward with no cleanup of its own required.
+func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error) {
 	p := s.path(key)
 	if _, err := os.Stat(p); err == nil {
+		io.Copy(io.Discard, io.LimitReader(r, size))
 		return false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return false, err
 	}
 	tmp := p + fmt.Sprintf(".tmp-%d", os.Getpid())
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_EXCL, 0o644)
+	if err != nil {
 		return false, err
+	}
+	n, copyErr := io.Copy(f, io.LimitReader(r, size))
+	closeErr := f.Close()
+	if copyErr == nil && closeErr != nil {
+		copyErr = closeErr
+	}
+	if copyErr == nil && n != size {
+		copyErr = storage.ErrSizeMismatch
+	}
+	if copyErr != nil {
+		os.Remove(tmp)
+		return false, copyErr
+	}
+	if ctx.Err() != nil {
+		os.Remove(tmp)
+		return false, ctx.Err()
 	}
 	if err := os.Rename(tmp, p); err != nil {
 		os.Remove(tmp)
@@ -65,21 +86,38 @@ func (s *Store) Put(_ context.Context, key string, data []byte) (written bool, e
 	return true, nil
 }
 
-func (s *Store) Get(_ context.Context, key string) ([]byte, error) {
-	return os.ReadFile(s.path(key))
-}
-
-func (s *Store) GetRange(_ context.Context, key string, offset, length int64) ([]byte, error) {
+func (s *Store) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	f, err := os.Open(s.path(key))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, storage.ErrNotFound
+		}
 		return nil, err
 	}
-	defer f.Close()
-
-	buf := make([]byte, length)
-	n, err := f.ReadAt(buf, offset)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
-	}
-	return buf[:n], nil
+	return f, nil
 }
+
+func (s *Store) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	f, err := os.Open(s.path(key))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, storage.ErrNotFound
+		}
+		return nil, err
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return rangeReadCloser{Reader: io.LimitReader(f, length), f: f}, nil
+}
+
+// rangeReadCloser pairs a bounded Reader over an open *os.File with that
+// file's Close, so GetRange's caller can Close the returned io.ReadCloser
+// without needing to know a file underlies it.
+type rangeReadCloser struct {
+	io.Reader
+	f *os.File
+}
+
+func (r rangeReadCloser) Close() error { return r.f.Close() }

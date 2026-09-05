@@ -29,9 +29,9 @@ func (s *Server) handleReconstructionV1(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	s.mu.RLock()
+	s.fileReconMu.RLock()
 	entries, ok := s.fileRecon[fileID]
-	s.mu.RUnlock()
+	s.fileReconMu.RUnlock()
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -73,9 +73,9 @@ func (s *Server) handleReconstructionV1(w http.ResponseWriter, r *http.Request) 
 			firstTerm = false
 		}
 
-		s.mu.RLock()
+		s.xorbMu.RLock()
 		footer, known := s.xorbFooters[e.XorbHash]
-		s.mu.RUnlock()
+		s.xorbMu.RUnlock()
 		if !known {
 			httpError(w, fmt.Sprintf("reconstruction references unknown xorb %s", e.XorbHash.Hex()), http.StatusInternalServerError)
 			return

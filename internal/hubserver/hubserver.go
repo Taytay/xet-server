@@ -18,7 +18,7 @@ package hubserver
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -44,6 +44,9 @@ type Server struct {
 	CAS        casInfo
 	mux        *http.ServeMux
 
+	// mu guards only the repos map itself (adding a new repoKey); each
+	// repoState has its own mutex for its files, so a commit/resolve on
+	// one repo never blocks on unrelated activity in another.
 	mu    sync.RWMutex
 	repos map[repoKey]*repoState
 }
@@ -64,6 +67,7 @@ type fileRef struct {
 }
 
 type repoState struct {
+	mu         sync.RWMutex
 	files      map[string]*fileRef // keyed by path in repo
 	commitOID  string
 	commitSeen bool
@@ -181,8 +185,15 @@ func (s *Server) getOrCreateRepo(repoType, repoID string) *repoState {
 	return rs
 }
 
+// httpErrorJSON writes a JSON error response and logs it at a level
+// matching its cause — see casserver.httpError's comment for why 5xx and
+// 4xx are split between Warn and Debug.
 func httpErrorJSON(w http.ResponseWriter, msg string, code int) {
-	log.Printf("hubserver: %d %s", code, msg)
+	if code >= 500 {
+		slog.Warn("hubserver: request failed", "status", code, "error", msg)
+	} else {
+		slog.Debug("hubserver: request rejected", "status", code, "error", msg)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})

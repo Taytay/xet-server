@@ -3,6 +3,7 @@ package s3store
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"testing"
 )
@@ -38,7 +39,7 @@ func TestAgainstLiveMinIO(t *testing.T) {
 	// Best-effort cleanup from a prior failed run; not required to succeed.
 	_ = has
 
-	written, err := s.Put(ctx, key, data)
+	written, err := s.Put(ctx, key, bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
@@ -54,24 +55,34 @@ func TestAgainstLiveMinIO(t *testing.T) {
 		t.Fatal("Has() = false immediately after Put()")
 	}
 
-	got, err := s.Get(ctx, key)
+	gotRC, err := s.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
+	}
+	got, err := io.ReadAll(gotRC)
+	gotRC.Close()
+	if err != nil {
+		t.Fatalf("read Get() body: %v", err)
 	}
 	if !bytes.Equal(got, data) {
 		t.Fatalf("Get() = %q, want %q", got, data)
 	}
 
-	rangeData, err := s.GetRange(ctx, key, 6, 4)
+	rangeRC, err := s.GetRange(ctx, key, 6, 4)
 	if err != nil {
 		t.Fatalf("GetRange() error = %v", err)
+	}
+	rangeData, err := io.ReadAll(rangeRC)
+	rangeRC.Close()
+	if err != nil {
+		t.Fatalf("read GetRange() body: %v", err)
 	}
 	want := data[6:10]
 	if !bytes.Equal(rangeData, want) {
 		t.Fatalf("GetRange(6, 4) = %q, want %q", rangeData, want)
 	}
 
-	written2, err := s.Put(ctx, key, data)
+	written2, err := s.Put(ctx, key, bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatalf("second Put() error = %v", err)
 	}

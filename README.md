@@ -61,10 +61,13 @@ by capturing and replaying genuine client traffic. See
   `internal/bg4`): written directly from the public LZ4 spec / verified
   against a third-party reference implementation, so chunk hashes can be
   independently re-verified regardless of compression scheme.
-- **Pluggable storage** (`internal/storage`): a `Store` interface with
-  filesystem (`fsstore`) and S3-compatible (`s3store`) backends — the S3
-  backend uses a from-scratch AWS SigV4 signer (`internal/sigv4`), no AWS
-  SDK dependency.
+- **Pluggable, streaming storage** (`internal/storage`): a `Store`
+  interface with filesystem (`fsstore`) and S3-compatible (`s3store`)
+  backends, built on `io.Reader`/`io.ReadCloser` rather than `[]byte` —
+  neither backend ever buffers a full object in memory, so a multi-GB
+  upload/download costs a fixed amount of memory. The S3 backend uses a
+  from-scratch AWS SigV4 signer (`internal/sigv4`), no AWS SDK dependency.
+  Verified end-to-end with real GGUF model files up to 27.6 GB.
 - **Zero required external dependencies to build the demo path**; the
   protocol path adds exactly one pure-Go module
   (`github.com/zeebo/blake3`), pinned in `go.sum`.
