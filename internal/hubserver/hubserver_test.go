@@ -101,6 +101,24 @@ func TestXetWriteToken_SetsHeaders(t *testing.T) {
 	if resp.Header.Get("X-Xet-Access-Token") == "" {
 		t.Error("X-Xet-Access-Token header missing")
 	}
+
+	// hf_xet's Rust client (DirectRefreshRouteTokenRefresher::get_cas_jwt in
+	// xet-core) decodes this response as JSON, not from headers — an empty
+	// body here makes it retry indefinitely instead of failing fast. See
+	// xet_client/src/hub_client/types.rs's CasJWTInfo for the wire format.
+	var body xetTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode JSON body: %v", err)
+	}
+	if body.CasURL != "http://localhost:9999" {
+		t.Errorf("casUrl = %q, want %q", body.CasURL, "http://localhost:9999")
+	}
+	if body.AccessToken == "" {
+		t.Error("accessToken missing from JSON body")
+	}
+	if body.Exp == 0 {
+		t.Error("exp missing from JSON body")
+	}
 }
 
 func TestCommit_ParsesLfsFileEntries(t *testing.T) {

@@ -2,8 +2,8 @@ package casserver
 
 import (
 	"bytes"
-	"encoding/hex"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"xet-server/internal/shardformat"
@@ -30,15 +30,23 @@ func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	for _, f := range shard.Files {
 		s.fileRecon[f.Header.FileHash] = f.Entries
+		hasExt := f.MetadataExt != nil
+		var sha256Hex string
 		if f.MetadataExt != nil {
-			// FileMetadataExt.SHA256 is a plain SHA-256, not a Xet/Merkle
-			// hash, even though it's stored in the wire-compatible 32-byte
-			// merklehash.Hash type — encode via its raw bytes, not Hex()
-			// (which applies Xet's word-reversal transform and would not
-			// match the plain lowercase hex huggingface_hub sends as the
-			// commit payload's lfsFile.oid).
-			s.sha256ToXet[hex.EncodeToString(f.MetadataExt.SHA256.Bytes())] = f.Header.FileHash
+			// FileMetadataExt.SHA256 reuses the 32-byte merklehash.Hash type
+			// for storage, but real hf_xet clients write it through the same
+			// byte-order transform as a genuine Merkle hash's Hex() (word
+			// reversal per 8-byte little-endian group) — confirmed by
+			// capturing a real upload and comparing MetadataExt.SHA256's raw
+			// bytes against the plain SHA-256 in the commit payload's
+			// lfsFile.oid: Hex() of the former equals the latter exactly.
+			// A raw-byte hex encode (hex.EncodeToString(Bytes())) silently
+			// produces a different string that never matches oid, so the
+			// resolve/download path's sha256->Xet-hash lookup always missed.
+			sha256Hex = f.MetadataExt.SHA256.Hex()
+			s.sha256ToXet[sha256Hex] = f.Header.FileHash
 		}
+		slog.Debug("shard file indexed", "fileHash", f.Header.FileHash.Hex(), "hasMetadataExt", hasExt, "sha256Hex", sha256Hex)
 	}
 	s.mu.Unlock()
 

@@ -2,6 +2,8 @@ package casserver
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -260,6 +262,92 @@ func TestFullFileRoundtrip(t *testing.T) {
 
 	if !bytes.Equal(reassembled.Bytes(), fileContent) {
 		t.Errorf("reassembled file = %q, want %q", reassembled.Bytes(), fileContent)
+	}
+}
+
+// TestXetHashForSHA256_UsesHexEncoding is a regression test for a bug
+// found by driving a real `hf upload`/`hf download` round-trip through
+// this server: real hf_xet clients write FileMetadataExt.SHA256 through
+// the same byte-order transform as a genuine Merkle hash's Hex() (word
+// reversal per 8-byte little-endian group), not as the plain SHA-256's
+// raw bytes. Indexing sha256ToXet with a raw hex encode
+// (hex.EncodeToString(SHA256.Bytes())) therefore produced a key that
+// never matched the plain SHA-256 huggingface_hub sends as the commit
+// payload's lfsFile.oid, so XetHashForSHA256 always missed and every
+// `hf download` 404'd. Confirmed against a real captured upload: Hex()
+// of the raw MetadataExt.SHA256 bytes equals the file's actual SHA-256
+// exactly; a raw hex encode does not.
+func TestXetHashForSHA256_UsesHexEncoding(t *testing.T) {
+	ts, srv := newTestServer(t)
+
+	payloads := [][]byte{[]byte("metadata ext regression test content")}
+	xorbBlob, xorbHash, chunkHashes := buildXorb(t, payloads)
+
+	resp, err := http.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(xorbBlob))
+	if err != nil {
+		t.Fatalf("upload xorb error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload xorb status = %d", resp.StatusCode)
+	}
+
+	var chunkEntries []merklehash.ChunkEntry
+	for i, h := range chunkHashes {
+		chunkEntries = append(chunkEntries, merklehash.ChunkEntry{Hash: h, Size: uint64(len(payloads[i]))})
+	}
+	fileHash := merklehash.FileHash(chunkEntries)
+
+	// A real SHA-256 (of arbitrary content, unrelated to the xorb/chunk
+	// hashes above — this field is deliberately a different hash space).
+	// Real hf_xet clients write this field's wire bytes such that Hex()
+	// of those bytes equals the plain SHA-256's normal hex string — build
+	// it the same way via FromHex, rather than a raw byte copy, to mirror
+	// what actually appears on the wire.
+	plainSHA256 := sha256.Sum256([]byte("plain sha256 of the uploaded file"))
+	plainSHA256Hex := hex.EncodeToString(plainSHA256[:])
+	metadataExtHash, err := merklehash.FromHex(plainSHA256Hex)
+	if err != nil {
+		t.Fatalf("FromHex() error = %v", err)
+	}
+
+	fileEntry := shardformat.FileEntry{
+		Header: shardformat.FileDataSequenceHeader{FileHash: fileHash, NumEntries: 1},
+		Entries: []shardformat.FileDataSequenceEntry{
+			{
+				XorbHash:             xorbHash,
+				UnpackedSegmentBytes: uint32(len(payloads[0])),
+				ChunkIndexStart:      0,
+				ChunkIndexEnd:        uint32(len(payloads)),
+			},
+		},
+		MetadataExt: &shardformat.FileMetadataExt{SHA256: metadataExtHash},
+	}
+
+	var shardBuf bytes.Buffer
+	if _, err := shardformat.WriteShard(&shardBuf, []shardformat.FileEntry{fileEntry}, nil); err != nil {
+		t.Fatalf("WriteShard() error = %v", err)
+	}
+
+	shardResp, err := http.Post(ts.URL+"/v1/shards", "application/octet-stream", &shardBuf)
+	if err != nil {
+		t.Fatalf("upload shard error = %v", err)
+	}
+	defer shardResp.Body.Close()
+	if shardResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(shardResp.Body)
+		t.Fatalf("upload shard status = %d, body = %s", shardResp.StatusCode, body)
+	}
+
+	// The lookup key a real Hub API shim uses: the plain SHA-256's normal
+	// lowercase hex (what huggingface_hub sends as lfsFile.oid), not the
+	// raw wire bytes' hex encode.
+	got, ok := srv.XetHashForSHA256(plainSHA256Hex)
+	if !ok {
+		t.Fatalf("XetHashForSHA256(%s) not found; sha256ToXet was indexed under the wrong key", plainSHA256Hex)
+	}
+	if got != fileHash {
+		t.Errorf("XetHashForSHA256(%s) = %s, want %s", plainSHA256Hex, got.Hex(), fileHash.Hex())
 	}
 }
 

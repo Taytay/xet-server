@@ -1,6 +1,7 @@
 package hubserver
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 )
@@ -22,12 +23,14 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 	s.mu.RLock()
 	ref, ok := rs.files[filename]
 	s.mu.RUnlock()
+	slog.Debug("resolve lookup", "repoID", repoID, "filename", filename, "found", ok)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 
 	xetHash, known := s.CAS.XetHashForSHA256(ref.SHA256Hex)
+	slog.Debug("resolve xetHash lookup", "sha256Hex", ref.SHA256Hex, "known", known)
 	if !known {
 		// The shard carrying this file's metadata_ext hasn't been uploaded
 		// yet (or ever will be, e.g. an interrupted upload) — nothing to
@@ -36,6 +39,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 		return
 	}
 	size, known := s.CAS.FileSize(xetHash)
+	slog.Debug("resolve fileSize lookup", "xetHash", xetHash.Hex(), "known", known)
 	if !known {
 		http.NotFound(w, r)
 		return

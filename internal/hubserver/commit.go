@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 )
 
@@ -44,6 +45,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, 
 	var fileCount int
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		slog.Debug("commit line", "repoID", repoID, "raw", string(line))
 		if len(line) == 0 {
 			continue
 		}
@@ -68,6 +70,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, 
 		httpErrorJSON(w, "read commit body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	slog.Debug("commit parsed", "repoID", repoID, "fileCount", fileCount)
 
 	oid, err := randomCommitOID()
 	if err != nil {

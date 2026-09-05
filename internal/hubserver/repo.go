@@ -53,11 +53,24 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// xetTokenResponse is the JSON body real HF Hub returns from
+// xet-{read,write}-token, per xet-core's CasJWTInfo (xet_client/src/hub_client/types.rs):
+// hf_xet's Rust client decodes this response as JSON (DirectRefreshRouteTokenRefresher::get_cas_jwt),
+// not from headers — a header-only response with an empty body fails
+// hf_xet's resp.json() decode, which it treats as a transient error and
+// retries indefinitely instead of failing fast.
+type xetTokenResponse struct {
+	CasURL      string `json:"casUrl"`
+	Exp         int64  `json:"exp"`
+	AccessToken string `json:"accessToken"`
+}
+
 // handleXetToken implements GET /api/{repo_type}s/{repo_id}/xet-{read,write}-token/{revision}:
-// issues a CAS endpoint + bearer token via response headers, per
-// huggingface_hub's parse_xet_connection_info_from_headers. Auth is not
-// modeled — any request succeeds and gets a fresh random token with a
-// generous expiry.
+// issues a CAS endpoint + bearer token, both as a JSON body (what hf_xet's
+// Rust client actually parses) and via the X-Xet-* response headers
+// (huggingface_hub's parse_xet_connection_info_from_headers, used on the
+// resolve/download path). Auth is not modeled — any request succeeds and
+// gets a fresh random token with a generous expiry.
 func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType, repoID string, kind xetTokenType) {
 	_ = kind // read vs write both get the same unrestricted token; no scope enforcement here
 	s.getOrCreateRepo(repoType, repoID)
@@ -72,7 +85,11 @@ func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType
 	w.Header().Set("X-Xet-Cas-Url", s.CASBaseURL)
 	w.Header().Set("X-Xet-Access-Token", token)
 	w.Header().Set("X-Xet-Token-Expiration", strconv.FormatInt(expiry, 10))
-	w.WriteHeader(http.StatusOK)
+	writeJSON(w, xetTokenResponse{
+		CasURL:      s.CASBaseURL,
+		Exp:         expiry,
+		AccessToken: token,
+	})
 }
 
 func randomToken() (string, error) {
