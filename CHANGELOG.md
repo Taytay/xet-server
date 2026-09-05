@@ -5,7 +5,7 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-09-04
 
 ### Added
 - `Pipfile`/`Pipfile.lock` and `make install`/`make install-deps` to manage
@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   functional, with a styled source + mermaid.live-link fallback
   otherwise). `make docs`/`make docs-serve` now just run this program;
   `make pre-check` reports which Mermaid renderer (if any) is available.
+- `.env`/`.env.example` support in the `Makefile` (`PIPENV_PYPI_MIRROR`,
+  for networks that can't reach `pypi.org` directly) — read by `make
+  install` via `include .env` + `export`, gitignored, never committed.
+- `DEBUG=1` environment variable for `cmd/xetd`: enables `log/slog` debug
+  logging of every HTTP request (method, path, status, duration) plus
+  commit/shard/resolve lookup details in `hubserver`/`casserver`. This is
+  what surfaced both real bugs fixed below.
 
 ### Changed
 - Integration test default timeout lowered from 60s to 10s
@@ -36,6 +43,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the optional `hf` CLI integration test, not docs.
 
 ### Fixed
+- `GET /api/{repo_type}s/{repo_id}/xet-{read,write}-token/{revision}`
+  (the Hub API shim) returned the CAS URL/access token only as
+  `X-Xet-*` response headers with an empty body. Real `hf_xet` clients
+  decode this response as a **JSON body**
+  (`DirectRefreshRouteTokenRefresher::get_cas_jwt` in xet-core, deserializing
+  into `CasJWTInfo{casUrl, exp, accessToken}`) — an empty body fails that
+  decode, which `hf_xet` treats as a transient error and retries
+  indefinitely instead of failing fast, so `hf upload` just hung past any
+  timeout. Now returns the JSON body in addition to the headers (the
+  latter still used by `huggingface_hub`'s resolve/download metadata
+  path). See [docs/PROTOCOL.md](docs/PROTOCOL.md) §6.
+- `casserver.handleUploadShard`'s `sha256ToXet` index (bridging a
+  committed file's plain SHA-256 to its Xet/Merkle hash for downloads)
+  was keyed by a raw hex encode of `FileMetadataExt.SHA256`'s wire
+  bytes. Real `hf_xet` clients write that field through the same
+  word-reversal byte-order transform as a genuine Merkle hash's `Hex()`
+  — confirmed by capturing a real upload and comparing the raw bytes
+  against the file's actual SHA-256 in the commit payload's
+  `lfsFile.oid`. The raw-byte encoding never matched, so every
+  `hf download` 404'd once uploads stopped hanging (previous bug). Fixed
+  to use `.Hex()`. See [docs/PROTOCOL.md](docs/PROTOCOL.md) §1/§3.
 - The Mermaid diagram fallback link (shown when no working Mermaid
   renderer is available) pointed to a `mermaid.live/edit#pako:` fragment
   built from a plain URL-encoded diagram source; mermaid.live actually
@@ -45,6 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/ARCHITECTURE.md`'s CAS-upload sequence diagram used `→` and a
   stray `;` inside a `Note over` line, which some Mermaid parsers
   (including `merman-cli`) reject — replaced with plain ASCII.
+- `make help` (and any target output listing `$(MAKEFILE_LIST)`) printed
+  `Makefile` as every target's name instead of the real target, once
+  `.env` was added to `MAKEFILE_LIST` via `include` — `grep -E` prefixes
+  matches with the source filename when searching more than one file,
+  which shifted `awk`'s field split. Fixed with `grep -hE`.
 
 ### Planned
 - ByteGrouping4LZ4 verification against a real captured chunk (currently only

@@ -94,6 +94,14 @@ and the key design decisions). Short version:
 - Bash (for integration tests)
 - (Optional, for the real `hf` CLI round-trip test) `pipenv`, to install
   `huggingface_hub` + `hf_xet`
+- (Optional) `merman-cli` or `mmdc` (mermaid-cli), to render Mermaid
+  diagrams as SVG in `make docs`/`make docs-serve` — falls back to a
+  source + mermaid.live link if neither is available
+
+If `pipenv` can't reach `pypi.org` directly (a corporate proxy, an
+air-gapped environment), copy `.env.example` to `.env` and set
+`PIPENV_PYPI_MIRROR` to a reachable index mirror; `.env` is read by
+`make install` and is gitignored.
 
 ## Build
 
@@ -235,6 +243,13 @@ go doc ./internal/merklehash
 go doc ./internal/casserver
 ```
 
+`make docs` regenerates the committed `docs/godoc/*.md` package reference
+(via `go doc -all`) and renders every Markdown doc in this repo to
+browsable HTML in `docs/build/`; `make docs-serve` does the same and then
+serves it locally. Both are implemented by `scripts/build_docs.go` (its
+own Go module, so the main `xet-server` module keeps zero external
+dependencies).
+
 # Where this diverges from real Xet
 
 - No revisions/branches in the Hub shim — every repo has one implicit
@@ -248,6 +263,20 @@ go doc ./internal/casserver
   survive a restart.
 
 # Troubleshooting
+
+### Debugging `xetd` itself
+Run `xetd` with `DEBUG=1` to log every HTTP request it receives (method,
+path, status, duration) plus commit/shard/resolve lookup details at debug
+level via the standard library's `log/slog`:
+
+```bash
+DEBUG=1 ./bin/xetd -addr :8420 -hub-addr :8421 -data ./xet-data
+```
+
+This is the fastest way to see whether a request from `hf upload`/`hf
+download` (or anything else) actually reached the server, and what it did
+once it got there — see [docs/PROTOCOL.md](docs/PROTOCOL.md)'s "How these
+were found" section for how this was used to track down real bugs.
 
 ### `hf upload`/`hf download` hangs or times out
 If you're in a sandboxed/corporate network that proxies all outbound

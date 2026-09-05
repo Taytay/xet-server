@@ -91,8 +91,11 @@ header comment and [docs/PROTOCOL.md](docs/PROTOCOL.md) for details.
 
 ## 3. Working with Documentation
 
-This project uses **godoc comments as the source of truth**, not a
-separate docs generator:
+This project uses **godoc comments as the source of truth** for
+implementation details, with a small Go program
+(`scripts/build_docs.go`, its own module so the main `xet-server` module
+keeps zero external dependencies) to make them — and every other
+Markdown doc in this repo — browsable:
 
 1. **Every package has a `// Package foo ...` comment** directly above its
    `package foo` declaration, on exactly one file in that package (Go
@@ -116,6 +119,19 @@ View a package's rendered docs locally:
 go doc ./internal/merklehash
 go doc ./internal/merklehash Hash.Hex
 ```
+
+Or regenerate the committed `docs/godoc/*.md` package reference and render
+every doc (README, CHANGELOG, CONTRIBUTING, `docs/*.md`, `docs/godoc/*.md`)
+to browsable HTML:
+
+```bash
+make docs          # -> docs/godoc/*.md (commit these) + docs/build/*.html
+make docs-serve    # same, then serves docs/build/ locally
+```
+
+`docs/godoc/*.md` is committed source — it's plain Markdown, so it renders
+natively on GitHub with no build step. `docs/build/` is a disposable,
+gitignored build artifact; never commit it.
 
 If you add a new package, give it a `// Package foo ...` comment before
 opening a PR — `go vet` won't catch a missing one, but reviewers will.
@@ -149,10 +165,15 @@ Xet-Server/
 │   ├── hubserver/            # Hub REST API shim (repo/commit/resolve)
 │   ├── chunk/, manifest/, api/, client/  # original simple chunk/dedup demo
 │   └── ...
+├── scripts/                  # build_docs.go — own go.mod, keeps the main
+│                              # module dependency-free (goldmark/chroma/
+│                              # goldmark-mermaid live only here)
 ├── integration-tests/        # bash scripts run by integrationTests.sh
 ├── docs/
 │   ├── ARCHITECTURE.md       # system diagram + package responsibilities
-│   └── PROTOCOL.md           # wire-compatibility deep dive
+│   ├── PROTOCOL.md           # wire-compatibility deep dive
+│   ├── godoc/                # generated package reference (commit these; `make docs`)
+│   └── build/                # rendered HTML (gitignored; `make docs-serve`)
 └── Makefile
 ```
 

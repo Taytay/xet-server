@@ -42,13 +42,19 @@ no transform** — `write_hash`/`read_hash` in xet-core's
 `serialization_utils.rs` just call `m.as_bytes()`. `merklehash.Hash.Bytes()`
 / `FromRawBytes()` are the untransformed accessors used by `xorbformat` and
 `shardformat`; `Hex()`/`FromHex()` are only for the JSON/URL-facing side.
-Mixing these up (e.g. calling `.Hex()` where a binary format expects raw
-bytes) produces a hash that looks plausible but is wrong — this is exactly
-the bug that had to be avoided when bridging `shardformat.FileMetadataExt`
-(a plain SHA-256, stored using the same 32-byte `Hash` type for
-convenience) into `hubserver`'s `sha256->XetHash` lookup: that lookup uses
-`hex.EncodeToString(h.Bytes())`, not `h.Hex()`, because the commit payload's
-`lfsFile.oid` is a plain lowercase-hex SHA-256 with no word-reversal.
+
+**The one field that breaks this rule**: `shardformat.FileMetadataExt.SHA256`
+reuses the 32-byte `Hash` type purely for storage (it holds a plain SHA-256,
+not a Merkle hash), but real `hf_xet` clients write its wire bytes through
+the *same* word-reversal transform as `Hex()` anyway — confirmed by
+capturing a real upload and comparing the field's raw bytes against the
+file's actual SHA-256 as declared in the commit payload's `lfsFile.oid`:
+`Hex()` of the raw bytes equals `lfsFile.oid` exactly; a raw hex encode
+(`hex.EncodeToString(h.Bytes())`) does not. `casserver.handleUploadShard`'s
+`sha256ToXet` index is therefore keyed by `h.Hex()`, not `h.Bytes()` — the
+opposite of what the "raw bytes for binary-format fields" rule above would
+suggest, and easy to get backwards (this project did, initially: the
+lookup silently missed on every real download until traced back to this).
 
 The Merkle-aggregation algorithm itself (branching factor 4, "natural cut"
 when a node's low 64 bits are divisible by 4, salted HMAC for file hashes)
@@ -137,8 +143,8 @@ now:
 The `FileMetadataExt.SHA256` field is also how `casserver` bridges a
 committed file's plain SHA-256 (from the Hub API's commit payload) to its
 Xet/Merkle hash — see `casserver.handleUploadShard`'s population of
-`sha256ToXet`, and the byte-order note in §1 about why that uses `.Bytes()`
-rather than `.Hex()`.
+`sha256ToXet`, and the byte-order note in §1 about why that uses `.Hex()`
+rather than `.Bytes()`.
 
 ## 4. Real chunk payloads are compressed — with LZ4 (frame format) and, optionally, byte-grouping
 
@@ -213,6 +219,48 @@ the requested window, computes `offset_into_first_range` correctly for a
 window that starts mid-term, and returns `416` when `rangeStart >= fileSize`
 — exactly the signal real `hf_xet` is waiting for to stop paging.
 
+## 6. The Hub API's xet-token response is a JSON body, not headers-only
+
+`GET /api/{repo_type}s/{repo_id}/xet-{read,write}-token/{revision}` looked
+like a pure headers-in/headers-out exchange from `huggingface_hub`'s Python
+side: `parse_xet_connection_info_from_headers` reads `X-Xet-Cas-Url`,
+`X-Xet-Access-Token`, and `X-Xet-Token-Expiration` straight off the
+response headers, and the original `hubserver.handleXetToken` set exactly
+those three headers and returned an empty `200` body.
+
+That's the wrong contract for the code path a real `hf upload`/`hf
+download` actually exercises. `hf_xet`'s Rust client fetches this same
+token via `DirectRefreshRouteTokenRefresher::get_cas_jwt`
+(`xet_client::cas_client::auth`), which decodes the response **body** as
+JSON into a `CasJWTInfo` struct
+(`xet_client::hub_client::types`):
+
+```rust
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CasJWTInfo {
+    pub cas_url: String,
+    pub exp: u64,
+    pub access_token: String,
+}
+```
+
+An empty body fails that JSON decode. `retry_wrapper.rs`'s
+`run_and_extract_json` classifies a decode error as **transient**
+(`e.is_decode()` → `RetryableReqwestError::RetryableError`) and retries
+with backoff — so instead of failing fast, `hf upload` just hung,
+re-requesting the same token every couple of seconds until the caller's
+own timeout eventually killed it. `parse_xet_connection_info_from_headers`
+is real code, just for a different caller (the resolve/download metadata
+path, which pairs `X-Xet-Hash` with a `Link: rel="xet-auth"` or
+`X-Xet-Refresh-Route` header) — not the write/read-token refresh endpoint
+`hf_xet`'s upload/download session itself calls.
+
+**The fix**: `handleXetToken` now returns `{"casUrl", "exp",
+"accessToken"}` as a JSON body (matching `CasJWTInfo`'s wire format
+exactly, camelCase field names included) *in addition to* the `X-Xet-*`
+headers, so both call sites are satisfied.
+
 ## How these were found: capture, don't guess
 
 Every fix above came from the same loop, not from re-reading the spec more
@@ -221,7 +269,13 @@ carefully:
 1. Point `hf_xet`'s low-level `XetSession` Python API directly at a local
    `casserver` instance (`endpoint=` kwarg — no Hub API needed for this
    step).
-2. Run a real upload/download and read the actual error.
+2. Run a real upload/download and read the actual error. Run `xetd` with
+   `DEBUG=1` alongside this to log every request it receives (method,
+   path, status, duration) plus commit/shard/resolve lookup details — the
+   §3 and §6 findings above were both traced this way: a request that
+   *should* have hit the CAS server (e.g. `POST /v1/xorbs/...`) never
+   showed up in the debug log at all, which pointed straight at the Hub
+   API step just before it instead of anywhere in the CAS path.
 3. When the error was opaque (e.g. a byte-count mismatch), insert a
    capturing HTTP proxy between the client and the server to record the
    exact raw request bytes.
