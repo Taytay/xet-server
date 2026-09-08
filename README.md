@@ -258,7 +258,9 @@ make integration-test    # now includes hf_cli_roundtrip.sh
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#2-running-tests) for the full test
 layer breakdown, including why several packages carry real-client
-`testdata/` fixtures.
+`testdata/` fixtures, native Go fuzz tests for every wire-format parser,
+adversarial/chaos tests against a live server, and dedup/hashing/
+compression benchmarks.
 
 # Documentation
 

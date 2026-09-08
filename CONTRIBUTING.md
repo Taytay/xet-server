@@ -89,6 +89,58 @@ a known environment limitation (`hf_xet`'s Rust HTTP client doesn't always
 honor `NO_PROXY` for localhost), not a protocol bug — see the script's
 header comment and [docs/PROTOCOL.md](docs/PROTOCOL.md) for details.
 
+### Fuzz tests
+
+Every binary/wire-format parser that touches attacker-controlled bytes has
+a native Go fuzz test (`go test -fuzz`, no external fuzzing framework)
+in a `fuzz_test.go` alongside its package: `internal/merklehash`,
+`internal/lz4`, `internal/bg4`, `internal/xorbformat`,
+`internal/shardformat`, `internal/casserver` (just `parseByteRange`).
+These found a real, confirmed allocation-size DoS during this project's
+first fuzzing pass — see [docs/PROTOCOL.md](docs/PROTOCOL.md)'s §7 for the
+full story and the general rule it generalizes to.
+
+```bash
+go test ./internal/shardformat/... -run '^$' -fuzz '^FuzzReadShard$' -fuzztime 60s
+```
+
+`-run '^$'` skips running the package's regular tests first (fuzzing
+implicitly runs the seed corpus as regular test cases anyway); drop it if
+you want both. If a fuzzer finds a crash, it writes the failing input to
+`testdata/fuzz/<FuzzName>/<hash>` in that package — commit that file as a
+permanent regression seed once you've fixed the bug it found, the same
+way `internal/casserver/testdata/`'s real-capture fixtures are committed.
+
+If you're on a machine where the default Go build cache directory isn't
+writable (e.g. a locked-down sandbox), set `GOCACHE` to somewhere it is:
+`GOCACHE=$(mktemp -d) go test ... -fuzz ...`.
+
+### Adversarial and chaos tests
+
+`*/adversarial_test.go` (in `internal/casserver`, `internal/hubserver`)
+post deliberately malformed/hostile payloads at the real HTTP handlers —
+truncated bodies, hostile path segments, malformed `Range` headers,
+`Content-Length` lies — and assert both a clean error response *and* that
+the server keeps working correctly afterward. `internal/casserver/chaos_test.go`
+goes further: sustained concurrent mixed valid/invalid traffic, an
+upload interrupted mid-body followed by a clean retry, and
+upload/fetch/eviction-sweep interleaving under a tight storage budget —
+each checked against actual data integrity (byte-identical round-trips),
+not just "didn't crash." Run these as part of `make test` like any other
+Go test; they're intentionally fast enough not to need a separate target.
+
+### Benchmarks
+
+`*/benchmark_test.go` covers chunking (`internal/chunk`), hashing
+(`internal/merklehash`), LZ4/ByteGrouping4 decompression (`internal/lz4`,
+`internal/bg4`), and dedup speed (`internal/api` — fully-duplicate vs.
+always-unique upload throughput at the same size, quantifying what dedup
+actually buys in wall-clock terms):
+
+```bash
+go test ./internal/merklehash/... -bench . -benchtime 1s -benchmem -run '^$'
+```
+
 ## 3. Working with Documentation
 
 This project uses **godoc comments as the source of truth** for

@@ -5,6 +5,133 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-07
+
+A fuzzing and chaos-testing pass across the wire-format parsers and
+storage layer, driven by "how do we know this is actually safe against a
+hostile or merely broken client" rather than a new feature — specifically
+including whether the dedup fast-path itself could be cheaply starved or
+bypassed. Found and fixed four real bugs, two of them genuine
+remotely-triggerable DoS vectors, plus added the test infrastructure
+(native Go fuzzers, adversarial HTTP payload tests, chaos/concurrency
+tests, benchmarks) to keep catching this class of issue going forward.
+
+### Fixed
+- **LZ4 decompression-amplification denial-of-service — the more severe
+  of the two DoS findings, and the direct answer to "can dedup itself be
+  attacked":** `decompressBlockUnknownSize` regrew its output buffer by
+  doubling with no ceiling whenever decompression exceeded the current
+  buffer. LZ4's block format lets a single match-length extension sequence
+  (a run of `0xFF` bytes, each worth +255 to the match length) expand to
+  hundreds of times its compressed size. **Empirically confirmed**: a
+  ~16 MiB compressed chunk — well within a single chunk's 24-bit
+  `CompressedLength` field, and far under `casserver`'s 128 MiB
+  whole-upload cap — decompressed to **3.8 GB and took ~8 seconds** on
+  ordinary hardware. Critically, this cost is paid on *every* upload
+  attempt of the same malicious xorb: a chunk's hash can't be verified
+  (and therefore can't be deduplicated against) without first
+  decompressing it, so **the dedup fast-path provides no mitigation for
+  this attack shape** — investigated specifically in response to the
+  question of whether dedup itself opens a cheaper DoS path. Fixed by
+  treating the LZ4 frame descriptor's declared max-block-size code as a
+  hard decompression ceiling rather than merely an initial sizing guess —
+  a real, spec-compliant encoder never produces a block exceeding it, so
+  rejecting one that does can only ever reject a malformed or hostile
+  frame, never a legitimate one. See `docs/PROTOCOL.md` §7 and
+  `internal/lz4/dos_test.go`.
+- **Allocation-size denial-of-service in shard/xorb parsing.**
+  `shardformat.ReadFileLookupTable`/`ReadXorbLookupTable`/
+  `ReadChunkLookupTable` and `readFileInfoSection`/`readXorbInfoSection`
+  allocated `make([]T, numEntries)` directly from an attacker-controlled
+  wire field (`FileDataSequenceHeader.NumEntries`,
+  `XorbChunkSequenceHeader.NumEntries`, and the footer's lookup-table entry
+  counts), with no bound against how many bytes were actually available to
+  read. **Empirically confirmed**: a 96-byte malicious shard body claiming
+  `NumEntries = 0xFFFFFFFF`, posted to `POST /v1/shards` (no auth
+  required, well under the existing 16 MiB `maxShardBytes` cap), forced a
+  single allocation request of **206,158,505,008 bytes (~192 GiB)** — an
+  instant crash on any real machine. `xorbformat.ParseFooterV1`'s three
+  `numChunks`-sized allocations had the identical shape (not currently
+  reachable via any HTTP path, since real clients upload xorbs without a
+  footer — see PROTOCOL.md §2 — but fixed anyway since it parses
+  untrusted-shaped data). Fixed by switching every site to incremental
+  `append`-based growth capped at a small preallocation ceiling
+  (`maxLookupEntryPreallocate`/`maxSectionEntryPreallocate`/
+  `maxFooterEntryPreallocate`, 4096 entries): a claim of billions of
+  entries now fails fast on the first genuinely-missing byte instead of
+  attempting the allocation upfront, while a legitimately large, honest
+  shard/footer still parses correctly via `append`'s normal growth.
+  Regression tests in `internal/shardformat/dos_test.go` reproduce the
+  exact malicious payload and assert it fails within 5 seconds without
+  attempting more than 64 MiB of heap growth.
+- **Concurrent uploads of the same content could spuriously fail.**
+  `fsstore.Put`'s staging temp file was named `<path>.tmp-<pid>` — every
+  concurrent `Put` call for the *same key* within one process (e.g. several
+  clients uploading an identical xorb at once) collided on that exact
+  path, and `O_EXCL` correctly rejected the collision with `EEXIST`,
+  surfacing as a `500` to every request but one. This is a normal,
+  expected race for a content-addressed store (concurrent duplicate
+  uploads should all succeed via dedup, not serialize on a filename
+  accident) — found by
+  `TestAdversarial_ConcurrentUploadsOfSameXorb` firing 20 concurrent
+  uploads of one xorb and observing only 1 succeed. Fixed by using
+  `os.CreateTemp` (a unique random suffix per call) instead of a
+  PID-based name, plus treating a losing `os.Rename` race as a successful
+  dedup (not a failure) as long as the target path exists afterward.
+- **`fsstore.TotalBytes` (backing the eviction sweep's storage-budget
+  check) could abort entirely on an ordinary concurrent race.** Found by
+  `TestChaos_UploadFetchEvictInterleaved` running uploads, fetches, and an
+  eviction sweep concurrently: `filepath.WalkDir` visiting a path that a
+  concurrent `Put`'s rename or a concurrent `Delete` had just removed
+  returned `os.ErrNotExist`, which the walk callback treated as a fatal
+  error, aborting the *entire* measurement rather than just skipping that
+  one now-vanished entry. Fixed to treat a disappearing file/directory as
+  "not there anymore, don't count it" rather than a walk failure.
+  Separately, in-flight upload staging files (`.tmp-*`) were being counted
+  toward the budget at all — inflating it with uploads that hadn't
+  committed and might never complete — and a staging file orphaned by a
+  crashed process (never reaching its own cleanup) would then be silently
+  excluded *forever*, a permanent disk-space leak hidden from the count.
+  Fixed: a temp file younger than 30 minutes is excluded (presumed
+  legitimately in-flight); one older than that is treated as orphaned and
+  actually removed, so disk space is reclaimed rather than just hidden.
+
+### Added
+- **Native Go fuzz tests** (`go test -fuzz`) for every binary/wire parser
+  reachable with attacker-controlled bytes: `merklehash.FromHex`/
+  `FromRawBytes`, `lz4.DecompressFrame`/`DecompressBlock`, `bg4.Reverse`,
+  `xorbformat.ReadChunkHeader`/`ScanChunks`/`ParseFooterV1`,
+  `shardformat.ReadShard`, and `casserver.parseByteRange`. Seeded with
+  valid round-tripped encodings (including the real `hf_xet`-captured
+  fixtures already in `testdata/`) plus hand-picked edge cases. Each ran
+  clean (zero crashes/hangs/OOMs) across tens of millions of executions
+  combined during this pass — see `*/fuzz_test.go`.
+- **Adversarial HTTP payload tests** (`*/adversarial_test.go`): malformed
+  xorb/shard bodies, hostile hash/path/filename segments (path traversal,
+  SQL-injection shapes, null bytes, oversized ndjson lines), malformed
+  `Range` headers, `Content-Length` lies, and a concurrent-duplicate-upload
+  stress test — each asserting both a clean error response *and* that the
+  server keeps serving correctly afterward, not just "didn't crash on this
+  one request."
+- **Chaos/reliability tests** (`internal/casserver/chaos_test.go`): an
+  upload interrupted mid-body followed by a clean retry (proving
+  `fsstore.Put`'s atomic-rename staging leaves no corruption for the retry
+  to inherit), sustained concurrent traffic mixing valid and malformed
+  requests (proving malformed traffic never corrupts or drops unrelated
+  valid state), and upload/fetch/eviction-sweep interleaving under a tight
+  storage budget (proving no deadlock and no corruption of anything the
+  sweep didn't evict).
+- **Benchmarks** (`*/benchmark_test.go`, `go test -bench`): chunking
+  throughput (`internal/chunk`), BLAKE3-keyed hashing and Merkle
+  aggregation (`internal/merklehash`), LZ4 frame decompression
+  (`internal/lz4`, including against the real captured fixture),
+  ByteGrouping4 reverse transform (`internal/bg4`), and a dedup-speed
+  benchmark (`internal/api`) quantifying the actual wall-clock advantage of
+  deduplication: a fully-duplicate 16 MB upload runs at **~250 MB/s**
+  versus **~74 MB/s** for entirely unique content of the same size — a
+  **~3.4x** throughput difference from skipping storage I/O on the dedup
+  fast path (chunking/hashing cost is paid either way).
+
 ## [0.5.0] - 2026-09-07
 
 Defense-in-depth follow-up to 0.4.0's performance work: bounded, observable

@@ -227,6 +227,16 @@ func readShardWithFooter(r io.ReadSeeker, header Header) (*Shard, error) {
 	return s, nil
 }
 
+// maxSectionEntryPreallocate caps upfront allocation capacity for a
+// file's/xorb's entry list, for the same reason as
+// lookup.go's maxLookupEntryPreallocate: fh.NumEntries/xh.NumEntries are
+// attacker-controlled uint32 wire fields, and a tiny malicious shard
+// claiming NumEntries near uint32's max must not force a multi-gigabyte
+// allocation before any of those claimed entries have actually been read
+// off the wire. append still lets a genuinely large, honest section grow
+// past this cap.
+const maxSectionEntryPreallocate = 4096
+
 // readFileInfoSection reads FileDataSequenceHeader+entries records from r's
 // current position until the bookend header, per file.
 func readFileInfoSection(r io.Reader) ([]FileEntry, error) {
@@ -239,24 +249,24 @@ func readFileInfoSection(r io.Reader) ([]FileEntry, error) {
 		if fh.IsBookend() {
 			return files, nil
 		}
-		entries := make([]FileDataSequenceEntry, fh.NumEntries)
-		for i := range entries {
+		entries := make([]FileDataSequenceEntry, 0, min(uint64(fh.NumEntries), maxSectionEntryPreallocate))
+		for i := uint32(0); i < fh.NumEntries; i++ {
 			e, err := ReadFileDataSequenceEntry(r)
 			if err != nil {
 				return nil, err
 			}
-			entries[i] = e
+			entries = append(entries, e)
 		}
 
 		fe := FileEntry{Header: fh, Entries: entries}
 		if fh.ContainsVerification() {
-			verification := make([]FileVerificationEntry, fh.NumEntries)
-			for i := range verification {
+			verification := make([]FileVerificationEntry, 0, min(uint64(fh.NumEntries), maxSectionEntryPreallocate))
+			for i := uint32(0); i < fh.NumEntries; i++ {
 				v, err := ReadFileVerificationEntry(r)
 				if err != nil {
 					return nil, err
 				}
-				verification[i] = v
+				verification = append(verification, v)
 			}
 			fe.Verification = verification
 		}
@@ -284,13 +294,13 @@ func readXorbInfoSection(r io.Reader) ([]XorbEntry, error) {
 		if xh.IsBookend() {
 			return xorbs, nil
 		}
-		chunks := make([]XorbChunkSequenceEntry, xh.NumEntries)
-		for i := range chunks {
+		chunks := make([]XorbChunkSequenceEntry, 0, min(uint64(xh.NumEntries), maxSectionEntryPreallocate))
+		for i := uint32(0); i < xh.NumEntries; i++ {
 			c, err := ReadXorbChunkSequenceEntry(r)
 			if err != nil {
 				return nil, err
 			}
-			chunks[i] = c
+			chunks = append(chunks, c)
 		}
 		xorbs = append(xorbs, XorbEntry{Header: xh, Chunks: chunks})
 	}

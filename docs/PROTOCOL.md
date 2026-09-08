@@ -261,6 +261,110 @@ path, which pairs `X-Xet-Hash` with a `Link: rel="xet-auth"` or
 exactly, camelCase field names included) *in addition to* the `X-Xet-*`
 headers, so both call sites are satisfied.
 
+## 7. Never trust a wire-format entry count enough to allocate it upfront
+
+Unlike sections 1-6, this isn't a case where the real client's behavior
+diverges from a spec — it's a lesson from fuzzing this project's *own*
+implementation of the spec, worth documenting here because the same
+mistake is easy to reintroduce in any new wire-format reader.
+
+`shardformat.FileDataSequenceHeader.NumEntries`,
+`XorbChunkSequenceHeader.NumEntries`, and the shard footer's three
+lookup-table entry counts are all read directly off the wire as a
+`uint32`/`uint64` — a real client always writes an honest count matching
+what actually follows, but nothing stops a hostile payload from claiming
+any value up to that type's maximum. The original readers did
+`make([]FileDataSequenceEntry, fh.NumEntries)` (and the equivalent for
+every other entry type) *before* reading a single one of those claimed
+entries off the wire. A 96-byte payload claiming `NumEntries =
+0xFFFFFFFF` (~4.29 billion) — at 48 bytes per `FileDataSequenceEntry` —
+forced a single allocation request of **206,158,505,008 bytes (~192
+GiB)**, confirmed by temporarily reverting the fix and running the
+payload through `ReadShard` directly. Since `POST /v1/shards` requires no
+auth and this payload is a fraction of the existing 16 MiB
+`maxShardBytes` cap, this was a genuine unauthenticated remote DoS, not a
+theoretical one.
+
+The fix, applied everywhere this pattern occurred
+(`internal/shardformat/lookup.go`, `internal/shardformat/shard.go`,
+`internal/xorbformat/xorbformat.go`'s `ParseFooterV1`): allocate with
+`make([]T, 0, cap)` where `cap` is `min(claimedCount,
+someSmallPreallocationCeiling)` — a few thousand entries, comfortably
+above any realistic real-world shard/xorb — then `append` incrementally
+as each entry is actually read off the wire. A dishonest claim now fails
+fast the moment the reader hits EOF looking for the next entry that was
+never there, having allocated at most the small ceiling's worth of
+capacity; an honest, even very large, shard still parses correctly since
+`append` grows past the initial capacity exactly as it would for any
+other slice.
+
+**The general rule this generalizes to**: any time a wire format lets the
+sender declare "there are N of X following," and N determines an upfront
+allocation size, N must be either (a) validated against the number of
+bytes actually available before allocating, or (b) not trusted for sizing
+at all — build the collection incrementally via `append` and let a false
+claim fail on the read, not the allocation. `internal/shardformat/dos_test.go`
+carries a regression test reproducing the exact payload shape above, and
+`internal/shardformat/fuzz_test.go`/`internal/xorbformat/fuzz_test.go`
+fuzz the same readers on an ongoing basis specifically to catch a
+reintroduction of this class of bug in a new code path.
+
+## 8. Decompression amplification: dedup cannot mitigate a compression bomb
+
+This one came from a direct question worth stating explicitly: **can the
+dedup fast-path itself be attacked, or used to make an attack cheaper?**
+The answer for this specific shape is no — dedup makes no difference here
+at all, because the attack lands *before* dedup is even possible.
+
+`internal/lz4/frame.go`'s `decompressBlockUnknownSize` decompresses one
+LZ4 block without knowing its exact decoded size in advance (the LZ4
+frame format doesn't store it). The original implementation started from
+a size hint and, whenever decompression overflowed the current buffer,
+doubled the buffer and retried — with no ceiling. LZ4's block format lets
+a single match-length extension sequence (a run of `0xFF` bytes in the
+token's length-extension encoding, each worth +255 to the match length —
+see `readExtendedLength` in `internal/lz4/block.go`) expand to hundreds of
+times its compressed size, entirely independent of any hash or dedup
+logic elsewhere in the server.
+
+Measured directly: a ~16 MiB compressed chunk (comfortably inside a
+single chunk's 24-bit `CompressedLength` wire field, and far under
+`casserver.maxXorbBytes`'s 128 MiB whole-upload cap) decompressed to
+**3.8 GB and took ~8 seconds** on ordinary hardware before the fix below.
+
+Why dedup can't help: `casserver.handleUploadXorb` must decompress every
+chunk's payload to compute its real content hash
+(`merklehash.ComputeDataHash`) and verify it against the xorb hash claimed
+in the URL — that decompression happens *before* the server has any hash
+to check against `storage.Store.Has`-style existing-key logic. An
+attacker re-uploading the identical malicious xorb a thousand times pays
+(and forces the server to pay) the full ~8-second decompression cost
+every single time; there is no cheaper "we've seen this before" path,
+because being able to recognize "we've seen this before" is exactly what
+the expensive step produces.
+
+**The fix**: the LZ4 frame format's own frame descriptor declares a
+block-max-size code (a 3-bit field mapping to 64 KiB/256 KiB/1 MiB/4 MiB —
+see `maxBlockSizeForCode`). A real, spec-compliant LZ4 encoder never
+produces a block whose decompressed size exceeds this declared maximum —
+it's not a hint, it's a hard guarantee the format makes. Treating it as
+just an *initial* sizing guess (and growing past it indefinitely) was the
+bug; `decompressBlockUnknownSize` now enforces it as a ceiling, rejecting
+any block that grows past it as malformed/hostile. This can only ever
+reject a frame that violates the spec's own guarantee — no legitimate
+frame is affected. See `internal/lz4/dos_test.go`'s
+`TestDecompressFrame_RejectsAmplificationBomb` (reproduces the exact
+payload shape, asserts rejection within 2 seconds and bounded heap growth)
+and `TestDecompressFrame_LargeBlockUnderCeilingStillWorks` (confirms a
+legitimately large block under the ceiling still decodes correctly).
+
+The general lesson, distinct from but complementary to §7's: a format
+that lets the *sender* declare a bound on decoded size (here, the frame
+descriptor's block-max-size code) should have that bound *enforced* by
+the reader, not merely *consulted* as a starting guess. A hint that isn't
+also a ceiling gives an attacker exactly the amplification room the
+format's own spec was trying to prevent.
+
 ## How these were found: capture, don't guess
 
 Every fix above came from the same loop, not from re-reading the spec more

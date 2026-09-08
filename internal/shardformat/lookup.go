@@ -40,9 +40,19 @@ func WriteFileLookupTable(w io.Writer, entries []FileLookupEntry) error {
 	return nil
 }
 
+// maxLookupEntryPreallocate caps how many entries ReadFileLookupTable /
+// ReadXorbLookupTable / ReadChunkLookupTable will pre-allocate capacity
+// for upfront, regardless of what numEntries (an attacker-controlled wire
+// field) claims. Reading still proceeds via append past this cap for a
+// genuinely large, honest table — this only prevents a tiny malicious
+// shard from claiming numEntries near uint64's max and forcing a
+// multi-gigabyte allocation before a single byte of actual entry data has
+// been validated to exist.
+const maxLookupEntryPreallocate = 4096
+
 func ReadFileLookupTable(r io.Reader, numEntries uint64) ([]FileLookupEntry, error) {
-	entries := make([]FileLookupEntry, numEntries)
-	for i := range entries {
+	entries := make([]FileLookupEntry, 0, min(numEntries, maxLookupEntryPreallocate))
+	for i := uint64(0); i < numEntries; i++ {
 		key, err := readU64(r)
 		if err != nil {
 			return nil, err
@@ -51,7 +61,7 @@ func ReadFileLookupTable(r io.Reader, numEntries uint64) ([]FileLookupEntry, err
 		if err != nil {
 			return nil, err
 		}
-		entries[i] = FileLookupEntry{Key: key, Index: idx}
+		entries = append(entries, FileLookupEntry{Key: key, Index: idx})
 	}
 	return entries, nil
 }
@@ -69,8 +79,8 @@ func WriteXorbLookupTable(w io.Writer, entries []XorbLookupEntry) error {
 }
 
 func ReadXorbLookupTable(r io.Reader, numEntries uint64) ([]XorbLookupEntry, error) {
-	entries := make([]XorbLookupEntry, numEntries)
-	for i := range entries {
+	entries := make([]XorbLookupEntry, 0, min(numEntries, maxLookupEntryPreallocate))
+	for i := uint64(0); i < numEntries; i++ {
 		key, err := readU64(r)
 		if err != nil {
 			return nil, err
@@ -79,7 +89,7 @@ func ReadXorbLookupTable(r io.Reader, numEntries uint64) ([]XorbLookupEntry, err
 		if err != nil {
 			return nil, err
 		}
-		entries[i] = XorbLookupEntry{Key: key, Index: idx}
+		entries = append(entries, XorbLookupEntry{Key: key, Index: idx})
 	}
 	return entries, nil
 }
@@ -100,8 +110,8 @@ func WriteChunkLookupTable(w io.Writer, entries []ChunkLookupEntry) error {
 }
 
 func ReadChunkLookupTable(r io.Reader, numEntries uint64) ([]ChunkLookupEntry, error) {
-	entries := make([]ChunkLookupEntry, numEntries)
-	for i := range entries {
+	entries := make([]ChunkLookupEntry, 0, min(numEntries, maxLookupEntryPreallocate))
+	for i := uint64(0); i < numEntries; i++ {
 		key, err := readU64(r)
 		if err != nil {
 			return nil, err
@@ -114,7 +124,7 @@ func ReadChunkLookupTable(r io.Reader, numEntries uint64) ([]ChunkLookupEntry, e
 		if err != nil {
 			return nil, err
 		}
-		entries[i] = ChunkLookupEntry{Key: key, XorbIndex: xorbIdx, ChunkIndex: chunkIdx}
+		entries = append(entries, ChunkLookupEntry{Key: key, XorbIndex: xorbIdx, ChunkIndex: chunkIdx})
 	}
 	return entries, nil
 }

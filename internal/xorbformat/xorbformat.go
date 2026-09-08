@@ -158,6 +158,16 @@ const (
 	hashSectionVersion = 0
 	boundarySectionVer = 1
 	nonceBufferLen     = 16
+
+	// maxFooterEntryPreallocate caps upfront allocation capacity for the
+	// footer's per-chunk slices: numChunks is an attacker-controlled
+	// uint32 wire field, and even though ParseFooterV1 isn't reachable
+	// from any current HTTP request path (real clients upload xorbs
+	// without a footer — see PROTOCOL.md §2), it still parses
+	// untrusted-shaped data and should not let a tiny malicious footer
+	// force a multi-gigabyte allocation before validating any of the
+	// claimed entries actually exist on the wire.
+	maxFooterEntryPreallocate = 4096
 )
 
 // FooterV1 mirrors xet_object_format.rs's XorbObjectInfoV1: the trailer
@@ -219,8 +229,8 @@ func ParseFooterV1(r io.Reader) (FooterV1, error) {
 	if err != nil {
 		return f, err
 	}
-	f.ChunkHashes = make([]merklehash.Hash, numChunks)
-	for i := range f.ChunkHashes {
+	f.ChunkHashes = make([]merklehash.Hash, 0, min(uint64(numChunks), maxFooterEntryPreallocate))
+	for i := uint32(0); i < numChunks; i++ {
 		b, err := readN(r, 32)
 		if err != nil {
 			return f, err
@@ -229,7 +239,7 @@ func ParseFooterV1(r io.Reader) (FooterV1, error) {
 		if err != nil {
 			return f, err
 		}
-		f.ChunkHashes[i] = h
+		f.ChunkHashes = append(f.ChunkHashes, h)
 	}
 
 	// Boundary section.
@@ -255,21 +265,21 @@ func ParseFooterV1(r io.Reader) (FooterV1, error) {
 		return f, fmt.Errorf("xorbformat: inconsistent num_chunks between hash (%d) and boundary (%d) sections", numChunks, numChunks2)
 	}
 
-	f.ChunkBoundaryOffsets = make([]uint32, numChunks)
-	for i := range f.ChunkBoundaryOffsets {
+	f.ChunkBoundaryOffsets = make([]uint32, 0, min(uint64(numChunks), maxFooterEntryPreallocate))
+	for i := uint32(0); i < numChunks; i++ {
 		v, err := readU32(r)
 		if err != nil {
 			return f, err
 		}
-		f.ChunkBoundaryOffsets[i] = v
+		f.ChunkBoundaryOffsets = append(f.ChunkBoundaryOffsets, v)
 	}
-	f.UnpackedChunkOffsets = make([]uint32, numChunks)
-	for i := range f.UnpackedChunkOffsets {
+	f.UnpackedChunkOffsets = make([]uint32, 0, min(uint64(numChunks), maxFooterEntryPreallocate))
+	for i := uint32(0); i < numChunks; i++ {
 		v, err := readU32(r)
 		if err != nil {
 			return f, err
 		}
-		f.UnpackedChunkOffsets[i] = v
+		f.UnpackedChunkOffsets = append(f.UnpackedChunkOffsets, v)
 	}
 
 	// Fixed tail.
