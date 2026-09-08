@@ -1,0 +1,187 @@
+// Package casserver's snapshot.go implements Server's persistence: a
+// periodic (and shutdown-time) atomic write of every in-memory index to a
+// single JSON file, and a load of that file on startup. This is
+// deliberately NOT a write-ahead log — writes between snapshots are lost
+// if the process is killed (not just if it exits cleanly); see
+// docs/PROTOCOL.md's persistence section for the full tradeoff writeup
+// and why this was chosen anyway (atomic-swap is simple, needs no new
+// dependency, and reuses the exact staging-file-then-rename pattern
+// storage/fsstore.Store.Put already relies on for the same reason: a
+// reader must never observe a half-written result).
+package casserver
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"xet-server/internal/merklehash"
+	"xet-server/internal/shardformat"
+	"xet-server/internal/xorbformat"
+)
+
+// snapshot is the full on-disk representation of Server's in-memory
+// state. Every field here corresponds to one of Server's index maps —
+// adding a new index to Server means adding a field here and a line in
+// Snapshot()/restoreFrom(), or it silently won't survive a restart.
+type snapshot struct {
+	// Version guards against loading a snapshot written by an
+	// incompatible future format; bump it if a field's meaning changes
+	// (not just when a field is added — additive changes stay readable by
+	// older code that just ignores the new field via encoding/json's
+	// default unknown-field tolerance).
+	Version int `json:"version"`
+
+	FileRecon        map[merklehash.Hash][]shardformat.FileDataSequenceEntry `json:"file_recon"`
+	XorbFooters      map[merklehash.Hash]xorbformat.FooterV1                 `json:"xorb_footers"`
+	XorbRawLength    map[merklehash.Hash]int64                               `json:"xorb_raw_length"`
+	SHA256ToXet      map[string]merklehash.Hash                              `json:"sha256_to_xet"`
+	ChunkHashToShard map[merklehash.Hash][]byte                              `json:"chunk_hash_to_shard"`
+
+	// xorbLastAccess/xorbInFlight are deliberately NOT persisted:
+	// xorbInFlight is inherently a live-process concept (no fetch can
+	// possibly be "in flight" across a restart), and xorbLastAccess
+	// resetting to zero-value on restart just means the next eviction
+	// sweep treats every restored xorb as equally stale — a one-time,
+	// self-correcting cost (the sweep's LRU ordering catches up to real
+	// access patterns again after the first restart-following sweep),
+	// not a correctness issue.
+}
+
+const snapshotVersion = 1
+
+// Snapshot serializes s's persistable indices to path via the same
+// stage-to-temp-then-rename pattern storage/fsstore.Store.Put uses: a
+// reader (a concurrent LoadSnapshot, or a crash mid-write followed by a
+// restart) never observes a partially-written file, since os.Rename is
+// atomic on the same filesystem.
+//
+// Each index's own mutex is taken (briefly, RLock only) to copy its
+// current contents before releasing it and proceeding to the next index —
+// this means Snapshot does NOT capture one single atomic instant across
+// all indices simultaneously (a xorb upload completing between two of
+// this function's per-index locks could appear in one snapshot section
+// but not another, momentarily-inconsistent slice of the same snapshot
+// file). That's an acceptable tradeoff for the same reason the per-index
+// mutex split itself is: no code path anywhere in this server ever reads
+// more than one of these indices under a single combined invariant, so a
+// snapshot that's internally not perfectly instant-consistent across
+// indices restores to a state no different from "a few requests landed
+// slightly before or after this snapshot was taken" — which is already
+// true of any periodic snapshot regardless of locking strategy.
+func (s *Server) Snapshot(path string) error {
+	snap := snapshot{Version: snapshotVersion}
+
+	s.fileReconMu.RLock()
+	snap.FileRecon = make(map[merklehash.Hash][]shardformat.FileDataSequenceEntry, len(s.fileRecon))
+	for k, v := range s.fileRecon {
+		snap.FileRecon[k] = v
+	}
+	s.fileReconMu.RUnlock()
+
+	s.xorbMu.RLock()
+	snap.XorbFooters = make(map[merklehash.Hash]xorbformat.FooterV1, len(s.xorbFooters))
+	for k, v := range s.xorbFooters {
+		snap.XorbFooters[k] = v
+	}
+	snap.XorbRawLength = make(map[merklehash.Hash]int64, len(s.xorbRawLength))
+	for k, v := range s.xorbRawLength {
+		snap.XorbRawLength[k] = v
+	}
+	s.xorbMu.RUnlock()
+
+	s.sha256Mu.RLock()
+	snap.SHA256ToXet = make(map[string]merklehash.Hash, len(s.sha256ToXet))
+	for k, v := range s.sha256ToXet {
+		snap.SHA256ToXet[k] = v
+	}
+	s.sha256Mu.RUnlock()
+
+	s.chunkDedupMu.RLock()
+	snap.ChunkHashToShard = make(map[merklehash.Hash][]byte, len(s.chunkHashToShard))
+	for k, v := range s.chunkHashToShard {
+		snap.ChunkHashToShard[k] = v
+	}
+	s.chunkDedupMu.RUnlock()
+
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return fmt.Errorf("casserver: marshal snapshot: %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("casserver: create snapshot temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("casserver: write snapshot temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("casserver: close snapshot temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("casserver: rename snapshot into place: %w", err)
+	}
+	return nil
+}
+
+// LoadSnapshot reads a snapshot previously written by Snapshot and
+// restores s's indices from it. Intended to be called once, before s
+// starts serving any traffic — it does not itself take any of s's
+// per-index locks, since a freshly-constructed Server (via New) has no
+// concurrent access to race against yet. A missing file at path is not
+// an error (a fresh server with no prior snapshot); any other read/parse
+// failure is returned so the caller can decide whether to start fresh or
+// abort startup.
+func (s *Server) LoadSnapshot(path string) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("casserver: read snapshot: %w", err)
+	}
+
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return fmt.Errorf("casserver: parse snapshot: %w", err)
+	}
+	if snap.Version != snapshotVersion {
+		return fmt.Errorf("casserver: snapshot version %d, this build supports %d", snap.Version, snapshotVersion)
+	}
+
+	if snap.FileRecon != nil {
+		s.fileRecon = snap.FileRecon
+	}
+	if snap.XorbFooters != nil {
+		s.xorbFooters = snap.XorbFooters
+	}
+	if snap.XorbRawLength != nil {
+		s.xorbRawLength = snap.XorbRawLength
+		// xorbLastAccess must have an entry for every restored xorb (the
+		// eviction sweep's EvictionCandidates indexes xorbLastAccess by
+		// the same keys as xorbRawLength) — backfilled to the zero Time
+		// value, which sorts as "oldest" against any real access,
+		// matching this file's top-level comment on why that's fine.
+		for hash := range snap.XorbRawLength {
+			if _, ok := s.xorbLastAccess[hash]; !ok {
+				s.xorbLastAccess[hash] = time.Time{}
+			}
+		}
+	}
+	if snap.SHA256ToXet != nil {
+		s.sha256ToXet = snap.SHA256ToXet
+	}
+	if snap.ChunkHashToShard != nil {
+		s.chunkHashToShard = snap.ChunkHashToShard
+	}
+	return nil
+}

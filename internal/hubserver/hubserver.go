@@ -9,11 +9,17 @@
 //   - POST /api/{repo_type}s/{repo_id}/commit/{revision}       — ndjson commit payload
 //   - HEAD/GET /{repo_id}/resolve/{revision}/{filename}        — file metadata + content
 //
-// No git refs, branches, PRs, or real auth are modeled: every repo has a
-// single implicit "main" revision, and any bearer token is accepted.
-// State is held in memory alongside the paired casserver.Server, since a
-// commit's file entries need to reference the Xet file hash the CAS layer
-// already knows how to reconstruct.
+// Each repo supports real, independent revisions (a "main" branch is
+// created implicitly on first touch, matching how a real repo always has
+// a default branch; any other revision name is created on first commit to
+// it) — commit/resolve/preupload all operate against the named revision's
+// own file set and commit history, not a single shared implicit state.
+// No git refs/PRs, and no real auth, are modeled: any bearer token is
+// accepted. State is held in memory alongside the paired
+// casserver.Server, since a commit's file entries need to reference the
+// Xet file hash the CAS layer already knows how to reconstruct — and
+// periodically checkpointed to disk (see Server.Snapshot/LoadSnapshot in
+// snapshot.go) so it survives a restart.
 package hubserver
 
 import (
@@ -45,8 +51,10 @@ type Server struct {
 	mux        *http.ServeMux
 
 	// mu guards only the repos map itself (adding a new repoKey); each
-	// repoState has its own mutex for its files, so a commit/resolve on
-	// one repo never blocks on unrelated activity in another.
+	// repoState has its own mutex for its revisions map, and each
+	// revisionState has its own mutex for its files — a commit/resolve on
+	// one repo, or one revision within a repo, never blocks on unrelated
+	// activity elsewhere.
 	mu    sync.RWMutex
 	repos map[repoKey]*repoState
 }
@@ -66,7 +74,24 @@ type fileRef struct {
 	Size      int64
 }
 
+// defaultRevision is created implicitly for every repo on first touch,
+// matching how a real repo always has a default branch even before any
+// commit — the same way real HF Hub's repo creation immediately gives you
+// a "main" you can push to.
+const defaultRevision = "main"
+
+// repoState holds one repo's independent revisions. mu guards only the
+// revisions map itself; each revisionState guards its own files/commit
+// metadata.
 type repoState struct {
+	mu        sync.RWMutex
+	revisions map[string]*revisionState
+}
+
+// revisionState is one revision's (branch's) committed file set and
+// commit history within a repo — what used to be repoState's fields
+// directly, before repos gained more than one revision.
+type revisionState struct {
 	mu         sync.RWMutex
 	files      map[string]*fileRef // keyed by path in repo
 	commitOID  string
@@ -173,16 +198,58 @@ func (s *Server) handleResolveDispatch(w http.ResponseWriter, r *http.Request) {
 	s.handleResolve(w, r, repoID, revision, filename)
 }
 
+// getOrCreateRepo returns the repoState for repoType/repoID, creating it
+// (with an implicit "main" revision already present) on first touch.
 func (s *Server) getOrCreateRepo(repoType, repoID string) *repoState {
 	key := repoKey{repoType: repoType, repoID: repoID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rs, ok := s.repos[key]
 	if !ok {
-		rs = &repoState{files: make(map[string]*fileRef)}
+		rs = &repoState{revisions: map[string]*revisionState{
+			defaultRevision: newRevisionState(),
+		}}
 		s.repos[key] = rs
 	}
 	return rs
+}
+
+func newRevisionState() *revisionState {
+	return &revisionState{files: make(map[string]*fileRef)}
+}
+
+// getOrCreateRevision returns rs's revisionState for the named revision,
+// creating an empty one on first touch — matching how pushing to a new
+// branch name on a real repo implicitly creates that branch. An empty
+// revision string is treated as defaultRevision, since some call sites
+// (e.g. a resolve URL with no revision segment) may not always supply one
+// explicitly.
+func (rs *repoState) getOrCreateRevision(revision string) *revisionState {
+	if revision == "" {
+		revision = defaultRevision
+	}
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	v, ok := rs.revisions[revision]
+	if !ok {
+		v = newRevisionState()
+		rs.revisions[revision] = v
+	}
+	return v
+}
+
+// getRevision returns rs's revisionState for the named revision without
+// creating it, or false if that revision doesn't exist yet — used by
+// read paths (resolve) where a nonexistent revision should 404, not
+// silently spring into existence.
+func (rs *repoState) getRevision(revision string) (*revisionState, bool) {
+	if revision == "" {
+		revision = defaultRevision
+	}
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	v, ok := rs.revisions[revision]
+	return v, ok
 }
 
 // httpErrorJSON writes a JSON error response and logs it at a level

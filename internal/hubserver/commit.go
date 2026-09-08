@@ -31,13 +31,16 @@ type commitResponse struct {
 
 // handleCommit implements POST /api/{repo_type}s/{repo_id}/commit/{revision}:
 // parses the ndjson commit payload and records each lfsFile entry's path
-// and declared SHA-256 (oid). The Xet/Merkle file hash needed to actually
-// serve the file on download is backfilled lazily on first resolve
-// request, by asking the paired CAS server (see resolve.go) — the commit
-// payload only ever carries the plain SHA-256, never the Xet hash.
+// and declared SHA-256 (oid) against the named revision. The Xet/Merkle
+// file hash needed to actually serve the file on download is backfilled
+// lazily on first resolve request, by asking the paired CAS server (see
+// resolve.go) — the commit payload only ever carries the plain SHA-256,
+// never the Xet hash. A revision that doesn't exist yet on this repo is
+// created implicitly, matching how pushing to a new branch name creates
+// it on a real repo.
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, repoID, revision string) {
-	_ = revision // single implicit "main" revision; not tracked separately
 	rs := s.getOrCreateRepo(repoType, repoID)
+	vs := rs.getOrCreateRevision(revision)
 
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -45,7 +48,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, 
 	var fileCount int
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		slog.Debug("commit line", "repoID", repoID, "raw", string(line))
+		slog.Debug("commit line", "repoID", repoID, "revision", revision, "raw", string(line))
 		if len(line) == 0 {
 			continue
 		}
@@ -57,20 +60,20 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, 
 		if cl.Key != "lfsFile" {
 			continue
 		}
-		rs.mu.Lock()
-		rs.files[cl.Value.Path] = &fileRef{
+		vs.mu.Lock()
+		vs.files[cl.Value.Path] = &fileRef{
 			Path:      cl.Value.Path,
 			SHA256Hex: cl.Value.OID,
 			Size:      cl.Value.Size,
 		}
-		rs.mu.Unlock()
+		vs.mu.Unlock()
 		fileCount++
 	}
 	if err := scanner.Err(); err != nil {
 		httpErrorJSON(w, "read commit body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	slog.Debug("commit parsed", "repoID", repoID, "fileCount", fileCount)
+	slog.Debug("commit parsed", "repoID", repoID, "revision", revision, "fileCount", fileCount)
 
 	oid, err := randomCommitOID()
 	if err != nil {
@@ -78,10 +81,10 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repoType, 
 		return
 	}
 
-	rs.mu.Lock()
-	rs.commitOID = oid
-	rs.commitSeen = true
-	rs.mu.Unlock()
+	vs.mu.Lock()
+	vs.commitOID = oid
+	vs.commitSeen = true
+	vs.mu.Unlock()
 
 	writeJSON(w, commitResponse{
 		CommitOID: oid,

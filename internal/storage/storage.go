@@ -24,6 +24,15 @@ var ErrNotFound = errors.New("storage: blob not found")
 // corrected size.
 var ErrSizeMismatch = errors.New("storage: reader did not match declared size")
 
+// ErrContentMismatch is returned (via errors.Is) by VerifyingStore.Put
+// when a dedup hit's incoming content differs from what's already stored
+// under the same key — a hash collision or storage corruption, since two
+// different byte sequences should never produce the same content hash.
+// Unlike ErrSizeMismatch, this is never a normal client protocol error;
+// it always indicates something worth an operator's attention. See
+// VerifyingStore's doc comment.
+var ErrContentMismatch = errors.New("storage: dedup hit content differs from stored blob")
+
 // Store is a content-addressed blob store: Put is a no-op if the key
 // already exists (the basis for dedup), Get/GetRange stream back what was
 // stored, and Has checks existence without transferring data.

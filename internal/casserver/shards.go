@@ -20,11 +20,26 @@ import (
 // arbitrary memory growth by simply not capping Content-Length.
 const maxShardBytes = 16 * 1024 * 1024
 
+// chunkDedupPrefix is the only prefix xet-core's real CAS API accepts for
+// GET /v1/chunks/{prefix}/{hash} (see openapi/cas.openapi.yaml's
+// PrefixGlobalDedupeParam) — distinct from xorbPrefix ("default"), which
+// is for a different endpoint.
+const chunkDedupPrefix = "default-merkledb"
+
 // handleUploadShard implements POST /v1/shards: parse the serialized
 // shard and merge its file-reconstruction entries into the server's
 // in-memory index, keyed by file hash. xet-core reports 0 (already
 // exists) vs 1 (SyncPerformed); this server has no separate shard dedup
 // store, so it always reports 1 once the shard parses successfully.
+//
+// Every chunk hash referenced by the shard's xorb-info section is also
+// indexed against this shard's raw uploaded bytes, backing the global
+// chunk-dedup lookup (GET /v1/chunks/{prefix}/{hash} — see
+// handleChunkDedup): the real wire contract for that endpoint is "return
+// the shard bytes that reference this chunk," which a real client parses
+// itself to discover chunks it can dedup against without re-uploading —
+// see docs/PROTOCOL.md's global-dedup section for the full story of how
+// this was confirmed against xet-core's own client source.
 func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxShardBytes)
 
@@ -64,6 +79,23 @@ func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("shard file indexed", "fileHash", f.Header.FileHash.Hex(), "hasMetadataExt", hasExt, "sha256Hex", sha256Hex)
 	}
 	s.fileReconMu.Unlock()
+
+	var chunkCount int
+	s.chunkDedupMu.Lock()
+	for _, x := range shard.Xorbs {
+		for _, c := range x.Chunks {
+			// First shard to reference a given chunk hash wins; later
+			// shards referencing the same (already-deduplicated) chunk
+			// don't need to replace it — any shard referencing the chunk
+			// is equally valid for a client's dedup purposes.
+			if _, exists := s.chunkHashToShard[c.ChunkHash]; !exists {
+				s.chunkHashToShard[c.ChunkHash] = body
+				chunkCount++
+			}
+		}
+	}
+	s.chunkDedupMu.Unlock()
+	slog.Debug("shard chunk-dedup index updated", "newChunkEntries", chunkCount)
 
 	writeJSON(w, uploadShardResponse{Result: 1})
 }

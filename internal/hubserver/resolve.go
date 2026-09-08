@@ -18,12 +18,17 @@ import (
 // fallback and is not exercised by a normal `hf download`.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, revision, filename string) {
 	rs := s.getOrCreateRepo("model", repoID) // repo type is not encoded in the resolve URL; default assumption
-	_ = revision                             // single implicit "main" revision
+	vs, ok := rs.getRevision(revision)
+	if !ok {
+		slog.Debug("resolve revision lookup", "repoID", repoID, "revision", revision, "found", false)
+		http.NotFound(w, r)
+		return
+	}
 
-	rs.mu.RLock()
-	ref, ok := rs.files[filename]
-	rs.mu.RUnlock()
-	slog.Debug("resolve lookup", "repoID", repoID, "filename", filename, "found", ok)
+	vs.mu.RLock()
+	ref, ok := vs.files[filename]
+	vs.mu.RUnlock()
+	slog.Debug("resolve lookup", "repoID", repoID, "revision", revision, "filename", filename, "found", ok)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -47,7 +52,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 
 	refreshRoute := refreshRouteURL(r, repoID, revision)
 
-	w.Header().Set("X-Repo-Commit", commitOIDOrPlaceholder(rs))
+	w.Header().Set("X-Repo-Commit", commitOIDOrPlaceholder(vs))
 	w.Header().Set("ETag", `"`+ref.SHA256Hex+`"`)
 	w.Header().Set("X-Linked-Etag", `"`+ref.SHA256Hex+`"`)
 	w.Header().Set("X-Linked-Size", strconv.FormatInt(size, 10))
@@ -75,11 +80,11 @@ func refreshRouteURL(r *http.Request, repoID, revision string) string {
 	return scheme + "://" + r.Host + "/api/models/" + repoID + "/xet-read-token/" + revision
 }
 
-func commitOIDOrPlaceholder(rs *repoState) string {
-	rs.mu.RLock()
-	defer rs.mu.RUnlock()
-	if rs.commitSeen {
-		return rs.commitOID
+func commitOIDOrPlaceholder(vs *revisionState) string {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	if vs.commitSeen {
+		return vs.commitOID
 	}
 	return "0000000000000000000000000000000000000000"
 }

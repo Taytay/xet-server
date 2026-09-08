@@ -117,6 +117,28 @@ func (h Hash) Hex() string {
 
 func (h Hash) String() string { return h.Hex() }
 
+// MarshalText implements encoding.TextMarshaler via Hex(), so a Hash can
+// be used directly as a JSON object/map key (encoding/json requires map
+// key types to implement TextMarshaler, be a string, or be an integer —
+// Hash as a plain [32]byte array satisfies none of those on its own) and
+// so json.Marshal of a struct field renders a Hash the same way every
+// other hash already appears in this project's JSON responses (Hex, not
+// raw bytes).
+func (h Hash) MarshalText() ([]byte, error) {
+	return []byte(h.Hex()), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler, the inverse of
+// MarshalText.
+func (h *Hash) UnmarshalText(text []byte) error {
+	parsed, err := FromHex(string(text))
+	if err != nil {
+		return err
+	}
+	*h = parsed
+	return nil
+}
+
 // FromHex parses a hash from its Hex() representation (64 lowercase hex
 // chars), inverting the byte-order translation described on Hex.
 func FromHex(s string) (Hash, error) {

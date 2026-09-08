@@ -399,7 +399,7 @@ func TestReconstruction_UnknownFileID(t *testing.T) {
 	}
 }
 
-func TestReconstructionV2_SignalsFallbackToV1(t *testing.T) {
+func TestReconstructionV2_UnknownFileReturns404(t *testing.T) {
 	ts, _ := newTestServer(t)
 	someHash := merklehash.ComputeDataHash([]byte("x"))
 	resp, err := http.Get(ts.URL + "/v2/reconstructions/" + someHash.Hex())
@@ -407,12 +407,158 @@ func TestReconstructionV2_SignalsFallbackToV1(t *testing.T) {
 		t.Fatalf("GET error = %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Errorf("status = %d, want 501 (fall back to V1)", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (file does not exist — per spec, this is also the client's cue to fall back to V1 if it were probing for V2 support, though this server does support V2)", resp.StatusCode)
 	}
 }
 
-func TestChunkDedup_AlwaysNotFound(t *testing.T) {
+func TestReconstructionV2_MatchesV1Data(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	payloads := [][]byte{
+		[]byte("the quick brown fox "),
+		[]byte("jumps over the lazy dog "),
+		[]byte("and keeps running"),
+	}
+	xorbBlob, xorbHash, chunkHashes := buildXorb(t, payloads)
+
+	resp, err := http.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(xorbBlob))
+	if err != nil {
+		t.Fatalf("upload xorb error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload xorb status = %d", resp.StatusCode)
+	}
+
+	fileHash := merklehash.ComputeDataHash([]byte("v2 test file"))
+	xorbEntry := shardformat.XorbEntry{
+		Header: shardformat.XorbChunkSequenceHeader{XorbHash: xorbHash, NumEntries: uint32(len(chunkHashes))},
+	}
+	for i, ch := range chunkHashes {
+		xorbEntry.Chunks = append(xorbEntry.Chunks, shardformat.XorbChunkSequenceEntry{ChunkHash: ch, UnpackedSegmentBytes: uint32(len(payloads[i]))})
+	}
+	var totalUnpacked int
+	for _, p := range payloads {
+		totalUnpacked += len(p)
+	}
+	fileEntry := shardformat.FileEntry{
+		Header: shardformat.FileDataSequenceHeader{FileHash: fileHash, NumEntries: 1},
+		Entries: []shardformat.FileDataSequenceEntry{
+			{XorbHash: xorbHash, UnpackedSegmentBytes: uint32(totalUnpacked), ChunkIndexStart: 0, ChunkIndexEnd: uint32(len(chunkHashes))},
+		},
+	}
+
+	var shardBuf bytes.Buffer
+	if _, err := shardformat.WriteShard(&shardBuf, []shardformat.FileEntry{fileEntry}, []shardformat.XorbEntry{xorbEntry}); err != nil {
+		t.Fatalf("WriteShard() error = %v", err)
+	}
+	shardResp, err := http.Post(ts.URL+"/v1/shards", "application/octet-stream", &shardBuf)
+	if err != nil {
+		t.Fatalf("upload shard error = %v", err)
+	}
+	shardResp.Body.Close()
+
+	v1Resp, err := http.Get(ts.URL + "/v1/reconstructions/" + fileHash.Hex())
+	if err != nil {
+		t.Fatalf("V1 GET error = %v", err)
+	}
+	defer v1Resp.Body.Close()
+	var v1 reconstructionResponseV1
+	if err := json.NewDecoder(v1Resp.Body).Decode(&v1); err != nil {
+		t.Fatalf("decode V1 response error = %v", err)
+	}
+
+	v2Resp, err := http.Get(ts.URL + "/v2/reconstructions/" + fileHash.Hex())
+	if err != nil {
+		t.Fatalf("V2 GET error = %v", err)
+	}
+	defer v2Resp.Body.Close()
+	if v2Resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(v2Resp.Body)
+		t.Fatalf("V2 status = %d, want 200; body = %s", v2Resp.StatusCode, body)
+	}
+	var v2 reconstructionResponseV2
+	if err := json.NewDecoder(v2Resp.Body).Decode(&v2); err != nil {
+		t.Fatalf("decode V2 response error = %v", err)
+	}
+
+	if v2.OffsetIntoFirstRange != v1.OffsetIntoFirstRange {
+		t.Errorf("V2 OffsetIntoFirstRange = %d, want %d (matching V1)", v2.OffsetIntoFirstRange, v1.OffsetIntoFirstRange)
+	}
+	if len(v2.Terms) != len(v1.Terms) {
+		t.Fatalf("V2 has %d terms, want %d (matching V1)", len(v2.Terms), len(v1.Terms))
+	}
+	for i := range v1.Terms {
+		if v2.Terms[i] != v1.Terms[i] {
+			t.Errorf("V2 term[%d] = %+v, want %+v (matching V1)", i, v2.Terms[i], v1.Terms[i])
+		}
+	}
+
+	// V2 must have exactly one xorb entry (this file only touches one
+	// xorb), covering every chunk range V1 reported.
+	fetches, ok := v2.Xorbs[xorbHash.Hex()]
+	if !ok {
+		t.Fatalf("V2 Xorbs missing entry for %s", xorbHash.Hex())
+	}
+	if len(fetches) != 1 {
+		t.Fatalf("V2 Xorbs[%s] has %d fetch entries, want exactly 1 (single URL, multiple ranges)", xorbHash.Hex(), len(fetches))
+	}
+	if len(fetches[0].Ranges) != len(v1.Terms) {
+		t.Errorf("V2 fetch entry has %d ranges, want %d (one per V1 term)", len(fetches[0].Ranges), len(v1.Terms))
+	}
+
+	// The URL itself should be identical between V1 and V2 for the same
+	// xorb (same underlying byte-serving endpoint or presigned URL).
+	if len(v1.FetchInfo[xorbHash.Hex()]) > 0 && fetches[0].URL != v1.FetchInfo[xorbHash.Hex()][0].URL {
+		t.Errorf("V2 fetch URL = %q, want %q (matching V1)", fetches[0].URL, v1.FetchInfo[xorbHash.Hex()][0].URL)
+	}
+}
+
+func TestReconstructionV2_RangePastEOFReturns416(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	payloads := [][]byte{[]byte("small file content")}
+	xorbBlob, xorbHash, chunkHashes := buildXorb(t, payloads)
+	resp, err := http.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(xorbBlob))
+	if err != nil {
+		t.Fatalf("upload xorb error = %v", err)
+	}
+	resp.Body.Close()
+
+	fileHash := merklehash.ComputeDataHash([]byte("v2 range test file"))
+	xorbEntry := shardformat.XorbEntry{
+		Header: shardformat.XorbChunkSequenceHeader{XorbHash: xorbHash, NumEntries: uint32(len(chunkHashes))},
+		Chunks: []shardformat.XorbChunkSequenceEntry{{ChunkHash: chunkHashes[0], UnpackedSegmentBytes: uint32(len(payloads[0]))}},
+	}
+	fileEntry := shardformat.FileEntry{
+		Header:  shardformat.FileDataSequenceHeader{FileHash: fileHash, NumEntries: 1},
+		Entries: []shardformat.FileDataSequenceEntry{{XorbHash: xorbHash, UnpackedSegmentBytes: uint32(len(payloads[0])), ChunkIndexStart: 0, ChunkIndexEnd: 1}},
+	}
+	var shardBuf bytes.Buffer
+	if _, err := shardformat.WriteShard(&shardBuf, []shardformat.FileEntry{fileEntry}, []shardformat.XorbEntry{xorbEntry}); err != nil {
+		t.Fatalf("WriteShard() error = %v", err)
+	}
+	shardResp, err := http.Post(ts.URL+"/v1/shards", "application/octet-stream", &shardBuf)
+	if err != nil {
+		t.Fatalf("upload shard error = %v", err)
+	}
+	shardResp.Body.Close()
+
+	fileSize := len(payloads[0])
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v2/reconstructions/"+fileHash.Hex(), nil)
+	req.Header.Set("Range", "bytes="+strconv.Itoa(fileSize)+"-"+strconv.Itoa(fileSize+100))
+	rangeResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET with Range error = %v", err)
+	}
+	defer rangeResp.Body.Close()
+	if rangeResp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Errorf("status = %d, want 416 for a V2 Range starting at/past EOF", rangeResp.StatusCode)
+	}
+}
+
+func TestChunkDedup_UnknownChunkReturns404(t *testing.T) {
 	ts, _ := newTestServer(t)
 	someHash := merklehash.ComputeDataHash([]byte("x"))
 	resp, err := http.Get(ts.URL + "/v1/chunks/default-merkledb/" + someHash.Hex())
@@ -421,7 +567,83 @@ func TestChunkDedup_AlwaysNotFound(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 (no global dedup index)", resp.StatusCode)
+		t.Errorf("status = %d, want 404 (chunk hash never referenced by any uploaded shard)", resp.StatusCode)
+	}
+}
+
+func TestChunkDedup_KnownChunkReturnsShardBytes(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	payloads := [][]byte{[]byte("chunk one"), []byte("chunk two, a bit longer")}
+	_, xorbHash, chunkHashes := buildXorb(t, payloads)
+
+	xorbEntry := shardformat.XorbEntry{
+		Header: shardformat.XorbChunkSequenceHeader{XorbHash: xorbHash, NumEntries: uint32(len(chunkHashes))},
+	}
+	for i, ch := range chunkHashes {
+		xorbEntry.Chunks = append(xorbEntry.Chunks, shardformat.XorbChunkSequenceEntry{
+			ChunkHash:            ch,
+			UnpackedSegmentBytes: uint32(len(payloads[i])),
+		})
+	}
+	fileHash := merklehash.ComputeDataHash([]byte("some file"))
+	fileEntry := shardformat.FileEntry{
+		Header:  shardformat.FileDataSequenceHeader{FileHash: fileHash, NumEntries: 1},
+		Entries: []shardformat.FileDataSequenceEntry{{XorbHash: xorbHash, UnpackedSegmentBytes: uint32(len(payloads[0]) + len(payloads[1])), ChunkIndexStart: 0, ChunkIndexEnd: uint32(len(chunkHashes))}},
+	}
+	var shardBuf bytes.Buffer
+	if _, err := shardformat.WriteShard(&shardBuf, []shardformat.FileEntry{fileEntry}, []shardformat.XorbEntry{xorbEntry}); err != nil {
+		t.Fatalf("WriteShard() error = %v", err)
+	}
+	shardBytes := shardBuf.Bytes()
+
+	shardResp, err := http.Post(ts.URL+"/v1/shards", "application/octet-stream", bytes.NewReader(shardBytes))
+	if err != nil {
+		t.Fatalf("upload shard error = %v", err)
+	}
+	shardResp.Body.Close()
+	if shardResp.StatusCode != http.StatusOK {
+		t.Fatalf("upload shard status = %d, want 200", shardResp.StatusCode)
+	}
+
+	// Querying dedup info for a chunk this shard's xorb-info section
+	// referenced must return that shard's raw bytes verbatim — the real
+	// wire contract (client parses the returned shard itself).
+	dedupResp, err := http.Get(ts.URL + "/v1/chunks/default-merkledb/" + chunkHashes[0].Hex())
+	if err != nil {
+		t.Fatalf("GET chunk dedup error = %v", err)
+	}
+	defer dedupResp.Body.Close()
+	if dedupResp.StatusCode != http.StatusOK {
+		t.Fatalf("chunk dedup status = %d, want 200 for a chunk referenced by an uploaded shard", dedupResp.StatusCode)
+	}
+	got, _ := io.ReadAll(dedupResp.Body)
+	if !bytes.Equal(got, shardBytes) {
+		t.Errorf("chunk dedup response (%d bytes) does not match the uploaded shard bytes (%d bytes)", len(got), len(shardBytes))
+	}
+
+	// The second chunk from the SAME xorb must also resolve, since both
+	// were referenced by the same shard's xorb-info section.
+	dedupResp2, err := http.Get(ts.URL + "/v1/chunks/default-merkledb/" + chunkHashes[1].Hex())
+	if err != nil {
+		t.Fatalf("GET chunk dedup (second chunk) error = %v", err)
+	}
+	defer dedupResp2.Body.Close()
+	if dedupResp2.StatusCode != http.StatusOK {
+		t.Errorf("second chunk dedup status = %d, want 200", dedupResp2.StatusCode)
+	}
+}
+
+func TestChunkDedup_WrongPrefixRejected(t *testing.T) {
+	ts, _ := newTestServer(t)
+	someHash := merklehash.ComputeDataHash([]byte("x"))
+	resp, err := http.Get(ts.URL + "/v1/chunks/wrong-prefix/" + someHash.Hex())
+	if err != nil {
+		t.Fatalf("GET error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for a prefix other than default-merkledb", resp.StatusCode)
 	}
 }
 

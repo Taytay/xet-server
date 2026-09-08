@@ -208,3 +208,145 @@ func TestResolve_UnknownFileReturns404(t *testing.T) {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
 }
+
+func TestRevisions_MainCreatedImplicitlyOnRepoCreate(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	resp, err := http.Post(ts.URL+"/api/repos/create", "application/json", strings.NewReader(`{"name":"my-model","organization":"alice","type":"model"}`))
+	if err != nil {
+		t.Fatalf("POST error = %v", err)
+	}
+	resp.Body.Close()
+
+	// A resolve against the implicit "main" revision on a freshly-created,
+	// never-committed-to repo must 404 (file not found), not error out as
+	// if the revision itself doesn't exist — main always exists once the
+	// repo does.
+	req, _ := http.NewRequest(http.MethodHead, ts.URL+"/alice/my-model/resolve/main/anything.bin", nil)
+	resolveResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("HEAD error = %v", err)
+	}
+	defer resolveResp.Body.Close()
+	if resolveResp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (file not found on an existing revision, not a revision-not-found error)", resolveResp.StatusCode)
+	}
+}
+
+func TestRevisions_UnknownRevisionReturns404NotImplicitlyCreated(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	// Commit only to "main"; a resolve against a revision that was never
+	// committed to must 404 as a revision lookup failure, and must not
+	// have silently created that revision as a side effect of the lookup.
+	ndjson := `{"key":"lfsFile","value":{"path":"model.bin","algo":"sha256","oid":"deadbeef","size":100}}` + "\n"
+	commitResp, err := http.Post(ts.URL+"/api/models/alice/my-model/commit/main", "application/x-ndjson", strings.NewReader(ndjson))
+	if err != nil {
+		t.Fatalf("commit POST error = %v", err)
+	}
+	commitResp.Body.Close()
+
+	req, _ := http.NewRequest(http.MethodHead, ts.URL+"/alice/my-model/resolve/never-committed-branch/model.bin", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("HEAD error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for a revision that was never committed to", resp.StatusCode)
+	}
+}
+
+func TestRevisions_IndependentFileSetsPerRevision(t *testing.T) {
+	xetHashMain := merklehash.ComputeDataHash([]byte("main branch content"))
+	xetHashDev := merklehash.ComputeDataHash([]byte("dev branch content"))
+	cas := newFakeCAS()
+	cas.sha256ToXet["main-oid"] = xetHashMain
+	cas.sha256ToXet["dev-oid"] = xetHashDev
+	cas.sizes[xetHashMain] = 111
+	cas.sizes[xetHashDev] = 222
+
+	hubSrv := New("http://localhost:9999", cas)
+	ts := httptest.NewServer(hubSrv)
+	defer ts.Close()
+
+	// Commit a file to "main" with one OID/size...
+	mainNdjson := `{"key":"lfsFile","value":{"path":"model.bin","algo":"sha256","oid":"main-oid","size":111}}` + "\n"
+	mainResp, err := http.Post(ts.URL+"/api/models/alice/my-model/commit/main", "application/x-ndjson", strings.NewReader(mainNdjson))
+	if err != nil {
+		t.Fatalf("main commit error = %v", err)
+	}
+	mainResp.Body.Close()
+
+	// ...and the SAME path to a different revision with a DIFFERENT
+	// OID/size — real branches diverge exactly like this.
+	devNdjson := `{"key":"lfsFile","value":{"path":"model.bin","algo":"sha256","oid":"dev-oid","size":222}}` + "\n"
+	devResp, err := http.Post(ts.URL+"/api/models/alice/my-model/commit/dev", "application/x-ndjson", strings.NewReader(devNdjson))
+	if err != nil {
+		t.Fatalf("dev commit error = %v", err)
+	}
+	devResp.Body.Close()
+
+	// Resolving model.bin on "main" must return main's XetHash/size...
+	mainReq, _ := http.NewRequest(http.MethodHead, ts.URL+"/alice/my-model/resolve/main/model.bin", nil)
+	mainResolve, err := http.DefaultClient.Do(mainReq)
+	if err != nil {
+		t.Fatalf("main resolve HEAD error = %v", err)
+	}
+	defer mainResolve.Body.Close()
+	if got := mainResolve.Header.Get("X-Xet-Hash"); got != xetHashMain.Hex() {
+		t.Errorf("main revision X-Xet-Hash = %q, want %q", got, xetHashMain.Hex())
+	}
+	if got := mainResolve.Header.Get("X-Linked-Size"); got != "111" {
+		t.Errorf("main revision X-Linked-Size = %q, want %q", got, "111")
+	}
+
+	// ...and resolving the SAME path on "dev" must return dev's, proving
+	// the two revisions' file sets are genuinely independent, not sharing
+	// one map keyed by path alone.
+	devReq, _ := http.NewRequest(http.MethodHead, ts.URL+"/alice/my-model/resolve/dev/model.bin", nil)
+	devResolve, err := http.DefaultClient.Do(devReq)
+	if err != nil {
+		t.Fatalf("dev resolve HEAD error = %v", err)
+	}
+	defer devResolve.Body.Close()
+	if got := devResolve.Header.Get("X-Xet-Hash"); got != xetHashDev.Hex() {
+		t.Errorf("dev revision X-Xet-Hash = %q, want %q", got, xetHashDev.Hex())
+	}
+	if got := devResolve.Header.Get("X-Linked-Size"); got != "222" {
+		t.Errorf("dev revision X-Linked-Size = %q, want %q", got, "222")
+	}
+}
+
+func TestRevisions_IndependentCommitHistoryPerRevision(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	mainNdjson := `{"key":"lfsFile","value":{"path":"a.bin","algo":"sha256","oid":"a","size":1}}` + "\n"
+	mainResp, err := http.Post(ts.URL+"/api/models/alice/my-model/commit/main", "application/x-ndjson", strings.NewReader(mainNdjson))
+	if err != nil {
+		t.Fatalf("main commit error = %v", err)
+	}
+	defer mainResp.Body.Close()
+	var mainCommit commitResponse
+	if err := json.NewDecoder(mainResp.Body).Decode(&mainCommit); err != nil {
+		t.Fatalf("decode main commit response error = %v", err)
+	}
+
+	devNdjson := `{"key":"lfsFile","value":{"path":"b.bin","algo":"sha256","oid":"b","size":2}}` + "\n"
+	devResp, err := http.Post(ts.URL+"/api/models/alice/my-model/commit/dev", "application/x-ndjson", strings.NewReader(devNdjson))
+	if err != nil {
+		t.Fatalf("dev commit error = %v", err)
+	}
+	defer devResp.Body.Close()
+	var devCommit commitResponse
+	if err := json.NewDecoder(devResp.Body).Decode(&devCommit); err != nil {
+		t.Fatalf("decode dev commit response error = %v", err)
+	}
+
+	if mainCommit.CommitOID == devCommit.CommitOID {
+		t.Error("main and dev commit OIDs are identical, want independent commit history per revision")
+	}
+	if mainCommit.CommitOID == "" || devCommit.CommitOID == "" {
+		t.Error("expected non-empty commit OIDs for both revisions")
+	}
+}

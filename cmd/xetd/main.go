@@ -15,6 +15,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 
 	"xet-server/internal/api"
@@ -22,6 +26,7 @@ import (
 	"xet-server/internal/eviction"
 	"xet-server/internal/hubserver"
 	"xet-server/internal/ratelimit"
+	"xet-server/internal/storage"
 	"xet-server/internal/storage/fsstore"
 )
 
@@ -34,6 +39,8 @@ func main() {
 	evictionInterval := flag.Duration("eviction-interval", 5*time.Minute, "how often to check storage usage against -max-storage-bytes")
 	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "if > 0, cap sustained xorb/shard uploads per source IP to this many requests/second (burst allowance via -rate-limit-burst)")
 	rateLimitBurst := flag.Float64("rate-limit-burst", 20, "burst allowance for -rate-limit-rps — how many upload requests a source IP can make immediately before the per-second rate applies")
+	verifyDedup := flag.Bool("verify-dedup", false, "on every dedup hit, byte-compare the incoming upload against the stored blob instead of trusting the content hash alone (doubles I/O per dedup hit; off by default)")
+	snapshotInterval := flag.Duration("snapshot-interval", time.Minute, "how often to persist in-memory reconstruction/repo indices to -data as a durable checkpoint (0 disables periodic snapshotting; a final snapshot is still taken on graceful shutdown)")
 	flag.Parse()
 
 	if os.Getenv("DEBUG") != "" {
@@ -49,10 +56,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("init xorb store: %v", err)
 	}
-	casSrv := casserver.New(xorbStore)
+	var casXorbStore storage.Store = xorbStore
+	if *verifyDedup {
+		casXorbStore = storage.NewVerifyingStore(xorbStore)
+		slog.Info("dedup verification enabled: every dedup hit will be byte-compared against the stored blob")
+	}
+	casSrv := casserver.New(casXorbStore)
+
+	casSnapshotPath := filepath.Join(*dataDir, "casserver-snapshot.json")
+	if err := casSrv.LoadSnapshot(casSnapshotPath); err != nil {
+		log.Fatalf("load CAS snapshot: %v", err)
+	}
 
 	if *maxStorageBytes > 0 {
-		sweeper := eviction.New(xorbStore, casSrv, *maxStorageBytes, *evictionInterval)
+		evictionStore, ok := casXorbStore.(eviction.Store)
+		if !ok {
+			log.Fatalf("-max-storage-bytes requires a storage backend supporting Delete+TotalBytes; got %T", casXorbStore)
+		}
+		sweeper := eviction.New(evictionStore, casSrv, *maxStorageBytes, *evictionInterval)
 		casSrv.SetEvictionStats(sweeper.Stats)
 		go sweeper.Run(context.Background())
 		slog.Info("eviction sweep enabled", "budgetBytes", *maxStorageBytes, "interval", *evictionInterval)
@@ -68,12 +89,30 @@ func main() {
 	mux.Handle("/v2/", casSrv)
 	mux.Handle("/", demoSrv)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// snapshotTargets accumulates every Snapshot-capable server this
+	// process started (CAS, and Hub if enabled), so the shutdown-time
+	// final snapshot (below) and the periodic snapshot loop cover
+	// whatever is actually running rather than hardcoding just one.
+	var snapshotTargets []snapshotTarget
+	snapshotTargets = append(snapshotTargets, snapshotTarget{"casserver", casSnapshotPath, casSrv})
+
+	var hubSrv *hubserver.Server
 	if *hubAddr != "" {
 		resolvedCASURL := *casURL
 		if resolvedCASURL == "" {
 			resolvedCASURL = "http://localhost" + *addr
 		}
-		hubSrv := hubserver.New(resolvedCASURL, casSrv)
+		hubSrv = hubserver.New(resolvedCASURL, casSrv)
+
+		hubSnapshotPath := filepath.Join(*dataDir, "hubserver-snapshot.json")
+		if err := hubSrv.LoadSnapshot(hubSnapshotPath); err != nil {
+			log.Fatalf("load Hub snapshot: %v", err)
+		}
+		snapshotTargets = append(snapshotTargets, snapshotTarget{"hubserver", hubSnapshotPath, hubSrv})
+
 		go func() {
 			slog.Info("xetd Hub API shim listening", "addr", *hubAddr, "casBaseURL", resolvedCASURL)
 			if err := http.ListenAndServe(*hubAddr, logRequests(hubSrv)); err != nil {
@@ -82,9 +121,70 @@ func main() {
 		}()
 	}
 
+	if *snapshotInterval > 0 {
+		go runSnapshotLoop(ctx, *snapshotInterval, snapshotTargets)
+	}
+
 	slog.Info("xetd listening", "addr", *addr, "dataDir", *dataDir)
-	if err := http.ListenAndServe(*addr, logRequests(mux)); err != nil {
-		log.Fatal(err)
+	server := &http.Server{Addr: *addr, Handler: logRequests(mux)}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("shutting down: taking a final snapshot before exit")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	server.Shutdown(shutdownCtx)
+	for _, target := range snapshotTargets {
+		if err := target.snapshotter.Snapshot(target.path); err != nil {
+			slog.Error("final snapshot failed", "server", target.name, "error", err)
+		}
+	}
+}
+
+// snapshotter is implemented by both casserver.Server and
+// hubserver.Server's Snapshot method.
+type snapshotter interface {
+	Snapshot(path string) error
+}
+
+// snapshotTarget pairs a Snapshot-capable server with the file path its
+// snapshots are written to and a name for logging.
+type snapshotTarget struct {
+	name string
+	path string
+	snapshotter
+}
+
+// runSnapshotLoop periodically snapshots every target until ctx is
+// canceled (at which point main takes one last snapshot itself before
+// exiting — see the <-ctx.Done() block above). Each target's Snapshot
+// error is logged but never aborts the loop or the process: a failed
+// periodic snapshot just means this checkpoint didn't advance, not that
+// the server is unhealthy.
+func runSnapshotLoop(ctx context.Context, interval time.Duration, targets []snapshotTarget) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var wg sync.WaitGroup
+			for _, target := range targets {
+				wg.Add(1)
+				go func(target snapshotTarget) {
+					defer wg.Done()
+					if err := target.Snapshot(target.path); err != nil {
+						slog.Error("periodic snapshot failed", "server", target.name, "error", err)
+					}
+				}(target)
+			}
+			wg.Wait()
+		}
 	}
 }
 

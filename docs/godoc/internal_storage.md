@@ -9,7 +9,19 @@ same interface is satisfied by a local filesystem store (storage/fsstore) and an
 S3-compatible store (storage/s3store), so the CAS server can run against either
 without any caller-side branching.
 
+Package storage's VerifyingStore lives in this file rather than storage.go to
+keep the core interface definitions separate from this optional decorator.
+
 VARIABLES
+
+var ErrContentMismatch = errors.New("storage: dedup hit content differs from stored blob")
+    ErrContentMismatch is returned (via errors.Is) by VerifyingStore.Put
+    when a dedup hit's incoming content differs from what's already stored
+    under the same key — a hash collision or storage corruption, since two
+    different byte sequences should never produce the same content hash. Unlike
+    ErrSizeMismatch, this is never a normal client protocol error; it always
+    indicates something worth an operator's attention. See VerifyingStore's doc
+    comment.
 
 var ErrNotFound = errors.New("storage: blob not found")
     ErrNotFound is returned (via errors.Is) by Get/GetRange when no blob exists
@@ -80,6 +92,16 @@ type Store interface {
     write corrupting the retry. Get/GetRange never observe a partially-written
     blob as a result.
 
+func NewVerifyingStore(inner Store) Store
+    NewVerifyingStore wraps inner. The returned *VerifyingStore implements
+    whichever of Deleter, Sizer, and URLPresigner inner itself implements
+    — wrapping a backend that lacks one of these (e.g. fsstore has no
+    URLPresigner) must not make it appear to gain that capability, or callers
+    that type-assert for it (casserver's presigned-URL fallback, eviction's
+    Sweeper) would be silently misled. See the capabilityShim types below for
+    how this is done without VerifyingStore itself unconditionally implementing
+    all three.
+
 type URLPresigner interface {
 	// PresignGet returns a URL that, when fetched with a plain GET within
 	// expirySeconds, returns the blob stored under key.
@@ -90,4 +112,44 @@ type URLPresigner interface {
     out a presigned URL instead of proxying the bytes itself. Backends without a
     native presign mechanism (e.g. the filesystem store) simply don't implement
     this interface; callers type-assert for it.
+
+type VerifyingStore struct {
+	Inner Store
+}
+    VerifyingStore wraps a Store to add an opt-in verification pass on every
+    dedup hit: when Put finds key already exists, instead of trusting the
+    content hash alone (the default, and by far the cheaper, behavior — see
+    Store's own doc comment), it reads the existing stored blob and the incoming
+    reader concurrently and compares them chunk-by-chunk, bailing at the first
+    mismatch rather than reading either side in full once a difference is found.
+
+    This exists purely as defense-in-depth against a hash collision or
+    undetected storage-layer corruption — both exceedingly unlikely with BLAKE3,
+    but "exceedingly unlikely" is a probability, not a guarantee, and this
+    project would rather refuse a write it can't vouch for than silently trust a
+    hash match that turns out to be wrong. It is deliberately NOT the default:
+    it doubles I/O for every dedup hit (which is the common case for a healthy,
+    working-as-intended deployment), so wrapping a Store with this is an
+    explicit opt-in (see cmd/xetd's -verify-dedup flag), not something every
+    caller pays for.
+
+    If the incoming content doesn't match on a dedup hit, Put returns an error
+    satisfying errors.Is(err, ErrContentMismatch) and does NOT overwrite the
+    existing stored blob — a mismatch means something is already wrong (a
+    collision or corruption), and blindly overwriting would destroy the only
+    evidence of which side is actually correct without fixing anything.
+
+    A key that does not yet exist passes straight through to Inner.Put with no
+    extra reads of any kind — the non-dedup-hit path costs nothing beyond what
+    Inner.Put itself costs, whether or not verification is enabled.
+
+func (v *VerifyingStore) Get(ctx context.Context, key string) (io.ReadCloser, error)
+
+func (v *VerifyingStore) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
+
+func (v *VerifyingStore) Has(ctx context.Context, key string) (bool, error)
+
+func (v *VerifyingStore) Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error)
+    Put implements the verify-on-dedup-hit behavior described on
+    VerifyingStore's doc comment.
 ```

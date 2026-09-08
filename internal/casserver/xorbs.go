@@ -1,6 +1,7 @@
 package casserver
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"xet-server/internal/bg4"
 	"xet-server/internal/lz4"
 	"xet-server/internal/merklehash"
+	"xet-server/internal/storage"
 	"xet-server/internal/xorbformat"
 )
 
@@ -164,6 +166,17 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 	}
 	written, err := s.xorbs.Put(r.Context(), claimedHash.Hex(), tmp, size)
 	if err != nil {
+		if errors.Is(err, storage.ErrContentMismatch) {
+			// A hash collision or storage-layer corruption — the two
+			// possible causes of "same content hash, different actual
+			// bytes" — is always worth an operator's attention, distinct
+			// from the routine client-caused 5xx paths httpError's normal
+			// Warn level covers. Only reachable when -verify-dedup is
+			// enabled (see cmd/xetd); storage.VerifyingStore never
+			// overwrites the existing stored blob when this happens.
+			slog.Error("casserver: dedup verification detected a content mismatch",
+				"claimedHash", claimedHash.Hex(), "error", err)
+		}
 		httpError(w, "store xorb: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

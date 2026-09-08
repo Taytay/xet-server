@@ -365,6 +365,140 @@ the reader, not merely *consulted* as a starting guess. A hint that isn't
 also a ceiling gives an attacker exactly the amplification room the
 format's own spec was trying to prevent.
 
+## 9. The global chunk-dedup endpoint returns a shard, not a boolean
+
+`GET /v1/chunks/{prefix}/{hash}` (the "does this chunk already exist
+anywhere on the server" query — `prefix` must be exactly
+`default-merkledb`, per the OpenAPI spec's `PrefixGlobalDedupeParam`) is
+easy to misread as a simple existence check returning some JSON boolean
+or a `200`/`404` with no body. It isn't — per xet-core's own OpenAPI spec
+and its real client implementation
+(`RemoteClient::query_for_global_dedup_shard` /
+`query_dedup_api` in `xet_client/src/cas_client/remote_client.rs`), a
+`200` response body is the **raw bytes of an entire shard** — specifically,
+some previously-uploaded shard whose xorb-info section referenced the
+queried chunk hash. The real client doesn't parse a small "yes/no plus a
+location" response; it downloads that whole shard and calls
+`MDBMinimalShard::global_dedup_eligible_chunks` on it (mirrored as
+`filter_cas_chunks_for_global_dedup` in xet-core's Rust) to extract every
+dedup-eligible chunk hash within it — one dedup query can surface many
+chunks the client can skip re-uploading, not just the one it asked about.
+
+This server's implementation (`casserver.handleUploadShard`,
+`handleChunkDedup`) mirrors that: every chunk hash referenced by any
+uploaded shard's xorb-info section is indexed against that shard's raw
+uploaded bytes (`Server.chunkHashToShard`), and a dedup query for a known
+chunk hash returns those exact bytes verbatim — the same shard a client
+already knows how to parse, since it's the identical format
+`internal/shardformat` reads/writes for `POST /v1/shards` uploads. A
+chunk hash no uploaded shard has ever referenced returns `404`.
+
+One second-order consequence worth calling out: because the response is
+literally "hand back a shard someone already uploaded," a global dedup
+hit incidentally also teaches the querying client about every *other*
+chunk that shard's xorb-info section references, not just the one it
+queried for — this is inherent to the real protocol's design (the shard
+format has no way to return "just this one chunk's info" cheaper than
+returning the whole shard it lives in), not something this
+implementation added.
+
+## 10. V2 reconstruction is a response-shape optimization, not new data
+
+`GET /v2/reconstructions/{file_id}` (per xet-core's
+`api_changes/update_260316_v2_reconstruction_multirange.md` and its real
+`QueryReconstructionResponseV2` struct in `xet_client::cas_types`) is easy
+to either over-build (assume it needs genuinely different reconstruction
+logic) or under-build (assume "multi-range" implies HTTP `multipart/
+byteranges` parsing on the server side). Neither is true for a CAS
+server: V2 carries exactly the same terms and physical byte ranges V1
+does — the only difference is how the *fetch URLs* are packaged.
+
+V1 emits one `fetch_info` entry per term, keyed by xorb hash — if a
+file's reconstruction touches the same xorb across several
+non-contiguous terms (common for a file that dedups against chunks
+scattered across an existing xorb), V1 repeats that xorb's key with
+multiple near-identical entries differing only by range. V2's `xorbs`
+field groups every range touched for a given xorb under **one**
+`XorbMultiRangeFetch` (one URL, a `ranges` list of `{chunks, bytes}`
+pairs) — fewer signed URLs to generate and fewer for the client to
+request, which matters when a real presigning service rate-limits or
+charges per signed URL. `multipart/byteranges` parsing
+(`xet_client::cas_client::multipart`) is purely a *client*-side option
+(`HF_XET_CLIENT_ENABLE_MULTIRANGE_FETCHING`, default off) for sending one
+HTTP request covering multiple ranges instead of one request per range —
+nothing a server needs to implement; the server's job is just describing
+the ranges, not choosing how the client batches its own requests for
+them.
+
+`casserver.handleReconstructionV2` shares `reconstructionWindow` and
+`xorbFooterAndPhysicalRange` with `handleReconstructionV1` (see
+reconstruction.go) — both compute the exact same per-term physical byte
+ranges; V2 only changes how those ranges get packaged into the response,
+grouping consecutive ranges for the same xorb hash into one
+`XorbMultiRangeFetch` entry rather than emitting a new `fetch_info` entry
+per term. `TestReconstructionV2_MatchesV1Data` cross-checks this
+directly: it decodes both a V1 and a V2 response for the identical file
+and asserts every term and byte range matches exactly, differing only in
+how they're grouped.
+
+## 11. Persistence: an atomic snapshot checkpoint, deliberately not a WAL
+
+This section isn't about a real-client wire-format discovery like the
+others — it's about a design decision this project made for its own
+metadata durability, worth documenting here since it directly affects
+what "restart this server" means for anyone operating it.
+
+`casserver.Server` and `hubserver.Server` hold their reconstruction/repo
+indices in memory (see [ARCHITECTURE.md](ARCHITECTURE.md)'s design
+decisions). Two ways to make that survive a restart were considered:
+
+- **A write-ahead log**: append every mutation (a xorb upload, a shard
+  upload, a commit) to a log file, replay it on startup. Crash-safe up to
+  the last fsync'd entry, but needs correct compaction (the log grows
+  forever otherwise) and correct replay logic — real complexity to get
+  right, for a project whose bulk data (xorb bytes) is already durable in
+  `storage.Store` regardless of which approach wins; only the metadata
+  indices are at stake.
+- **A periodic atomic snapshot** (what this project implements,
+  `Server.Snapshot`/`LoadSnapshot` in both packages): serialize every
+  index to JSON, write it to a temp file, `os.Rename` it into place — the
+  exact same stage-then-rename pattern `storage/fsstore.Store.Put` already
+  uses so a reader never observes a half-written result. Simple, no new
+  dependency, easy to reason about. The real cost: **anything written
+  between two snapshots is lost if the process is killed** (not just on a
+  graceful exit) — a hard crash, an OOM kill, `kill -9`, or a power loss
+  between checkpoints loses whatever mutations happened in that window.
+
+This project chose the snapshot approach. The tradeoff is real and worth
+stating plainly: this is a periodic checkpoint, not a durability
+guarantee for every individual write. `cmd/xetd`'s `-snapshot-interval`
+flag (default 1 minute) controls how large that window is; a graceful
+shutdown (`SIGINT`/`SIGTERM`, handled via `signal.NotifyContext` in
+`cmd/xetd/main.go`) always takes one final snapshot before exiting, so
+the only real exposure is an *un*graceful termination. For a single-node
+development/internal server — this project's stated scope — that's an
+acceptable tradeoff in exchange for not needing WAL compaction/replay
+correctness; a deployment that needs stronger durability guarantees
+should either shorten `-snapshot-interval` or treat this as a signal that
+a real database is a better fit than this project's in-memory-plus-
+checkpoint model.
+
+One consequence worth calling out for anyone reading `casserver`'s
+snapshot code: `Snapshot()` takes each index's own mutex only briefly (one
+`RLock`/copy/`RUnlock` per index, not one lock held across the whole
+operation), so the resulting file is not perfectly instant-consistent
+across every index simultaneously — a xorb upload completing between two
+of those per-index locks could show up in one section of the snapshot but
+not another. This is intentional, not an oversight: no code path anywhere
+in either server ever reads more than one index under a combined
+invariant (the same reasoning behind splitting the mutexes into
+per-index/per-repo locks in the first place — see ARCHITECTURE.md), so a
+snapshot that isn't perfectly atomic *across* indices restores to a state
+no different from "a few requests landed slightly before or after this
+particular snapshot" — true of any periodic checkpoint regardless of
+locking strategy.
+
+
 ## How these were found: capture, don't guess
 
 Every fix above came from the same loop, not from re-reading the spec more

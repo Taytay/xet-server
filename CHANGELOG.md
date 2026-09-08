@@ -5,9 +5,88 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-09-07
+## [0.7.0] - 2026-09-08
 
-A fuzzing and chaos-testing pass across the wire-format parsers and
+A protocol-completeness release: every gap this project's own "Where this
+diverges from real Xet" list called out has been closed except
+authentication (explicitly deferred to a future version). This is also
+the first release with restart-surviving state — previously, an `xetd`
+restart lost all reconstruction/repo metadata even though bulk chunk
+data was always durable in the storage backend.
+
+### Added
+- **Optional dedup-hit content verification** (`internal/storage`'s new
+  `VerifyingStore`, enabled via `xetd -verify-dedup`). On a dedup hit
+  (`Put` for a content hash that already exists), instead of trusting
+  the hash alone, byte-compares the incoming upload against the stored
+  blob concurrently in fixed-size chunks, bailing at the first mismatch
+  rather than reading either side in full. A mismatch — a hash collision
+  or undetected storage-layer corruption — returns a new
+  `storage.ErrContentMismatch` sentinel and refuses the write (the
+  original stored blob is never overwritten), logged at `Error` via
+  `casserver` so it's distinguishable from routine request failures.
+  Off by default: benchmarked at roughly 10x slower than the default
+  trust-the-hash path on a dedup hit (a full extra read), and mismatch
+  detection is confirmed to scale with where the mismatch actually is
+  (a mismatch 1% into a 16 MiB object is caught ~16x faster than one at
+  99%) rather than always paying full-object comparison cost. Required
+  adding `merklehash.Hash.MarshalText`/`UnmarshalText` so `Hash` can be
+  used as a JSON map key at all (a prerequisite for this release's
+  persistence work too, not just this feature).
+- **Real revisions/branches in the Hub API shim.** `hubserver.repoState`
+  now holds a map of independent `revisionState`s (each with its own file
+  set and commit history) instead of one implicit `main`; a `main`
+  revision is still created automatically on repo creation (matching a
+  real repo always having a default branch), and any other revision name
+  is created on first commit to it, mirroring how pushing to a new branch
+  name creates it on a real repo. Committing the same file path to two
+  different revisions now correctly produces two independent Xet-hash/
+  size mappings, confirmed by `TestRevisions_IndependentFileSetsPerRevision`.
+- **A real global chunk-dedup index.** `GET /v1/chunks/{prefix}/{hash}`
+  previously always returned `404`. The real wire contract (confirmed
+  against xet-core's actual client source — see docs/PROTOCOL.md §9) is
+  to return the raw bytes of whichever previously-uploaded shard
+  referenced the queried chunk hash, which the client parses itself to
+  discover every dedup-eligible chunk in that shard, not just the one it
+  asked about. `casserver.handleUploadShard` now indexes every chunk hash
+  referenced by an uploaded shard's xorb-info section against that
+  shard's raw bytes; a query for a known chunk hash returns those bytes
+  verbatim.
+- **Real V2 (multi-range) reconstruction.** `GET /v2/reconstructions/{file_id}`
+  previously always returned `501`. It now returns xet-core's actual
+  `QueryReconstructionResponseV2` shape (confirmed against xet-core's own
+  struct definitions and its `update_260316_v2_reconstruction_multirange.md`
+  changelog): the same underlying terms and physical byte ranges as V1,
+  grouped by xorb hash into one `XorbMultiRangeFetch` entry (one URL,
+  multiple chunk/byte ranges) instead of V1's one `fetch_info` entry per
+  term. `TestReconstructionV2_MatchesV1Data` cross-checks V1 and V2
+  responses for the same file and asserts identical underlying data. See
+  docs/PROTOCOL.md §10 for why this is a response-shape optimization, not
+  new reconstruction logic.
+- **Restart-surviving persistence for in-memory metadata.**
+  `casserver.Server` and `hubserver.Server` both gained
+  `Snapshot(path)`/`LoadSnapshot(path)`: a periodic (default 1 minute,
+  `-snapshot-interval`) and shutdown-time (`SIGINT`/`SIGTERM`, handled via
+  `signal.NotifyContext` in `cmd/xetd/main.go`) atomic JSON checkpoint of
+  every in-memory index, using the same stage-to-temp-then-rename pattern
+  `storage/fsstore.Store.Put` already relies on so a reader never
+  observes a half-written snapshot. Deliberately a periodic checkpoint,
+  not a write-ahead log — writes between checkpoints are lost on an
+  *un*graceful process termination (a crash, `kill -9`, power loss), not
+  just preserved-until-clean-exit; see docs/PROTOCOL.md §11 for the full
+  tradeoff writeup and why this was chosen over a WAL for this project.
+  Verified with a real end-to-end round-trip: `hf upload` against a live
+  server, a process restart against the same `-data` directory, then a
+  real `hf download` of the same file from the fresh process producing a
+  byte-identical file with zero re-upload.
+
+### Changed
+- README's "Where this diverges from real Xet" section now lists only
+  authentication — every other previously-tracked gap (revisions,
+  V2 reconstruction, global chunk-dedup, restart persistence) is closed
+  as of this release.
+
+
 storage layer, driven by "how do we know this is actually safe against a
 hostile or merely broken client" rather than a new feature — specifically
 including whether the dedup fast-path itself could be cheaply starved or

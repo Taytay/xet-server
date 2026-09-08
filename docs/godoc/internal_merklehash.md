@@ -74,6 +74,14 @@ func (h Hash) IsZero() bool
     IsZero reports whether h is the all-zero hash (xet-core's default/empty
     Merkle hash).
 
+func (h Hash) MarshalText() ([]byte, error)
+    MarshalText implements encoding.TextMarshaler via Hex(), so a Hash can be
+    used directly as a JSON object/map key (encoding/json requires map key types
+    to implement TextMarshaler, be a string, or be an integer — Hash as a plain
+    [32]byte array satisfies none of those on its own) and so json.Marshal of a
+    struct field renders a Hash the same way every other hash already appears in
+    this project's JSON responses (Hex, not raw bytes).
+
 func (h Hash) Mod64(m uint64) uint64
     Mod64 returns h's low 64-bit word (interpreted little-endian, matching
     DataHash's `Rem<u64>` impl) modulo m. Used by the aggregation algorithm's
@@ -86,4 +94,8 @@ func (h Hash) TruncateHash() uint64
     truncate_hash (metadata_shard/utils.rs: `hash.deref()[0]`). Used as the
     sort/lookup key in a shard's file/xorb/chunk lookup tables — a different
     word than Mod64 uses, so the two must not be confused.
+
+func (h *Hash) UnmarshalText(text []byte) error
+    UnmarshalText implements encoding.TextUnmarshaler, the inverse of
+    MarshalText.
 ```

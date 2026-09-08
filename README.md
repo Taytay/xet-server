@@ -49,7 +49,8 @@ by capturing and replaying genuine client traffic. See
 - **Hub API shim** (`internal/hubserver`): enough of huggingface.co's Hub
   REST API (repo create, preupload, `xet-{read,write}-token`, commit,
   resolve/HEAD) that the real `hf upload`/`hf download` shell commands work
-  against this server via `HF_ENDPOINT`.
+  against this server via `HF_ENDPOINT` — including real, independent
+  revisions/branches per repo, not just an implicit `main`.
 - **Real BLAKE3-keyed Merkle hashing** (`internal/merklehash`): a
   byte-for-byte port of xet-core's `DataHash`, verified against xet-core's
   own published reference vectors — not an approximation.
@@ -75,6 +76,21 @@ by capturing and replaying genuine client traffic. See
   (`internal/eviction`, `internal/ratelimit`): bounded, observable
   defense-in-depth for a server left running against untrusted uploads —
   neither adds a dependency, and both are off unless explicitly enabled.
+- **Optional dedup-hit content verification** (`internal/storage`'s
+  `VerifyingStore`): byte-compares an incoming upload against the stored
+  blob on a dedup hit instead of trusting the content hash alone,
+  bailing at the first mismatch — a hash-collision/corruption safety net,
+  off by default since it roughly doubles I/O on a dedup hit.
+- **A real global chunk-dedup index and V2 (multi-range) reconstruction**
+  (`internal/casserver`): `GET /v1/chunks/{prefix}/{hash}` returns the
+  actual shard bytes referencing a queried chunk (the real wire contract,
+  confirmed against xet-core's own client source), and
+  `GET /v2/reconstructions/{file_id}` returns the multi-range-optimized
+  response shape instead of always falling back to V1.
+- **Restart-surviving metadata persistence**: `casserver`/`hubserver`
+  periodically (and on graceful shutdown) checkpoint their in-memory
+  reconstruction/repo indices to disk as an atomic JSON snapshot — see
+  `-snapshot-interval` below.
 - **Real-client regression fixtures**: several packages carry
   `testdata/` captured directly from a live `hf_xet` session, replayed in
   unit tests — the strongest guard against silently regressing wire
@@ -134,6 +150,10 @@ make build       # -> bin/xetd, bin/xet
 ./bin/xetd -addr :8420 -data ./xet-data \
   -max-storage-bytes 10737418240 -eviction-interval 5m \
   -rate-limit-rps 5 -rate-limit-burst 20
+
+# With dedup-hit content verification (see "Storage backends" below) and
+# a faster persistence checkpoint interval than the 1-minute default:
+./bin/xetd -addr :8420 -data ./xet-data -verify-dedup -snapshot-interval 15s
 ```
 
 ## Point the real `hf` CLI at it
@@ -184,10 +204,14 @@ process at `/upload`, `/files`, `/stats`:
   no footer)
 - `GET /v1/reconstructions/{file_id}` — file → xorb/chunk-range map,
   honors `Range`, returns `416` at EOF
-- `GET /v1/chunks/{prefix}/{hash}` — global chunk-dedup lookup (always
-  `404`: no global dedup index is maintained)
-- `GET /v2/reconstructions/{file_id}` — always `501` (signals clients to
-  fall back to V1)
+- `GET /v1/chunks/{prefix}/{hash}` — global chunk-dedup lookup: returns
+  the raw bytes of whichever uploaded shard referenced this chunk hash
+  (the real wire contract — a client parses the shard itself), `404` if
+  no uploaded shard has ever referenced it
+- `GET /v2/reconstructions/{file_id}` — multi-range-optimized
+  reconstruction: same underlying terms/byte-ranges as V1, grouped by
+  xorb (one signed URL covering multiple ranges) instead of one entry per
+  term
 - `POST /v1/telemetry` — no-op ack
 - `GET /v1/storage-stats` — eviction policy stats (operator-facing; not
   part of the real Xet CAS API — see [Storage backends](#storage-backends))
@@ -216,9 +240,9 @@ API store chunk/xorb bytes through:
   plus `XET_TEST_S3_*` env vars to run its tests against a real MinIO
   instance.
 
-## Storage auto-pruning and upload rate limiting
+## Storage auto-pruning, upload rate limiting, dedup verification, and persistence
 
-Both off by default; opt in via `xetd` flags:
+All off/on-defaults below; opt in or tune via `xetd` flags:
 
 - `-max-storage-bytes N -eviction-interval 5m` — once total xorb storage
   exceeds `N` bytes, a background sweep (`internal/eviction`) deletes
@@ -227,15 +251,33 @@ Both off by default; opt in via `xetd` flags:
   progress. `GET /v1/storage-stats` reports the configured budget and
   cumulative evictions/bytes freed. A client that later needs an evicted
   xorb must re-upload it — real Xet clients already treat CAS storage as
-  non-permanent and handle this by re-deriving from the source file.
+  non-permanent and handle this by re-deriving from the source file. Off
+  by default.
 - `-rate-limit-rps N -rate-limit-burst N` — caps xorb/shard uploads per
   source IP via a hand-rolled token bucket (`internal/ratelimit`, no new
   dependency). Exceeding the limit returns `429` with `Retry-After`.
-  Fetch/reconstruction/HEAD traffic is never rate-limited.
-
-Both are single-node, in-memory policies with no cross-restart
-persistence — consistent with this server's existing state model (see
-[Where this diverges from real Xet](#where-this-diverges-from-real-xet)).
+  Fetch/reconstruction/HEAD traffic is never rate-limited. Off by default.
+- `-verify-dedup` — on every dedup hit (a `Put` for a content hash that
+  already exists), byte-compare the incoming upload against the stored
+  blob instead of trusting the content hash alone, bailing at the first
+  mismatched byte rather than reading either side in full
+  (`internal/storage.VerifyingStore`). A mismatch (a hash collision or
+  undetected storage corruption) refuses the write — the original stored
+  blob is never overwritten — and logs at `Error`, distinct from routine
+  request-failure logging. Roughly 10x slower than the default trust-the-hash
+  path on a dedup hit (a full extra read), which is why it's opt-in, not
+  the default. Off by default.
+- `-snapshot-interval 1m` — how often `casserver`/`hubserver`'s in-memory
+  reconstruction/repo indices are checkpointed to `-data` as JSON (an
+  atomic stage-then-rename write, the same pattern the storage backends
+  use), so they survive a restart. A graceful shutdown (`Ctrl-C`/`SIGTERM`)
+  always takes one final snapshot first. This is a periodic checkpoint,
+  not a write-ahead log — anything written between two checkpoints is
+  lost on an *un*graceful termination (a crash, `kill -9`, power loss);
+  see [docs/PROTOCOL.md](docs/PROTOCOL.md)'s persistence section for the
+  full tradeoff writeup. Set to `0` to disable periodic snapshotting
+  (a final snapshot is still taken on graceful shutdown). Defaults to 1
+  minute.
 
 # Testing
 
@@ -291,15 +333,11 @@ dependencies).
 
 # Where this diverges from real Xet
 
-- No revisions/branches in the Hub shim — every repo has one implicit
-  `main`.
-- No auth enforcement — any bearer token is accepted.
-- `GET /v2/reconstructions` always signals fall-back to V1 rather than
-  implementing the multi-range-optimized V2 response shape.
-- No global chunk-dedup index (`GET /v1/chunks/...` is always `404`).
-- Single-node, in-memory reconstruction/repo indices — bulk chunk data
-  persists in the storage backend, but the file→chunk mapping does not
-  survive a restart.
+- **No auth enforcement** — any bearer token is accepted. This is the one
+  deliberately deferred gap; every other divergence tracked in prior
+  versions of this doc has been closed as of v0.7.0 (real
+  revisions/branches, V2 reconstruction, a global chunk-dedup index, and
+  restart-surviving persistence — see below).
 
 # Troubleshooting
 

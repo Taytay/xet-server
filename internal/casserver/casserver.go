@@ -14,11 +14,18 @@
 //     metadata role and the
 //     byte-transfer role real Xet
 //     splits across two services)
-//   - GET  /v1/chunks/{prefix}/{hash}      — global chunk dedup lookup
-//     (always 404: no global dedup
-//     index is maintained)
-//   - GET  /v2/reconstructions/{file_id}   — always 404/501, signaling
-//     clients to fall back to V1
+//   - GET  /v1/chunks/{prefix}/{hash}      — global chunk dedup lookup:
+//     returns the raw bytes of whichever
+//     uploaded shard referenced this chunk
+//     hash (the real wire contract per
+//     xet-core's openapi spec — a client
+//     parses the returned shard itself to
+//     find dedup-eligible chunks), 404 if
+//     no uploaded shard ever referenced it
+//   - GET  /v2/reconstructions/{file_id}   — multi-range-optimized
+//     file → xorb/chunk-range map (same
+//     underlying data as V1, grouped by
+//     xorb instead of one entry per term)
 //   - POST /v1/telemetry                   — no-op ack
 //   - GET  /v1/storage-stats               — eviction policy stats
 //     (operator-facing; not part of the
@@ -80,6 +87,18 @@ type Server struct {
 	sha256Mu    sync.RWMutex
 	sha256ToXet map[string]merklehash.Hash // hex SHA-256 -> Xet/Merkle file hash
 
+	// chunkDedupMu guards chunkHashToShard: an index from every chunk
+	// hash referenced by any uploaded shard's xorb-info section to that
+	// shard's raw uploaded bytes, backing GET /v1/chunks/{prefix}/{hash}
+	// (see handleChunkDedup). Deliberately a separate lock from
+	// fileReconMu/xorbMu/sha256Mu even though it's populated at the same
+	// time as sha256ToXet during shard upload — chunk-dedup lookups are a
+	// distinct read pattern (by chunk hash, not file hash) that shouldn't
+	// contend with file-hash lookups on the same shard-upload critical
+	// section.
+	chunkDedupMu     sync.RWMutex
+	chunkHashToShard map[merklehash.Hash][]byte
+
 	// evictionStats, if set via SetEvictionStats, backs GET
 	// /v1/storage-stats. nil (the default, when no eviction.Sweeper is
 	// running) means that endpoint reports eviction as disabled rather
@@ -96,14 +115,15 @@ type Server struct {
 
 func New(xorbs storage.Store) *Server {
 	s := &Server{
-		xorbs:          xorbs,
-		mux:            http.NewServeMux(),
-		fileRecon:      make(map[merklehash.Hash][]shardformat.FileDataSequenceEntry),
-		xorbFooters:    make(map[merklehash.Hash]xorbformat.FooterV1),
-		xorbRawLength:  make(map[merklehash.Hash]int64),
-		xorbLastAccess: make(map[merklehash.Hash]time.Time),
-		xorbInFlight:   make(map[merklehash.Hash]int),
-		sha256ToXet:    make(map[string]merklehash.Hash),
+		xorbs:            xorbs,
+		mux:              http.NewServeMux(),
+		fileRecon:        make(map[merklehash.Hash][]shardformat.FileDataSequenceEntry),
+		xorbFooters:      make(map[merklehash.Hash]xorbformat.FooterV1),
+		xorbRawLength:    make(map[merklehash.Hash]int64),
+		xorbLastAccess:   make(map[merklehash.Hash]time.Time),
+		xorbInFlight:     make(map[merklehash.Hash]int),
+		sha256ToXet:      make(map[string]merklehash.Hash),
+		chunkHashToShard: make(map[merklehash.Hash][]byte),
 	}
 	s.routes()
 	return s
@@ -279,6 +299,43 @@ type reconstructionResponseV1 struct {
 	OffsetIntoFirstRange int64                       `json:"offset_into_first_range"`
 	Terms                []reconstructionTerm        `json:"terms"`
 	FetchInfo            map[string][]fetchInfoEntry `json:"fetch_info"`
+}
+
+// xorbRangeDescriptor is one chunk-range/byte-range pair within a
+// XorbMultiRangeFetch — xet-core's XorbRangeDescriptor
+// (xet_client::cas_types::XorbRangeDescriptor). Chunks uses exclusive end
+// (matching indexRange elsewhere); Bytes uses inclusive end (matching
+// byteRange elsewhere) — same conventions as V1, just regrouped.
+type xorbRangeDescriptor struct {
+	Chunks indexRange `json:"chunks"`
+	Bytes  byteRange  `json:"bytes"`
+}
+
+// xorbMultiRangeFetch is a single signed/fetch URL covering possibly
+// multiple disjoint chunk ranges for one xorb — xet-core's
+// XorbMultiRangeFetch. Real xet-core may split a xorb's ranges across
+// several of these if the signed URL would otherwise exceed ~8 KiB; this
+// server always emits exactly one entry per xorb (its own byte-serving
+// URLs, and MinIO/S3 presigned URLs, are far short of that limit), which
+// is spec-valid (the client's parsing handles any number of entries per
+// xorb, from one up).
+type xorbMultiRangeFetch struct {
+	URL    string                `json:"url"`
+	Ranges []xorbRangeDescriptor `json:"ranges"`
+}
+
+// reconstructionResponseV2 mirrors xet-core's
+// QueryReconstructionResponseV2 (xet_client::cas_types): same Terms/
+// OffsetIntoFirstRange as V1, but Xorbs groups every chunk/byte range
+// touched for a given xorb hash under that hash's key, each range paired
+// with a fetch URL — the "multi-range" optimization the V2 endpoint
+// exists for (fewer signed URLs than V1's one-entry-per-term shape when a
+// file's reconstruction touches the same xorb across multiple
+// non-contiguous terms).
+type reconstructionResponseV2 struct {
+	OffsetIntoFirstRange int64                            `json:"offset_into_first_range"`
+	Terms                []reconstructionTerm             `json:"terms"`
+	Xorbs                map[string][]xorbMultiRangeFetch `json:"xorbs"`
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
