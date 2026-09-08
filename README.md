@@ -71,6 +71,10 @@ by capturing and replaying genuine client traffic. See
 - **Zero required external dependencies to build the demo path**; the
   protocol path adds exactly one pure-Go module
   (`github.com/zeebo/blake3`), pinned in `go.sum`.
+- **Optional storage auto-pruning and upload rate limiting**
+  (`internal/eviction`, `internal/ratelimit`): bounded, observable
+  defense-in-depth for a server left running against untrusted uploads —
+  neither adds a dependency, and both are off unless explicitly enabled.
 - **Real-client regression fixtures**: several packages carry
   `testdata/` captured directly from a live `hf_xet` session, replayed in
   unit tests — the strongest guard against silently regressing wire
@@ -123,6 +127,13 @@ make build       # -> bin/xetd, bin/xet
 
 # CAS server + Hub API shim (needed for the real hf CLI), on :8420 / :8421
 ./bin/xetd -addr :8420 -hub-addr :8421 -data ./xet-data
+
+# With storage auto-pruning (evict least-recently-used xorbs over 10GB,
+# checked every 5 minutes) and per-source-IP upload rate limiting (5
+# requests/sec sustained, burst of 20) — both optional, both off by default:
+./bin/xetd -addr :8420 -data ./xet-data \
+  -max-storage-bytes 10737418240 -eviction-interval 5m \
+  -rate-limit-rps 5 -rate-limit-burst 20
 ```
 
 ## Point the real `hf` CLI at it
@@ -178,6 +189,8 @@ process at `/upload`, `/files`, `/stats`:
 - `GET /v2/reconstructions/{file_id}` — always `501` (signals clients to
   fall back to V1)
 - `POST /v1/telemetry` — no-op ack
+- `GET /v1/storage-stats` — eviction policy stats (operator-facing; not
+  part of the real Xet CAS API — see [Storage backends](#storage-backends))
 
 ## Hub API shim (mounted on a separate port via `-hub-addr`)
 
@@ -202,6 +215,27 @@ API store chunk/xorb bytes through:
   the from-scratch `internal/sigv4` signer. Set `XET_S3STORE_LIVE_TEST=1`
   plus `XET_TEST_S3_*` env vars to run its tests against a real MinIO
   instance.
+
+## Storage auto-pruning and upload rate limiting
+
+Both off by default; opt in via `xetd` flags:
+
+- `-max-storage-bytes N -eviction-interval 5m` — once total xorb storage
+  exceeds `N` bytes, a background sweep (`internal/eviction`) deletes
+  least-recently-accessed xorbs (upload or fetch both count as access)
+  until back under budget, skipping any xorb with a fetch currently in
+  progress. `GET /v1/storage-stats` reports the configured budget and
+  cumulative evictions/bytes freed. A client that later needs an evicted
+  xorb must re-upload it — real Xet clients already treat CAS storage as
+  non-permanent and handle this by re-deriving from the source file.
+- `-rate-limit-rps N -rate-limit-burst N` — caps xorb/shard uploads per
+  source IP via a hand-rolled token bucket (`internal/ratelimit`, no new
+  dependency). Exceeding the limit returns `429` with `Retry-After`.
+  Fetch/reconstruction/HEAD traffic is never rate-limited.
+
+Both are single-node, in-memory policies with no cross-restart
+persistence — consistent with this server's existing state model (see
+[Where this diverges from real Xet](#where-this-diverges-from-real-xet)).
 
 # Testing
 

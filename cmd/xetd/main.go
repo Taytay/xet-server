@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"log/slog"
@@ -18,7 +19,9 @@ import (
 
 	"xet-server/internal/api"
 	"xet-server/internal/casserver"
+	"xet-server/internal/eviction"
 	"xet-server/internal/hubserver"
+	"xet-server/internal/ratelimit"
 	"xet-server/internal/storage/fsstore"
 )
 
@@ -27,6 +30,10 @@ func main() {
 	hubAddr := flag.String("hub-addr", "", "listen address for the Hub API shim (empty = disabled)")
 	casURL := flag.String("cas-url", "", "externally-reachable CAS base URL to hand out from the Hub shim (defaults to http://localhost<addr>)")
 	dataDir := flag.String("data", "./xet-data", "directory for chunks, xorbs, and manifests")
+	maxStorageBytes := flag.Int64("max-storage-bytes", 0, "if > 0, periodically evict least-recently-accessed xorbs once total xorb storage exceeds this many bytes")
+	evictionInterval := flag.Duration("eviction-interval", 5*time.Minute, "how often to check storage usage against -max-storage-bytes")
+	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "if > 0, cap sustained xorb/shard uploads per source IP to this many requests/second (burst allowance via -rate-limit-burst)")
+	rateLimitBurst := flag.Float64("rate-limit-burst", 20, "burst allowance for -rate-limit-rps — how many upload requests a source IP can make immediately before the per-second rate applies")
 	flag.Parse()
 
 	if os.Getenv("DEBUG") != "" {
@@ -43,6 +50,18 @@ func main() {
 		log.Fatalf("init xorb store: %v", err)
 	}
 	casSrv := casserver.New(xorbStore)
+
+	if *maxStorageBytes > 0 {
+		sweeper := eviction.New(xorbStore, casSrv, *maxStorageBytes, *evictionInterval)
+		casSrv.SetEvictionStats(sweeper.Stats)
+		go sweeper.Run(context.Background())
+		slog.Info("eviction sweep enabled", "budgetBytes", *maxStorageBytes, "interval", *evictionInterval)
+	}
+
+	if *rateLimitRPS > 0 {
+		casSrv.SetUploadRateLimiter(ratelimit.New(*rateLimitBurst, *rateLimitRPS))
+		slog.Info("upload rate limiting enabled", "requestsPerSecond", *rateLimitRPS, "burst", *rateLimitBurst)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", casSrv)

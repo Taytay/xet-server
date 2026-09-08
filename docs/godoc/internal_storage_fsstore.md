@@ -15,6 +15,13 @@ type Store struct {
 
 func New(root string) (*Store, error)
 
+func (s *Store) Delete(_ context.Context, key string) error
+    Delete removes the blob stored under key. Deleting an already-absent key
+    is not an error, matching the interface's idempotent-delete contract (an
+    eviction sweep racing a concurrent Delete of the same key, or retrying after
+    a partial failure, shouldn't need to distinguish "already gone" from "just
+    removed").
+
 func (s *Store) Get(_ context.Context, key string) (io.ReadCloser, error)
 
 func (s *Store) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, error)
@@ -27,4 +34,10 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (w
     canceled, or the copy stops short of size, the temp file is removed and no
     partial blob is ever visible under key — a caller can retry Put with a fresh
     reader afterward with no cleanup of its own required.
+
+func (s *Store) TotalBytes(_ context.Context) (int64, error)
+    TotalBytes walks the store's root and sums the size of every stored blob.
+    This is an O(number of blobs) directory walk, not a cached counter —
+    fine for a slow poll (an eviction sweep runs every few minutes at most),
+    but callers should not call this on any request hot path.
 ```

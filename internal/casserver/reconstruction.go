@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"xet-server/internal/merklehash"
 	"xet-server/internal/storage"
@@ -80,6 +81,14 @@ func (s *Server) handleReconstructionV1(w http.ResponseWriter, r *http.Request) 
 			httpError(w, fmt.Sprintf("reconstruction references unknown xorb %s", e.XorbHash.Hex()), http.StatusInternalServerError)
 			return
 		}
+		// A client requesting reconstruction is about to fetch this xorb —
+		// either from our own byte-serving endpoint (which also bumps this
+		// on the actual fetch) or from a presigned URL, which we'd otherwise
+		// never observe at all. Bumping here means eviction sees "about to
+		// be needed" even in the presigned-URL case.
+		s.xorbMu.Lock()
+		s.xorbLastAccess[e.XorbHash] = time.Now()
+		s.xorbMu.Unlock()
 
 		physStart := int64(0)
 		if e.ChunkIndexStart > 0 {

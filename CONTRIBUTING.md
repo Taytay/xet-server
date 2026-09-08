@@ -161,6 +161,8 @@ Xet-Server/
 │   ├── bg4/                  # ByteGrouping4 codec
 │   ├── sigv4/                # from-scratch AWS SigV4 request signer
 │   ├── storage/              # Store interface + fsstore/s3store backends
+│   ├── eviction/              # optional storage-budget auto-pruning sweep
+│   ├── ratelimit/             # optional per-source-IP upload rate limiter
 │   ├── casserver/            # wire-compatible CAS HTTP API
 │   ├── hubserver/            # Hub REST API shim (repo/commit/resolve)
 │   ├── chunk/, manifest/, api/, client/  # original simple chunk/dedup demo

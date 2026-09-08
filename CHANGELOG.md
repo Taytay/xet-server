@@ -5,6 +5,47 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-07
+
+Defense-in-depth follow-up to 0.4.0's performance work: bounded, observable
+storage eviction and per-client upload rate limiting — both scoped as
+measurable, single-node policies rather than open-ended hardening.
+
+### Added
+- **Storage auto-pruning** (`internal/eviction`): an optional background
+  sweep (`xetd -max-storage-bytes N -eviction-interval 5m`) that evicts
+  least-recently-accessed xorbs once total storage exceeds the configured
+  budget. Never evicts a xorb with a fetch currently in progress
+  (`casserver.Server` tracks per-xorb in-flight fetch counts); every
+  eviction is logged at `Info` with key, reason, and bytes freed. Disabled
+  by default (`-max-storage-bytes 0`).
+  - `storage.Deleter` and `storage.Sizer` are new optional capability
+    interfaces (matching the existing `storage.URLPresigner` pattern),
+    implemented by both `fsstore` (directory walk / `os.Remove`) and
+    `s3store` (paginated `ListObjectsV2` / `DELETE`).
+  - `GET /v1/storage-stats` (operator-facing, not part of the real Xet CAS
+    API) reports whether eviction is enabled and, if so, the configured
+    budget plus cumulative evictions/bytes freed — so the policy's effect
+    is directly observable on a running server, not just inferable from
+    logs.
+- **Per-source-IP upload rate limiting** (`internal/ratelimit`): a
+  hand-rolled token-bucket limiter (no new dependency) gating the xorb and
+  shard upload endpoints specifically — the expensive paths (chunk
+  decompression, hashing) a client hammering the server would otherwise
+  cost the most. Configurable via `xetd -rate-limit-rps N
+  -rate-limit-burst N`; disabled by default. Exceeding the limit returns
+  `429 Too Many Requests` with a `Retry-After` header, logged at `Debug`
+  (a retrying client backing off is expected behavior, not a fault).
+  Fetch/reconstruction/HEAD endpoints are deliberately not rate-limited.
+
+### Notes
+- Both features are single-node, in-memory policies with no cross-restart
+  persistence (eviction's LRU state resets on restart; rate-limit buckets
+  are per-process) — consistent with the rest of this server's existing
+  persistence model (see README's "Where this diverges from real Xet").
+  Auth-based (rather than IP-based) rate limiting is out of scope until
+  this server has an auth model at all.
+
 ## [0.4.0] - 2026-09-05
 
 ### Added

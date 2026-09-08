@@ -135,8 +135,10 @@ PROTOCOL.md).
 | `internal/lz4` | LZ4 block + frame decompression, written from the public LZ4 format specs. Needed because a CAS server must decompress and re-hash chunk payloads to verify a client's claimed hash, regardless of which compression scheme was used. |
 | `internal/bg4` | The `ByteGrouping4` reverse transform xet-core applies before LZ4 for the `ByteGrouping4LZ4` scheme. |
 | `internal/sigv4` | AWS Signature Version 4 request signing (header-based and query-string presigning), written from the public AWS spec — used by `s3store`, not tied to any AWS SDK. |
-| `internal/storage` | The `Store` interface (`Put`/`Get`/`GetRange`/`Has`) plus the optional `URLPresigner` capability interface, with `fsstore` (filesystem) and `s3store` (S3/MinIO via `sigv4`) implementations. |
-| `internal/casserver` | The real Xet CAS HTTP API: xorb upload/fetch, shard upload, reconstruction (Range-aware), chunk-dedup and telemetry stubs. This is where the protocol packages above are wired together into an HTTP surface. |
+| `internal/storage` | The `Store` interface (`Put`/`Get`/`GetRange`/`Has`, streaming via `io.Reader`/`io.ReadCloser`) plus optional capability interfaces (`URLPresigner`, `Deleter`, `Sizer`), with `fsstore` (filesystem) and `s3store` (S3/MinIO via `sigv4`) implementations. |
+| `internal/eviction` | An optional background sweep that deletes least-recently-accessed xorbs once total storage exceeds a configured budget, via the `storage.Deleter`/`storage.Sizer` capability interfaces. Off by default. |
+| `internal/ratelimit` | A hand-rolled per-source-IP token-bucket limiter gating the xorb/shard upload endpoints. Off by default. |
+| `internal/casserver` | The real Xet CAS HTTP API: xorb upload/fetch, shard upload, reconstruction (Range-aware), chunk-dedup and telemetry stubs, plus an operator-facing storage-stats endpoint. This is where the protocol packages above are wired together into an HTTP surface. |
 | `internal/hubserver` | A minimal shim of huggingface.co's Hub REST API (repo create, preupload, xet-token issuance, commit, resolve/HEAD) — separate from the CAS API, since real Hub and CAS are separate services. |
 | `internal/chunk`, `internal/manifest`, `internal/api`, `internal/client` | The original, simpler, non-wire-compatible chunk/dedup demo (gear-hash CDC + JSON manifests) this project started as. Kept for quick manual testing via `cmd/xet`/`internal/api`; unrelated to the CAS/Hub protocol work. |
 

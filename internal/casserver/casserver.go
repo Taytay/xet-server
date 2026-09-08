@@ -20,6 +20,9 @@
 //   - GET  /v2/reconstructions/{file_id}   — always 404/501, signaling
 //     clients to fall back to V1
 //   - POST /v1/telemetry                   — no-op ack
+//   - GET  /v1/storage-stats               — eviction policy stats
+//     (operator-facing; not part of the
+//     real Xet CAS API)
 //
 // This server never decompresses chunk payloads — like real CAS, it stores
 // and serves xorb bytes as opaque blobs, and integrity is checked via the
@@ -31,8 +34,11 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
+	"xet-server/internal/eviction"
 	"xet-server/internal/merklehash"
+	"xet-server/internal/ratelimit"
 	"xet-server/internal/shardformat"
 	"xet-server/internal/storage"
 	"xet-server/internal/xorbformat"
@@ -53,6 +59,11 @@ const xorbPrefix = "default"
 // guarantee. Splitting them lets a large xorb upload (which only touches
 // xorbFooters/xorbRawLength) proceed concurrently with an unrelated
 // reconstruction lookup (which only touches fileRecon).
+//
+// xorbLastAccess/xorbInFlight exist purely to support eviction.Sweeper
+// (see EvictionCandidates/ForgetKey below): the last time each xorb was
+// uploaded or fetched, and how many fetches are in progress right now, so
+// a sweep never deletes a blob a client might be mid-download of.
 type Server struct {
 	xorbs storage.Store
 	mux   *http.ServeMux
@@ -60,25 +71,127 @@ type Server struct {
 	fileReconMu sync.RWMutex
 	fileRecon   map[merklehash.Hash][]shardformat.FileDataSequenceEntry
 
-	xorbMu        sync.RWMutex
-	xorbFooters   map[merklehash.Hash]xorbformat.FooterV1
-	xorbRawLength map[merklehash.Hash]int64
+	xorbMu         sync.RWMutex
+	xorbFooters    map[merklehash.Hash]xorbformat.FooterV1
+	xorbRawLength  map[merklehash.Hash]int64
+	xorbLastAccess map[merklehash.Hash]time.Time
+	xorbInFlight   map[merklehash.Hash]int
 
 	sha256Mu    sync.RWMutex
 	sha256ToXet map[string]merklehash.Hash // hex SHA-256 -> Xet/Merkle file hash
+
+	// evictionStats, if set via SetEvictionStats, backs GET
+	// /v1/storage-stats. nil (the default, when no eviction.Sweeper is
+	// running) means that endpoint reports eviction as disabled rather
+	// than erroring.
+	evictionStats func() eviction.Stats
+
+	// uploadLimiter, if set via SetUploadRateLimiter, gates the xorb and
+	// shard upload endpoints — the expensive paths (decompression,
+	// hashing) a hostile or misbehaving client could otherwise hammer. nil
+	// (the default) means uploads are unlimited, matching this server's
+	// pre-rate-limiting behavior.
+	uploadLimiter *ratelimit.Limiter
 }
 
 func New(xorbs storage.Store) *Server {
 	s := &Server{
-		xorbs:         xorbs,
-		mux:           http.NewServeMux(),
-		fileRecon:     make(map[merklehash.Hash][]shardformat.FileDataSequenceEntry),
-		xorbFooters:   make(map[merklehash.Hash]xorbformat.FooterV1),
-		xorbRawLength: make(map[merklehash.Hash]int64),
-		sha256ToXet:   make(map[string]merklehash.Hash),
+		xorbs:          xorbs,
+		mux:            http.NewServeMux(),
+		fileRecon:      make(map[merklehash.Hash][]shardformat.FileDataSequenceEntry),
+		xorbFooters:    make(map[merklehash.Hash]xorbformat.FooterV1),
+		xorbRawLength:  make(map[merklehash.Hash]int64),
+		xorbLastAccess: make(map[merklehash.Hash]time.Time),
+		xorbInFlight:   make(map[merklehash.Hash]int),
+		sha256ToXet:    make(map[string]merklehash.Hash),
 	}
 	s.routes()
 	return s
+}
+
+// EvictionCandidates implements eviction.Registry: every xorb this server
+// knows about, excluding any with a fetch currently in progress. Called
+// by eviction.Sweeper on its own poll interval, not a request hot path.
+func (s *Server) EvictionCandidates() []eviction.Candidate {
+	s.xorbMu.RLock()
+	defer s.xorbMu.RUnlock()
+	candidates := make([]eviction.Candidate, 0, len(s.xorbRawLength))
+	for hash, size := range s.xorbRawLength {
+		if s.xorbInFlight[hash] > 0 {
+			continue
+		}
+		candidates = append(candidates, eviction.Candidate{
+			Key:        hash.Hex(),
+			LastAccess: s.xorbLastAccess[hash],
+			Size:       size,
+		})
+	}
+	return candidates
+}
+
+// ForgetKey implements eviction.Registry: drops key from every in-memory
+// index once eviction.Sweeper has already deleted the underlying blob
+// from storage. A subsequent fetch of this xorb 404s, exactly as if it
+// had never been uploaded — a client that still needs it must re-upload
+// (real Xet clients already handle a missing xorb by re-deriving it from
+// the source file, since CAS storage is explicitly not guaranteed
+// permanent).
+func (s *Server) ForgetKey(key string) {
+	hash, err := merklehash.FromHex(key)
+	if err != nil {
+		slog.Warn("eviction: ForgetKey given an unparseable key", "key", key, "error", err)
+		return
+	}
+	s.xorbMu.Lock()
+	delete(s.xorbFooters, hash)
+	delete(s.xorbRawLength, hash)
+	delete(s.xorbLastAccess, hash)
+	delete(s.xorbInFlight, hash)
+	s.xorbMu.Unlock()
+}
+
+// SetEvictionStats wires an eviction.Sweeper's Stats method into GET
+// /v1/storage-stats, so the eviction policy's effect is observable via
+// the running server rather than only inferable from logs. Call once at
+// startup if an eviction.Sweeper was created for this server's store.
+func (s *Server) SetEvictionStats(statsFunc func() eviction.Stats) {
+	s.evictionStats = statsFunc
+}
+
+// SetUploadRateLimiter wires a per-source-IP token-bucket limiter in
+// front of the xorb and shard upload endpoints. Must be called before
+// serving any traffic — it rebuilds the route table (http.ServeMux
+// panics on duplicate pattern registration, so routes are re-registered
+// from scratch on a fresh mux rather than layered on top of the
+// existing one).
+func (s *Server) SetUploadRateLimiter(limiter *ratelimit.Limiter) {
+	s.uploadLimiter = limiter
+	s.mux = http.NewServeMux()
+	s.routes()
+}
+
+// storageStatsResponse is GET /v1/storage-stats's body — not part of the
+// real Xet CAS API surface (xet-core's clients never call it), purely an
+// operator-facing endpoint for this server.
+type storageStatsResponse struct {
+	EvictionEnabled bool  `json:"eviction_enabled"`
+	BudgetBytes     int64 `json:"budget_bytes,omitempty"`
+	EvictionsTotal  int64 `json:"evictions_total,omitempty"`
+	BytesFreedTotal int64 `json:"bytes_freed_total,omitempty"`
+}
+
+func (s *Server) handleStorageStats(w http.ResponseWriter, r *http.Request) {
+	if s.evictionStats == nil {
+		writeJSON(w, storageStatsResponse{EvictionEnabled: false})
+		return
+	}
+	stats := s.evictionStats()
+	writeJSON(w, storageStatsResponse{
+		EvictionEnabled: true,
+		BudgetBytes:     stats.BudgetBytes,
+		EvictionsTotal:  stats.EvictionsTotal,
+		BytesFreedTotal: stats.BytesFreedTotal,
+	})
 }
 
 // XetHashForSHA256 returns the Xet/Merkle file hash for a file previously
@@ -112,14 +225,22 @@ func (s *Server) FileSize(fileHash merklehash.Hash) (int64, bool) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("POST /v1/xorbs/{prefix}/{hash}", s.handleUploadXorb)
+	uploadXorb := http.HandlerFunc(s.handleUploadXorb)
+	uploadShard := http.HandlerFunc(s.handleUploadShard)
+	if s.uploadLimiter != nil {
+		s.mux.Handle("POST /v1/xorbs/{prefix}/{hash}", s.uploadLimiter.Middleware(uploadXorb))
+		s.mux.Handle("POST /v1/shards", s.uploadLimiter.Middleware(uploadShard))
+	} else {
+		s.mux.Handle("POST /v1/xorbs/{prefix}/{hash}", uploadXorb)
+		s.mux.Handle("POST /v1/shards", uploadShard)
+	}
 	s.mux.HandleFunc("GET /v1/xorbs/{prefix}/{hash}", s.handleFetchXorb)
 	s.mux.HandleFunc("HEAD /v1/xorbs/{prefix}/{hash}", s.handleHeadXorb)
-	s.mux.HandleFunc("POST /v1/shards", s.handleUploadShard)
 	s.mux.HandleFunc("GET /v1/reconstructions/{file_id}", s.handleReconstructionV1)
 	s.mux.HandleFunc("GET /v2/reconstructions/{file_id}", s.handleReconstructionV2)
 	s.mux.HandleFunc("GET /v1/chunks/{prefix}/{hash}", s.handleChunkDedup)
 	s.mux.HandleFunc("POST /v1/telemetry", s.handleTelemetry)
+	s.mux.HandleFunc("GET /v1/storage-stats", s.handleStorageStats)
 }
 
 // --- JSON response shapes, matching openapi/cas.openapi.yaml verbatim ---

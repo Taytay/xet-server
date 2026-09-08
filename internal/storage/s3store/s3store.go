@@ -6,9 +6,11 @@ package s3store
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -19,6 +21,8 @@ import (
 var (
 	_ storage.Store        = (*Store)(nil)
 	_ storage.URLPresigner = (*Store)(nil)
+	_ storage.Deleter      = (*Store)(nil)
+	_ storage.Sizer        = (*Store)(nil)
 )
 
 type Store struct {
@@ -69,13 +73,6 @@ func (s *Store) Has(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
-// Put uploads data under key if not already present. S3 has no native
-// "create if absent" semantic, so this does a HEAD-then-PUT; a benign
-// race (two callers uploading the identical bytes for the same
-// content-addressed key concurrently) just means both write the same
-// content and both report "written" — the CAS dedup logic that matters
-// for cost/perf still works because the vast majority of calls hit an
-// existing key on Has and skip the PUT entirely.
 // Put uploads size bytes from r under key if not already present. S3 has no
 // native "create if absent" semantic, so this does a HEAD-then-PUT; a
 // benign race (two callers uploading the identical bytes for the same
@@ -194,4 +191,76 @@ func (s *Store) EnsureBucket(ctx context.Context) error {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("s3store: PUT bucket %s: unexpected status %s: %s", s.Bucket, resp.Status, body)
+}
+
+// Delete removes the object stored under key. Deleting an already-absent
+// key is not an error — S3's DELETE already behaves this way natively
+// (204 whether or not the key existed), matching the interface's
+// idempotent-delete contract.
+func (s *Store) Delete(ctx context.Context, key string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.objectURL(key), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := s.do(req, sigv4.UnsignedPayload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("s3store: DELETE %s: unexpected status %s: %s", key, resp.Status, body)
+	}
+	return nil
+}
+
+type listBucketResult struct {
+	Contents              []struct{ Size int64 } `xml:"Contents"`
+	IsTruncated           bool                   `xml:"IsTruncated"`
+	NextContinuationToken string                 `xml:"NextContinuationToken"`
+}
+
+// TotalBytes sums the size of every object under this store's prefix via
+// paginated ListObjectsV2 calls. Like fsstore's TotalBytes, this is meant
+// for a slow poll (an eviction sweep), not a request hot path — each call
+// is O(number of objects / 1000) round trips to the S3-compatible
+// endpoint.
+func (s *Store) TotalBytes(ctx context.Context) (int64, error) {
+	var total int64
+	var continuationToken string
+	for {
+		listURL := fmt.Sprintf("%s/%s?list-type=2&prefix=%s", s.Endpoint, s.Bucket, url.QueryEscape(s.Prefix))
+		if continuationToken != "" {
+			listURL += "&continuation-token=" + url.QueryEscape(continuationToken)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+		if err != nil {
+			return 0, err
+		}
+		resp, err := s.do(req, sigv4.UnsignedPayload)
+		if err != nil {
+			return 0, err
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return 0, fmt.Errorf("s3store: ListObjectsV2 %s: unexpected status %s: %s", s.Bucket, resp.Status, body)
+		}
+		if readErr != nil {
+			return 0, readErr
+		}
+
+		var result listBucketResult
+		if err := xml.Unmarshal(body, &result); err != nil {
+			return 0, fmt.Errorf("s3store: parse ListObjectsV2 response: %w", err)
+		}
+		for _, obj := range result.Contents {
+			total += obj.Size
+		}
+		if !result.IsTruncated {
+			break
+		}
+		continuationToken = result.NextContinuationToken
+	}
+	return total, nil
 }

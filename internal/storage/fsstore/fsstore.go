@@ -7,13 +7,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"xet-server/internal/storage"
 )
 
-var _ storage.Store = (*Store)(nil)
+var (
+	_ storage.Store   = (*Store)(nil)
+	_ storage.Deleter = (*Store)(nil)
+	_ storage.Sizer   = (*Store)(nil)
+)
 
 type Store struct {
 	Root string
@@ -121,3 +126,42 @@ type rangeReadCloser struct {
 }
 
 func (r rangeReadCloser) Close() error { return r.f.Close() }
+
+// Delete removes the blob stored under key. Deleting an already-absent
+// key is not an error, matching the interface's idempotent-delete
+// contract (an eviction sweep racing a concurrent Delete of the same key,
+// or retrying after a partial failure, shouldn't need to distinguish
+// "already gone" from "just removed").
+func (s *Store) Delete(_ context.Context, key string) error {
+	if err := os.Remove(s.path(key)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// TotalBytes walks the store's root and sums the size of every stored
+// blob. This is an O(number of blobs) directory walk, not a cached
+// counter — fine for a slow poll (an eviction sweep runs every few
+// minutes at most), but callers should not call this on any request hot
+// path.
+func (s *Store) TotalBytes(_ context.Context) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(s.Root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"xet-server/internal/bg4"
 	"xet-server/internal/lz4"
@@ -176,6 +177,7 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 		NumChunks:            uint32(len(entries)),
 	}
 	s.xorbRawLength[claimedHash] = size
+	s.xorbLastAccess[claimedHash] = time.Now()
 	s.xorbMu.Unlock()
 
 	writeJSON(w, uploadXorbResponse{WasInserted: written})
@@ -195,13 +197,22 @@ func (s *Server) handleFetchXorb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.xorbMu.RLock()
+	s.xorbMu.Lock()
 	total, known := s.xorbRawLength[hash]
-	s.xorbMu.RUnlock()
+	if known {
+		s.xorbLastAccess[hash] = time.Now()
+		s.xorbInFlight[hash]++
+	}
+	s.xorbMu.Unlock()
 	if !known {
 		http.NotFound(w, r)
 		return
 	}
+	defer func() {
+		s.xorbMu.Lock()
+		s.xorbInFlight[hash]--
+		s.xorbMu.Unlock()
+	}()
 
 	start, end, hasRange, err := parseByteRange(r.Header.Get("Range"), total)
 	if err != nil {

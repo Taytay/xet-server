@@ -21,6 +21,12 @@ type Store struct {
 
 func New(endpoint, bucket, prefix, accessKey, secretKey, region string) *Store
 
+func (s *Store) Delete(ctx context.Context, key string) error
+    Delete removes the object stored under key. Deleting an already-absent
+    key is not an error — S3's DELETE already behaves this way natively (204
+    whether or not the key existed), matching the interface's idempotent-delete
+    contract.
+
 func (s *Store) EnsureBucket(ctx context.Context) error
     EnsureBucket creates the bucket if it doesn't already exist. MinIO and S3
     both accept an empty-body PUT to the bucket root for this.
@@ -37,19 +43,13 @@ func (s *Store) PresignGet(_ context.Context, key string, expirySeconds int) (st
     endpoint, bypassing our own server for the bytes themselves.
 
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error)
-    Put uploads data under key if not already present. S3 has no native
-    "create if absent" semantic, so this does a HEAD-then-PUT; a benign race
-    (two callers uploading the identical bytes for the same content-addressed
-    key concurrently) just means both write the same content and both report
-    "written" — the CAS dedup logic that matters for cost/perf still works
-    because the vast majority of calls hit an existing key on Has and skip
-    the PUT entirely. Put uploads size bytes from r under key if not already
-    present. S3 has no native "create if absent" semantic, so this does a
-    HEAD-then-PUT; a benign race (two callers uploading the identical bytes for
-    the same content-addressed key concurrently) just means both write the same
-    content and both report "written" — the CAS dedup logic that matters for
-    cost/perf still works because the vast majority of calls hit an existing key
-    on Has and skip the PUT entirely.
+    Put uploads size bytes from r under key if not already present. S3 has
+    no native "create if absent" semantic, so this does a HEAD-then-PUT;
+    a benign race (two callers uploading the identical bytes for the same
+    content-addressed key concurrently) just means both write the same content
+    and both report "written" — the CAS dedup logic that matters for cost/perf
+    still works because the vast majority of calls hit an existing key on Has
+    and skip the PUT entirely.
 
     The upload signs with sigv4.UnsignedPayload rather than a SHA-256 content
     hash: computing that hash would require buffering the full body before
@@ -62,4 +62,10 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (w
     partial-object visibility (a PUT either lands in full or the object doesn't
     exist), so unlike fsstore there is no staging file to remove; the caller can
     simply retry Put with a fresh reader.
+
+func (s *Store) TotalBytes(ctx context.Context) (int64, error)
+    TotalBytes sums the size of every object under this store's prefix via
+    paginated ListObjectsV2 calls. Like fsstore's TotalBytes, this is meant
+    for a slow poll (an eviction sweep), not a request hot path — each call is
+    O(number of objects / 1000) round trips to the S3-compatible endpoint.
 ```

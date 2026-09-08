@@ -68,3 +68,24 @@ type URLPresigner interface {
 	// expirySeconds, returns the blob stored under key.
 	PresignGet(ctx context.Context, key string, expirySeconds int) (string, error)
 }
+
+// Deleter is an optional capability: backends that support removing a
+// previously-stored blob implement it. Not part of the core Store
+// interface since not every caller needs delete (the demo API's chunk
+// store, for instance, never removes anything) — this exists for callers
+// like a storage-budget eviction sweep that do. Deleting an
+// already-absent key is not an error (idempotent).
+type Deleter interface {
+	Delete(ctx context.Context, key string) error
+}
+
+// Sizer is an optional capability: backends that can report the total
+// bytes currently stored implement it, so a caller (e.g. an eviction
+// sweep) can tell whether it's over a size budget without maintaining its
+// own running total independently of the backend's actual state. This is
+// expected to be called on a slow poll interval (minutes), not a hot
+// path — backends are free to implement it by walking/listing everything
+// they hold each call.
+type Sizer interface {
+	TotalBytes(ctx context.Context) (int64, error)
+}

@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 
 	"xet-server/internal/merklehash"
+	"xet-server/internal/ratelimit"
 	"xet-server/internal/shardformat"
 	"xet-server/internal/storage/fsstore"
 	"xet-server/internal/xorbformat"
@@ -56,6 +58,21 @@ func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 		t.Fatalf("fsstore.New() error = %v", err)
 	}
 	casSrv := New(store)
+	httpSrv := httptest.NewServer(casSrv)
+	t.Cleanup(httpSrv.Close)
+	return httpSrv, casSrv
+}
+
+// newRateLimitedTestServer is like newTestServer but with an upload rate
+// limiter installed, for tests exercising 429 behavior.
+func newRateLimitedTestServer(t *testing.T, burst, refillPerSecond float64) (*httptest.Server, *Server) {
+	t.Helper()
+	store, err := fsstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("fsstore.New() error = %v", err)
+	}
+	casSrv := New(store)
+	casSrv.SetUploadRateLimiter(ratelimit.New(burst, refillPerSecond))
 	httpSrv := httptest.NewServer(casSrv)
 	t.Cleanup(httpSrv.Close)
 	return httpSrv, casSrv
@@ -523,5 +540,205 @@ func TestReconstruction_RangePastEOFReturns416(t *testing.T) {
 	if inBoundsResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(inBoundsResp.Body)
 		t.Errorf("status = %d, want 200 for an in-bounds Range; body = %s", inBoundsResp.StatusCode, body)
+	}
+}
+
+// TestEvictionCandidates_ExcludesInFlightFetch confirms a xorb currently
+// being fetched never appears in EvictionCandidates — an eviction.Sweeper
+// consulting this mid-fetch must not be told it's safe to delete a blob a
+// client is actively reading.
+func TestEvictionCandidates_ExcludesInFlightFetch(t *testing.T) {
+	ts, srv := newTestServer(t)
+
+	// A large-ish payload so the fetch has time to be "in flight" when we
+	// check candidates concurrently.
+	payload := bytes.Repeat([]byte("x"), 1<<20) // 1 MiB
+	blob, xorbHash, _ := buildXorb(t, [][]byte{payload})
+
+	resp, err := http.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(blob))
+	if err != nil {
+		t.Fatalf("upload xorb error = %v", err)
+	}
+	resp.Body.Close()
+
+	// Manually mark this xorb as in-flight, the same way handleFetchXorb
+	// does for the duration of a real fetch, without needing to race an
+	// actual slow HTTP response body to observe the window.
+	srv.xorbMu.Lock()
+	srv.xorbInFlight[xorbHash]++
+	srv.xorbMu.Unlock()
+
+	candidates := srv.EvictionCandidates()
+	for _, c := range candidates {
+		if c.Key == xorbHash.Hex() {
+			t.Errorf("EvictionCandidates() included %s while marked in-flight", c.Key)
+		}
+	}
+
+	srv.xorbMu.Lock()
+	srv.xorbInFlight[xorbHash]--
+	srv.xorbMu.Unlock()
+
+	candidates = srv.EvictionCandidates()
+	found := false
+	for _, c := range candidates {
+		if c.Key == xorbHash.Hex() {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("EvictionCandidates() did not include the xorb once no longer in-flight")
+	}
+}
+
+// TestForgetKey_ClearsAllIndices confirms ForgetKey removes a xorb from
+// every index casserver tracks it under, so a subsequent fetch 404s
+// exactly as if the xorb had never been uploaded.
+func TestForgetKey_ClearsAllIndices(t *testing.T) {
+	ts, srv := newTestServer(t)
+
+	blob, xorbHash, _ := buildXorb(t, [][]byte{[]byte("evict me")})
+	resp, err := http.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(blob))
+	if err != nil {
+		t.Fatalf("upload xorb error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload xorb status = %d", resp.StatusCode)
+	}
+
+	srv.ForgetKey(xorbHash.Hex())
+
+	getResp, err := http.Get(ts.URL + "/v1/xorbs/default/" + xorbHash.Hex())
+	if err != nil {
+		t.Fatalf("GET xorb error = %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET xorb status = %d after ForgetKey, want 404", getResp.StatusCode)
+	}
+
+	srv.xorbMu.RLock()
+	_, footerKnown := srv.xorbFooters[xorbHash]
+	_, lengthKnown := srv.xorbRawLength[xorbHash]
+	_, accessKnown := srv.xorbLastAccess[xorbHash]
+	srv.xorbMu.RUnlock()
+	if footerKnown || lengthKnown || accessKnown {
+		t.Errorf("ForgetKey left state behind: footerKnown=%v lengthKnown=%v accessKnown=%v",
+			footerKnown, lengthKnown, accessKnown)
+	}
+}
+
+// TestHandleStorageStats_DisabledByDefault confirms /v1/storage-stats
+// reports eviction as disabled when no eviction.Sweeper was wired in via
+// SetEvictionStats, rather than erroring or panicking.
+func TestHandleStorageStats_DisabledByDefault(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/v1/storage-stats")
+	if err != nil {
+		t.Fatalf("GET storage-stats error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got storageStatsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode error = %v", err)
+	}
+	if got.EvictionEnabled {
+		t.Error("EvictionEnabled = true, want false when SetEvictionStats was never called")
+	}
+}
+
+// TestUploadRateLimit_ConcurrentRequestsFromOneSourceGet429sOnceOverBudget
+// is the measurable rate-limiting test required by this project's v0.5.0
+// scope: fire many concurrent upload requests from a single simulated
+// source (httptest.Server routes every client through the same
+// connection pool, so RemoteAddr is consistently one address for the
+// whole test) against a tight burst budget, and assert some fraction get
+// 429'd rather than all succeeding.
+func TestUploadRateLimit_ConcurrentRequestsFromOneSourceGet429sOnceOverBudget(t *testing.T) {
+	const burst = 5
+	ts, _ := newRateLimitedTestServer(t, burst, 0) // refill 0: exhausted burst never recovers mid-test
+
+	const totalRequests = 20
+	var wg sync.WaitGroup
+	statusCodes := make([]int, totalRequests)
+
+	for i := 0; i < totalRequests; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Each request claims a distinct, validly-hashed empty-ish
+			// xorb so a request that does get past the limiter doesn't
+			// fail for an unrelated reason (hash mismatch, etc.) and get
+			// miscounted.
+			payload := []byte("payload-" + strconv.Itoa(i))
+			blob, xorbHash, _ := buildXorb(t, [][]byte{payload})
+			resp, err := http.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(blob))
+			if err != nil {
+				t.Errorf("request %d error = %v", i, err)
+				return
+			}
+			defer resp.Body.Close()
+			statusCodes[i] = resp.StatusCode
+		}(i)
+	}
+	wg.Wait()
+
+	var ok, tooMany int
+	for _, code := range statusCodes {
+		switch code {
+		case http.StatusOK:
+			ok++
+		case http.StatusTooManyRequests:
+			tooMany++
+		default:
+			t.Errorf("unexpected status code %d", code)
+		}
+	}
+
+	if ok > burst {
+		t.Errorf("ok = %d, want at most burst (%d) requests to succeed", ok, burst)
+	}
+	if tooMany == 0 {
+		t.Errorf("tooMany = 0, want at least one 429 once request count (%d) exceeds burst (%d)", totalRequests, burst)
+	}
+	if ok+tooMany != totalRequests {
+		t.Errorf("ok(%d) + tooMany(%d) = %d, want %d", ok, tooMany, ok+tooMany, totalRequests)
+	}
+}
+
+// TestUploadRateLimit_DoesNotAffectFetchOrReconstructionEndpoints confirms
+// the limiter only gates the two upload endpoints (the expensive
+// decompression/hashing paths), not fetch/reconstruction reads — an
+// upload burst should never make an unrelated download start 429ing.
+func TestUploadRateLimit_DoesNotAffectFetchOrReconstructionEndpoints(t *testing.T) {
+	const burst = 1
+	ts, _ := newRateLimitedTestServer(t, burst, 0)
+
+	blob, xorbHash, _ := buildXorb(t, [][]byte{[]byte("only allowed upload")})
+	resp, err := http.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(blob))
+	if err != nil {
+		t.Fatalf("upload xorb error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload xorb status = %d, want 200 (within burst)", resp.StatusCode)
+	}
+
+	// Burst is now exhausted for uploads; fetching the xorb we just
+	// uploaded must still succeed since GET isn't rate-limited.
+	for i := 0; i < 5; i++ {
+		getResp, err := http.Get(ts.URL + "/v1/xorbs/default/" + xorbHash.Hex())
+		if err != nil {
+			t.Fatalf("GET xorb error = %v", err)
+		}
+		getResp.Body.Close()
+		if getResp.StatusCode != http.StatusOK {
+			t.Errorf("GET xorb (iteration %d) status = %d, want 200 — fetch must not be rate-limited", i, getResp.StatusCode)
+		}
 	}
 }
