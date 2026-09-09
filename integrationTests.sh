@@ -8,6 +8,10 @@
 # case. Each test script gets:
 #
 #   $XET             - path to the built xet CLI binary
+#   $XETD            - path to the built xetd server binary (for tests that
+#                       need to start their OWN xetd instance with different
+#                       flags, e.g. -auth-token, rather than using the
+#                       shared no-auth instance at $XETD_URL/$HUB_URL)
 #   $XETD_URL        - base URL of the running xetd CAS server
 #   $HUB_URL         - base URL of the running xetd Hub API shim
 #   $WORKDIR         - a fresh scratch directory, unique to this test
@@ -112,7 +116,7 @@ SERVER_PID=$!
 # Wait for the server to accept connections (up to ~5s).
 ready=false
 for _ in $(seq 1 50); do
-    if curl -s -o /dev/null "$XETD_URL/stats"; then
+    if curl -s -o /dev/null "$XETD_URL/v1/stats"; then
         ready=true
         break
     fi
@@ -126,6 +130,7 @@ fi
 logInfo "xetd is ready (pid $SERVER_PID)"
 
 export XET="$XET_BIN"
+export XETD="$XETD_BIN"
 export XETD_URL
 export HUB_URL
 export PYTHON_VERSION="${PYTHON_VERSION:-3}"

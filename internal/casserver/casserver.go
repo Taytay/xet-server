@@ -34,18 +34,27 @@
 // This server never decompresses chunk payloads — like real CAS, it stores
 // and serves xorb bytes as opaque blobs, and integrity is checked via the
 // xorb footer's own hash tree rather than by re-verifying chunk contents.
+//
+// Every route above except telemetry and storage-stats requires the
+// scope real xet-core's own OpenAPI spec documents for it (read for every
+// GET, write for the two uploads), enforced via auth.Authenticator — see
+// SetAuthenticator. The default (auth.NoAuth{}) enforces nothing, this
+// server's behavior prior to v0.8.0.
 package casserver
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
+	"xet-server/internal/auth"
 	"xet-server/internal/eviction"
 	"xet-server/internal/merklehash"
 	"xet-server/internal/ratelimit"
+	"xet-server/internal/routing"
 	"xet-server/internal/shardformat"
 	"xet-server/internal/storage"
 	"xet-server/internal/xorbformat"
@@ -111,6 +120,12 @@ type Server struct {
 	// (the default) means uploads are unlimited, matching this server's
 	// pre-rate-limiting behavior.
 	uploadLimiter *ratelimit.Limiter
+
+	// authenticator gates every route per its required scope (see
+	// requireScope/routes). Defaults to auth.NoAuth{} — this server's
+	// pre-v0.8.0 behavior, unconditionally allowing every request — until
+	// SetAuthenticator is called with something else.
+	authenticator auth.Authenticator
 }
 
 func New(xorbs storage.Store) *Server {
@@ -124,6 +139,7 @@ func New(xorbs storage.Store) *Server {
 		xorbInFlight:     make(map[merklehash.Hash]int),
 		sha256ToXet:      make(map[string]merklehash.Hash),
 		chunkHashToShard: make(map[merklehash.Hash][]byte),
+		authenticator:    auth.NoAuth{},
 	}
 	s.routes()
 	return s
@@ -190,6 +206,44 @@ func (s *Server) SetUploadRateLimiter(limiter *ratelimit.Limiter) {
 	s.routes()
 }
 
+// SetAuthenticator replaces this server's Authenticator (default
+// auth.NoAuth{}, i.e. no enforcement — this server's pre-v0.8.0
+// behavior). Must be called before serving any traffic, for the same
+// route-rebuild reason as SetUploadRateLimiter. See auth.Authenticator's
+// doc comment for how to implement a custom one.
+func (s *Server) SetAuthenticator(a auth.Authenticator) {
+	s.authenticator = a
+	s.mux = http.NewServeMux()
+	s.routes()
+}
+
+// requireScope wraps next so a request must authenticate (via
+// s.authenticator) and hold scope before reaching next. A missing/invalid
+// credential (auth.ErrUnauthenticated) maps to 401; a valid credential
+// lacking scope maps to 403 — the same 401-vs-403 split real xet-core's
+// CAS API documents (see docs/PROTOCOL.md's auth section). Logged at
+// Debug via httpError, same as any other 4xx here: a client without a
+// token, or with the wrong one, is expected/routine traffic to log
+// quietly, not a server-side fault.
+func (s *Server) requireScope(scope auth.Scope, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, err := s.authenticator.Authenticate(r)
+		if err != nil {
+			if errors.Is(err, auth.ErrUnauthenticated) {
+				httpError(w, "unauthenticated: "+err.Error(), http.StatusUnauthorized)
+			} else {
+				httpError(w, "authentication failed: "+err.Error(), http.StatusForbidden)
+			}
+			return
+		}
+		if !principal.HasScope(scope) {
+			httpError(w, "principal lacks required scope: "+string(scope), http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // storageStatsResponse is GET /v1/storage-stats's body — not part of the
 // real Xet CAS API surface (xet-core's clients never call it), purely an
 // operator-facing endpoint for this server.
@@ -244,23 +298,56 @@ func (s *Server) FileSize(fileHash merklehash.Hash) (int64, bool) {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
+// V1/V2 are this server's URL version prefixes — exported so cmd/xetd
+// can reference them directly when wiring routes onto its own top-level
+// mux, instead of re-typing "/v1"/"/v2" as a raw literal at the call
+// site. V2 exists solely for the multi-range-optimized reconstruction
+// endpoint; every other route here is V1.
+//
+// XorbsPath, ShardsPath, ReconstructionsPath, ChunksPath, TelemetryPath,
+// and StoragestatsPath are the specific literal sub-paths (relative to
+// V1) this package registers below, also exported so any other package
+// referencing one of these paths (cmd/xetd, internal/landingpage, a
+// future client) uses the same named constant instead of a duplicated
+// string literal. ReconstructionsPathV2 is the V2 counterpart of
+// ReconstructionsPath.
+const (
+	V1 = "/v1"
+	V2 = "/v2"
+
+	XorbsPath             = V1 + "/xorbs/{prefix}/{hash}"
+	ShardsPath            = V1 + "/shards"
+	ReconstructionsPath   = V1 + "/reconstructions/{file_id}"
+	ReconstructionsPathV2 = V2 + "/reconstructions/{file_id}"
+	ChunksPath            = V1 + "/chunks/{prefix}/{hash}"
+	TelemetryPath         = V1 + "/telemetry"
+	StoragestatsPath      = V1 + "/storage-stats"
+)
+
 func (s *Server) routes() {
-	uploadXorb := http.HandlerFunc(s.handleUploadXorb)
-	uploadShard := http.HandlerFunc(s.handleUploadShard)
+	uploadXorb := s.requireScope(auth.ScopeWrite, s.handleUploadXorb)
+	uploadShard := s.requireScope(auth.ScopeWrite, s.handleUploadShard)
 	if s.uploadLimiter != nil {
-		s.mux.Handle("POST /v1/xorbs/{prefix}/{hash}", s.uploadLimiter.Middleware(uploadXorb))
-		s.mux.Handle("POST /v1/shards", s.uploadLimiter.Middleware(uploadShard))
-	} else {
-		s.mux.Handle("POST /v1/xorbs/{prefix}/{hash}", uploadXorb)
-		s.mux.Handle("POST /v1/shards", uploadShard)
+		uploadXorb = s.uploadLimiter.Middleware(uploadXorb).ServeHTTP
+		uploadShard = s.uploadLimiter.Middleware(uploadShard).ServeHTTP
 	}
-	s.mux.HandleFunc("GET /v1/xorbs/{prefix}/{hash}", s.handleFetchXorb)
-	s.mux.HandleFunc("HEAD /v1/xorbs/{prefix}/{hash}", s.handleHeadXorb)
-	s.mux.HandleFunc("GET /v1/reconstructions/{file_id}", s.handleReconstructionV1)
-	s.mux.HandleFunc("GET /v2/reconstructions/{file_id}", s.handleReconstructionV2)
-	s.mux.HandleFunc("GET /v1/chunks/{prefix}/{hash}", s.handleChunkDedup)
-	s.mux.HandleFunc("POST /v1/telemetry", s.handleTelemetry)
-	s.mux.HandleFunc("GET /v1/storage-stats", s.handleStorageStats)
+	routing.Apply(s.mux, []routing.Route{
+		routing.Mount("POST", XorbsPath, uploadXorb),
+		routing.Mount("POST", ShardsPath, uploadShard),
+		routing.Mount("GET", XorbsPath, s.requireScope(auth.ScopeRead, s.handleFetchXorb)),
+		routing.Mount("HEAD", XorbsPath, s.requireScope(auth.ScopeRead, s.handleHeadXorb)),
+		routing.Mount("GET", ReconstructionsPath, s.requireScope(auth.ScopeRead, s.handleReconstructionV1)),
+		routing.Mount("GET", ReconstructionsPathV2, s.requireScope(auth.ScopeRead, s.handleReconstructionV2)),
+		routing.Mount("GET", ChunksPath, s.requireScope(auth.ScopeRead, s.handleChunkDedup)),
+		// Telemetry and storage-stats are unauthenticated regardless of
+		// s.authenticator: telemetry is a fire-and-forget client
+		// diagnostic with nothing sensitive to protect, and
+		// storage-stats is this project's own operator-facing endpoint
+		// (not part of the real Xet CAS API at all) — matching this
+		// server's pre-v0.8.0 behavior for both.
+		routing.Mount("POST", TelemetryPath, http.HandlerFunc(s.handleTelemetry)),
+		routing.Mount("GET", StoragestatsPath, http.HandlerFunc(s.handleStorageStats)),
+	})
 }
 
 // --- JSON response shapes, matching openapi/cas.openapi.yaml verbatim ---

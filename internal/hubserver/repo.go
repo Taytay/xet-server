@@ -53,6 +53,70 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// repoInfoResponse is GET /api/{repo_type}s/{repo_id}/revision/{revision}'s
+// body — a small subset of the real Hub's ModelInfo/DatasetInfo/SpaceInfo
+// JSON shape. huggingface_hub's snapshot_download only ever reads `sha`
+// off the deserialized object (asserting it's non-nil before using it as
+// the resolved commit hash for every subsequent per-file download), so
+// that's the one field that must be present and meaningful; the rest are
+// included because the client's dataclass constructors accept (and
+// harmlessly ignore) extra fields, and because a real client inspecting
+// the response for debugging should see something recognizable.
+//
+// sha is set to the revision name itself (e.g. "main"), not a real git
+// commit hash — this shim has no separate git-commit-hash identity for a
+// revision distinct from its name, and nothing in huggingface_hub
+// validates sha's format; every downstream call (list_repo_tree, resolve)
+// already accepts a revision name directly, so round-tripping the name
+// back as "sha" keeps the whole flow internally consistent.
+type repoInfoResponse struct {
+	ID      string `json:"id"`
+	SHA     string `json:"sha"`
+	Private bool   `json:"private"`
+}
+
+// handleRepoInfo implements GET /api/{repo_type}s/{repo_id}/revision/{revision}:
+// the request huggingface_hub's snapshot_download (used by `hf download`
+// for a whole-repo download, as opposed to a single named file) issues
+// first, to resolve revision to a commit hash before listing/downloading
+// files — and the request `hf upload`'s CLI command issues first, to
+// check whether the target branch already exists before creating it.
+// Matches resolve.go's existing read-path convention: the repo itself is
+// implicitly created on first touch (matching how a real Hub repo always
+// exists once anything references it), but a nonexistent revision 404s
+// with X-Error-Code: RevisionNotFound rather than being silently created
+// — a repo-info lookup is a read, not a push, so it must not have the
+// side effect of creating a branch nobody has committed to yet. The
+// X-Error-Code header is required, not cosmetic: huggingface_hub's
+// hf_raise_for_status only raises the specific RevisionNotFoundError
+// (which callers like `hf upload`'s branch-creation step specifically
+// catch) when this header is present; a plain 404 falls through to a
+// generic, uncaught HfHubHTTPError instead.
+func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request, repoType, repoID, revision string) {
+	rs := s.getOrCreateRepo(repoType, repoID)
+	if _, ok := rs.getRevision(revision); !ok {
+		w.Header().Set("X-Error-Code", "RevisionNotFound")
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, repoInfoResponse{ID: repoID, SHA: revision})
+}
+
+// handleCreateBranch implements POST /api/{repo_type}s/{repo_id}/branch/{branch}:
+// creates (or, matching real Hub's create_branch(exist_ok=True) contract,
+// no-ops on) the named revision. Called by `hf upload`'s CLI command
+// after a handleRepoInfo lookup reports the branch doesn't exist yet.
+// This shim's revisions already spring into existence implicitly on
+// first commit (see getOrCreateRevision) — this handler just does the
+// same thing eagerly, in response to an explicit request instead of
+// waiting for the first commit, so a caller that checks "does this
+// branch exist" immediately afterward (e.g. via handleRepoInfo) sees it.
+func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request, repoType, repoID, branch string) {
+	rs := s.getOrCreateRepo(repoType, repoID)
+	rs.getOrCreateRevision(branch)
+	w.WriteHeader(http.StatusOK)
+}
+
 // xetTokenResponse is the JSON body real HF Hub returns from
 // xet-{read,write}-token, per xet-core's CasJWTInfo (xet_client/src/hub_client/types.rs):
 // hf_xet's Rust client decodes this response as JSON (DirectRefreshRouteTokenRefresher::get_cas_jwt),

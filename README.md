@@ -25,9 +25,11 @@ by capturing and replaying genuine client traffic. See
 - [Installation](#installation)
 - [Usage](#usage)
   - [Run the wire-compatible server](#run-the-wire-compatible-server)
+  - [Authentication](#authentication)
   - [Point the real `hf` CLI at it](#point-the-real-hf-cli-at-it)
-  - [Simple demo API + CLI](#simple-demo-api--cli)
+  - [Xet Data API + CLI](#xet-data-api--cli)
 - [HTTP API](#http-api)
+  - [Interactive API docs (Swagger UI)](#interactive-api-docs-swagger-ui)
 - [Storage backends](#storage-backends)
 - [Testing](#testing)
 - [Documentation](#documentation)
@@ -105,7 +107,7 @@ and the key design decisions). Short version:
 - `cmd/xetd` runs the CAS server, and — with `-hub-addr` — the Hub API shim
   as a second HTTP listener, matching how huggingface.co's real Hub and
   CAS are actually separate services.
-- `cmd/xet` is a small CLI for the original simple demo API only (not the
+- `cmd/xet` is a small CLI for the Xet Data API only (not the
   wire-compatible protocol — use the real `hf` CLI for that).
 
 # Installation
@@ -156,11 +158,58 @@ make build       # -> bin/xetd, bin/xet
 ./bin/xetd -addr :8420 -data ./xet-data -verify-dedup -snapshot-interval 15s
 ```
 
+Opening either port's root path (`http://localhost:8420/` or, if
+`-hub-addr` is set, `http://localhost:8421/`) in a browser shows a landing
+page listing every endpoint that port serves — useful for orienting
+yourself without needing to read this README first.
+
+## Authentication
+
+By default `xetd` enforces no authentication at all — any client can read
+and write, matching this project's behavior prior to v0.8.0. Passing
+`-auth-token <secret>` (or, preferably, setting `$XETD_AUTH_TOKEN`) requires
+every request to carry `Authorization: Bearer <secret>`, split into
+read/write scope per endpoint (uploads/commits need write; downloads/
+reconstructions/resolve need read) the same way real Xet/HF Hub tokens
+work. `-auth-token None` (the default) or leaving it unset disables
+enforcement entirely.
+
+```bash
+export XETD_AUTH_TOKEN="a-long-random-secret"
+./bin/xetd -addr :8420 -hub-addr :8421 -data ./xet-data
+
+./bin/xet push -server http://localhost:8420 -auth-token "a-long-random-secret" ./model.safetensors
+# or, equivalently, export XET_AUTH_TOKEN (or HF_TOKEN, the same variable
+# the real `hf` CLI reads) instead of passing -auth-token:
+export XET_AUTH_TOKEN="a-long-random-secret"
+./bin/xet push -server http://localhost:8420 ./model.safetensors
+```
+
+**Prefer the environment variable over the flag** ($XETD_AUTH_TOKEN /
+$XET_AUTH_TOKEN) whenever the machine is shared or the command runs where
+its argument list might be logged: a `-auth-token` flag value is visible to
+any other local user via `ps -ef` / `/proc/<pid>/cmdline` and gets written
+to shell history, while an environment variable set through a secrets
+manager, a `.env` file kept out of history, or `read -s` is not. An
+explicit `-auth-token` flag always takes precedence over the environment
+variable if both are set, so scripts that need to override a
+machine-wide/session-wide token can still do so per invocation.
+
+`-auth-token`/the env vars above configure this project's built-in
+`auth.StaticTokenAuth` (server) and `auth.BearerCredentialHelper` (client)
+— a single shared secret. Both sides are defined as small interfaces
+(`auth.Authenticator`/`auth.Principal` server-side,
+`auth.CredentialHelper` client-side) in `internal/auth`, so implementing
+your own (e.g. per-user tokens, JWT validation, mTLS) is a matter of
+satisfying those interfaces and calling `SetAuthenticator`/setting
+`client.Client.Cred` — no changes to `casserver`, `hubserver`, or
+`internal/api` required.
+
 ## Point the real `hf` CLI at it
 
 ```bash
 export HF_ENDPOINT="http://localhost:8421"   # the Hub shim's address
-export HF_TOKEN="anything"                    # auth isn't enforced
+export HF_TOKEN="anything"                    # ignored unless xetd was started with -auth-token/$XETD_AUTH_TOKEN — see Authentication above
 
 hf upload myuser/my-model ./model.safetensors model.safetensors
 hf download myuser/my-model model.safetensors --local-dir ./downloaded
@@ -172,13 +221,25 @@ against the CAS server's own address (`:8420` above) with no Hub API
 involved at all — useful for isolating whether an issue is in the CAS
 protocol or the Hub shim.
 
-## Simple demo API + CLI
+Want to run this as a real, standing mirror rather than a one-off local
+test? See **[docs/MIRRORING.md](docs/MIRRORING.md)** for a full
+step-by-step guide (securing it, pointing multiple machines at it,
+troubleshooting).
 
-The original, non-wire-compatible gear-hash-CDC + JSON-manifest demo is
-still available for quick manual testing, mounted on the same `xetd`
-process at `/upload`, `/files`, `/stats`:
+## Xet Data API + CLI
+
+A simple, non-wire-compatible gear-hash-CDC + JSON-manifest API is also
+available for quick manual testing, mounted on the same `xetd` process at
+`/v1/upload`, `/v1/files`, `/v1/stats` — sharing the `/v1` namespace with
+the CAS protocol on a disjoint set of literal paths (`internal/api`'s
+exported `UploadPath`/`FilesPrefix`/`StatsPath` constants are the single
+source of truth for these, referenced by both `cmd/xetd`'s route table
+and `internal/client`, so the path never drifts between server and
+client). `-server` (both flags below are optional) falls back to
+`$XET_SERVER`, then `http://localhost:8420`:
 
 ```bash
+export XET_SERVER="http://localhost:8420"   # optional; -server overrides it per-invocation
 ./bin/xet push /path/to/model.safetensors
 # -> file_id:  2d53223aa33715f0eff757537ed9cf8f
 #    chunks:   28 total, 28 new
@@ -192,7 +253,35 @@ process at `/upload`, `/files`, `/stats`:
 ./bin/xet stats
 ```
 
+**No per-file ownership/isolation.** `file_id` is the SHA-256 of the
+uploaded content — this API has no repo or user concept at all, so `-auth-token`
+here (if enabled) only gates read/write access to the API as a whole, not
+per-file: any caller with a valid read-scoped token (or none, if auth is
+disabled) can fetch any `file_id` it knows, the same trust model as CAS's
+own `/v1/xorbs/{hash}`. File IDs are not secrets and this store is not
+multi-tenant — don't run it multi-tenant without adding that isolation
+yourself first.
+
 # HTTP API
+
+## Interactive API docs (Swagger UI)
+
+Every endpoint below is also documented as an OpenAPI 3.0 spec
+(`docs/openapi.yaml` — hand-authored and verified against the actual
+handler source, not generated) and served through a fully offline Swagger
+UI at `/api-docs/` on the CAS server's address:
+
+```bash
+./bin/xetd -addr :8420 -data ./xet-data
+open http://localhost:8420/api-docs/   # or just visit it in a browser
+```
+
+"Fully offline" means exactly that: the Swagger UI static assets
+(`third_party/swagger-ui-dist`, vendored from the
+[swagger-ui](https://github.com/swagger-api/swagger-ui) project) and the
+spec itself are both compiled directly into the `xetd` binary via Go's
+`embed` package (see `internal/apidocs`) — no CDN dependency, and it works
+identically on an air-gapped machine.
 
 ## CAS protocol (wire-compatible, mounted at `/v1`, `/v2`)
 
@@ -219,20 +308,26 @@ process at `/upload`, `/files`, `/stats`:
 ## Hub API shim (mounted on a separate port via `-hub-addr`)
 
 - `POST /api/repos/create`
+- `GET /api/{repo_type}s/{repo_id}/revision/{revision}` — repo info at a
+  revision (huggingface_hub's `snapshot_download` resolves this before a
+  whole-repo `hf download`)
+- `GET /api/{repo_type}s/{repo_id}/tree/{revision}` — list every file
+  committed to a revision
+- `POST /api/{repo_type}s/{repo_id}/branch/{branch}` — create a branch
 - `POST /api/{repo_type}s/{repo_id}/preupload/{revision}`
 - `GET /api/{repo_type}s/{repo_id}/xet-{read,write}-token/{revision}`
 - `POST /api/{repo_type}s/{repo_id}/commit/{revision}`
 - `HEAD`/`GET /{repo_id}/resolve/{revision}/{filename}`
 
-## Simple demo API (mounted at `/`)
+## Xet Data API (mounted at `/v1`, alongside the CAS protocol)
 
-- `POST /upload?name=<optional>` — chunks + dedups the uploaded file
-- `GET /files/{id}` / `GET /files/{id}/manifest` / `GET /stats`
+- `POST /v1/upload?name=<optional>` — chunks + dedups the uploaded file
+- `GET /v1/files/{id}` / `GET /v1/files/{id}/manifest` / `GET /v1/stats`
 
 # Storage backends
 
-`internal/storage.Store` is the abstraction both `casserver` and the demo
-API store chunk/xorb bytes through:
+`internal/storage.Store` is the abstraction both `casserver` and the Xet
+Data API store chunk/xorb bytes through:
 
 - **`fsstore`** — content-addressed filesystem directory (the default)
 - **`s3store`** — any S3-compatible endpoint (AWS S3, MinIO), signed with
@@ -306,6 +401,9 @@ compression benchmarks.
 
 # Documentation
 
+- **[docs/MIRRORING.md](docs/MIRRORING.md)** — practical guide to
+  self-hosting your own model mirror: `hf download`/`hf upload` against
+  your own server instead of huggingface.co, step by step
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system diagram,
   upload/download sequence diagrams, package responsibility table, design
   decisions
@@ -333,11 +431,11 @@ dependencies).
 
 # Where this diverges from real Xet
 
-- **No auth enforcement** — any bearer token is accepted. This is the one
-  deliberately deferred gap; every other divergence tracked in prior
-  versions of this doc has been closed as of v0.7.0 (real
-  revisions/branches, V2 reconstruction, a global chunk-dedup index, and
-  restart-surviving persistence — see below).
+Every divergence tracked in prior versions of this doc has been closed:
+real revisions/branches, V2 reconstruction, a global chunk-dedup index,
+restart-surviving persistence (all as of v0.7.0), and pluggable
+authentication/authorization (as of v0.8.0 — see
+[Authentication](#authentication)).
 
 # Troubleshooting
 
@@ -376,8 +474,8 @@ also taken.
 The runner uses `$TMPDIR` (or `/tmp` if unset) for all scratch state. Make
 sure your environment allows writes there.
 
-### Chunk counts differ between two very similar files more than expected (demo API only)
-The demo API's chunker targets an average chunk size of 64 KiB; edits
+### Chunk counts differ between two very similar files more than expected (Xet Data API only)
+The Xet Data API's chunker targets an average chunk size of 64 KiB; edits
 smaller than that still land inside one chunk boundary, and byte-level
 insertions can shift downstream boundaries until the rolling hash
 resynchronizes. Expected content-defined-chunking behavior, not a bug.

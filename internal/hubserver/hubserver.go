@@ -14,7 +14,12 @@
 // a default branch; any other revision name is created on first commit to
 // it) — commit/resolve/preupload all operate against the named revision's
 // own file set and commit history, not a single shared implicit state.
-// No git refs/PRs, and no real auth, are modeled: any bearer token is
+// No git refs/PRs are modeled. Every route except telemetry-equivalents
+// (there are none in this shim) requires the scope real xet-core/Hub
+// convention implies (write for token/commit/preupload/repo-create,
+// read for resolve), enforced via auth.Authenticator — see
+// SetAuthenticator. The default (auth.NoAuth{}) enforces nothing, this
+// server's behavior prior to v0.8.0: any bearer token (or none) is
 // accepted. State is held in memory alongside the paired
 // casserver.Server, since a commit's file entries need to reference the
 // Xet file hash the CAS layer already knows how to reconstruct — and
@@ -24,12 +29,15 @@ package hubserver
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 
+	"xet-server/internal/auth"
 	"xet-server/internal/merklehash"
+	"xet-server/internal/routing"
 )
 
 // casInfo is the subset of casserver.Server's read-side API this package
@@ -57,6 +65,13 @@ type Server struct {
 	// activity elsewhere.
 	mu    sync.RWMutex
 	repos map[repoKey]*repoState
+
+	// authenticator gates every route per its required scope (see
+	// requireScope and each dispatch handler below). Defaults to
+	// auth.NoAuth{} — this server's pre-v0.8.0 behavior, unconditionally
+	// allowing every request — until SetAuthenticator is called with
+	// something else.
+	authenticator auth.Authenticator
 }
 
 type repoKey struct {
@@ -100,29 +115,81 @@ type revisionState struct {
 
 func New(casBaseURL string, cas casInfo) *Server {
 	s := &Server{
-		CASBaseURL: casBaseURL,
-		CAS:        cas,
-		mux:        http.NewServeMux(),
-		repos:      make(map[repoKey]*repoState),
+		CASBaseURL:    casBaseURL,
+		CAS:           cas,
+		mux:           http.NewServeMux(),
+		repos:         make(map[repoKey]*repoState),
+		authenticator: auth.NoAuth{},
 	}
 	s.routes()
 	return s
 }
 
+// SetAuthenticator replaces this server's Authenticator (default
+// auth.NoAuth{}, i.e. no enforcement — this server's pre-v0.8.0
+// behavior). Safe to call at any time — unlike casserver's
+// SetAuthenticator, hubserver's routes dispatch by parsing the path
+// inside each handler rather than registering one mux pattern per
+// logical endpoint, so there's no route table to rebuild.
+func (s *Server) SetAuthenticator(a auth.Authenticator) {
+	s.authenticator = a
+}
+
+// requireScope authenticates r against s.authenticator and checks for
+// scope, writing a 401 (no/invalid credential) or 403 (valid credential,
+// insufficient scope) and returning false if the request should not
+// proceed. Mirrors casserver.Server.requireScope's semantics exactly
+// (see its doc comment) — kept as a plain bool-returning helper instead
+// of a http.HandlerFunc-wrapping middleware here, since hubserver's
+// dispatch handlers (handleAPIGet/handleAPIPost/handleResolveDispatch)
+// need to parse the path before they know which scope applies, unlike
+// casserver's one-mux-pattern-per-endpoint routing.
+func (s *Server) requireScope(w http.ResponseWriter, r *http.Request, scope auth.Scope) bool {
+	principal, err := s.authenticator.Authenticate(r)
+	if err != nil {
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			httpErrorJSON(w, "unauthenticated: "+err.Error(), http.StatusUnauthorized)
+		} else {
+			httpErrorJSON(w, "authentication failed: "+err.Error(), http.StatusForbidden)
+		}
+		return false
+	}
+	if !principal.HasScope(scope) {
+		httpErrorJSON(w, "principal lacks required scope: "+string(scope), http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("POST /api/repos/create", s.handleCreateRepo)
+	// repos/create is dispatched through handleAPIPost (which checks
+	// rest == "repos/create"), NOT registered as its own literal mux
+	// pattern here — Go's ServeMux prefers a more specific literal pattern
+	// over a wildcard one, so a direct "POST /api/repos/create" route
+	// would take priority over "POST /api/{rest...}" below and bypass
+	// handleAPIPost's requireScope check on this endpoint entirely.
+	//
 	// repoID in real Hub URLs is "namespace/name" (contains a slash), so
 	// these routes take the whole remainder as one wildcard and parse the
 	// repo type / repo ID / trailing segment out of it manually.
-	s.mux.HandleFunc("GET /api/{rest...}", s.handleAPIGet)
-	s.mux.HandleFunc("POST /api/{rest...}", s.handleAPIPost)
-	// A single handler (registered for both methods on the same pattern,
-	// rather than separate HEAD/GET registrations) avoids Go's ServeMux
-	// treating "HEAD /{rest...}" as ambiguous against "GET /api/{rest...}"
-	// (HEAD implicitly falls back to a GET pattern's handler otherwise).
-	s.mux.HandleFunc("/{rest...}", s.handleResolveDispatch)
+	//
+	// No routing.MountWithVersion here — huggingface_hub's real REST API
+	// is unversioned (no "/v1" segment exists in the actual protocol this
+	// mirrors), so routing.Mount (no version prefix) is used instead,
+	// still getting the same declarative-route-table shape as
+	// casserver/internal/api.
+	routing.Apply(s.mux, []routing.Route{
+		routing.Mount("GET", "/api/{rest...}", http.HandlerFunc(s.handleAPIGet)),
+		routing.Mount("POST", "/api/{rest...}", http.HandlerFunc(s.handleAPIPost)),
+		// A single handler (registered for both methods on the same
+		// pattern, rather than separate HEAD/GET registrations) avoids
+		// Go's ServeMux treating "HEAD /{rest...}" as ambiguous against
+		// "GET /api/{rest...}" (HEAD implicitly falls back to a GET
+		// pattern's handler otherwise).
+		routing.Mount("", "/{rest...}", http.HandlerFunc(s.handleResolveDispatch)),
+	})
 }
 
 // splitRepoPath splits a path of the form
@@ -140,9 +207,9 @@ func splitRepoPath(rest string) (repoType, repoID string, tail []string, ok bool
 	return repoType, repoID, parts[3:], true
 }
 
-// handleAPIGet dispatches GET /api/... requests: xet-{read,write}-token
-// routes, keyed by repo type/ID and matched by the tail segments'
-// "xet-{read,write}-token" prefix followed by a revision.
+// handleAPIGet dispatches GET /api/... requests: xet-{read,write}-token,
+// revision (repo info), and tree (file listing) routes, keyed by repo
+// type/ID and matched by the tail segments' first element.
 func (s *Server) handleAPIGet(w http.ResponseWriter, r *http.Request) {
 	repoType, repoID, tail, ok := splitRepoPath(r.PathValue("rest"))
 	if !ok || len(tail) < 2 {
@@ -151,9 +218,34 @@ func (s *Server) handleAPIGet(w http.ResponseWriter, r *http.Request) {
 	}
 	switch tail[0] {
 	case "xet-read-token":
+		if !s.requireScope(w, r, auth.ScopeRead) {
+			return
+		}
 		s.handleXetToken(w, r, repoType, repoID, readToken)
 	case "xet-write-token":
+		if !s.requireScope(w, r, auth.ScopeWrite) {
+			return
+		}
 		s.handleXetToken(w, r, repoType, repoID, writeToken)
+	case "revision":
+		if !s.requireScope(w, r, auth.ScopeRead) {
+			return
+		}
+		s.handleRepoInfo(w, r, repoType, repoID, tail[1])
+	case "tree":
+		if !s.requireScope(w, r, auth.ScopeRead) {
+			return
+		}
+		// tail[2:] is the optional path-in-repo, itself a single
+		// (percent-decoded-by-net/http) path segment — see
+		// list_repo_tree's encoded_path_in_repo, which quotes it with
+		// safe="" so a "/" inside it is percent-encoded rather than
+		// splitting into more segments.
+		var pathInRepo string
+		if len(tail) > 2 {
+			pathInRepo = strings.Join(tail[2:], "/")
+		}
+		s.handleListTree(w, r, repoType, repoID, tail[1], pathInRepo)
 	default:
 		http.NotFound(w, r)
 	}
@@ -164,6 +256,9 @@ func (s *Server) handleAPIGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIPost(w http.ResponseWriter, r *http.Request) {
 	rest := r.PathValue("rest")
 	if rest == "repos/create" {
+		if !s.requireScope(w, r, auth.ScopeWrite) {
+			return
+		}
 		s.handleCreateRepo(w, r)
 		return
 	}
@@ -175,9 +270,23 @@ func (s *Server) handleAPIPost(w http.ResponseWriter, r *http.Request) {
 	revision := tail[1]
 	switch tail[0] {
 	case "commit":
+		if !s.requireScope(w, r, auth.ScopeWrite) {
+			return
+		}
 		s.handleCommit(w, r, repoType, repoID, revision)
 	case "preupload":
+		if !s.requireScope(w, r, auth.ScopeWrite) {
+			return
+		}
 		s.handlePreupload(w, r)
+	case "branch":
+		if !s.requireScope(w, r, auth.ScopeWrite) {
+			return
+		}
+		// tail[1] here is the branch name being created, not a revision to
+		// operate against — handleCreateBranch's own signature names it
+		// accordingly.
+		s.handleCreateBranch(w, r, repoType, repoID, revision)
 	default:
 		http.NotFound(w, r)
 	}
@@ -190,6 +299,9 @@ func (s *Server) handleResolveDispatch(w http.ResponseWriter, r *http.Request) {
 	parts := strings.SplitN(r.PathValue("rest"), "/", 5)
 	if len(parts) < 5 || parts[2] != "resolve" {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.requireScope(w, r, auth.ScopeRead) {
 		return
 	}
 	repoID := parts[0] + "/" + parts[1]

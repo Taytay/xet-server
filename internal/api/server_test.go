@@ -34,7 +34,7 @@ func randomBytes(n int, seed int64) []byte {
 
 func upload(t *testing.T, ts *httptest.Server, data []byte) UploadResult {
 	t.Helper()
-	resp, err := http.Post(ts.URL+"/upload", "application/octet-stream", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/v1/upload", "application/octet-stream", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("upload request error = %v", err)
 	}
@@ -65,7 +65,7 @@ func TestUploadAndDownload_RoundTrip(t *testing.T) {
 		t.Fatalf("first upload ChunksNew = %d, want all %d chunks new", res.ChunksNew, res.ChunksTotal)
 	}
 
-	resp, err := http.Get(ts.URL + "/files/" + res.FileID)
+	resp, err := http.Get(ts.URL + "/v1/files/" + res.FileID)
 	if err != nil {
 		t.Fatalf("download request error = %v", err)
 	}
@@ -130,7 +130,7 @@ func TestUpload_EmptyFile(t *testing.T) {
 		t.Fatalf("empty upload ChunksTotal = %d, want 0", res.ChunksTotal)
 	}
 
-	resp, err := http.Get(ts.URL + "/files/" + res.FileID)
+	resp, err := http.Get(ts.URL + "/v1/files/" + res.FileID)
 	if err != nil {
 		t.Fatalf("download request error = %v", err)
 	}
@@ -143,7 +143,7 @@ func TestUpload_EmptyFile(t *testing.T) {
 
 func TestDownload_UnknownFileID(t *testing.T) {
 	ts := newTestServer(t)
-	resp, err := http.Get(ts.URL + "/files/does-not-exist")
+	resp, err := http.Get(ts.URL + "/v1/files/does-not-exist")
 	if err != nil {
 		t.Fatalf("request error = %v", err)
 	}
@@ -155,7 +155,7 @@ func TestDownload_UnknownFileID(t *testing.T) {
 
 func TestDownload_RejectsPathTraversal(t *testing.T) {
 	ts := newTestServer(t)
-	resp, err := http.Get(ts.URL + "/files/..%2F..%2Fetc%2Fpasswd")
+	resp, err := http.Get(ts.URL + "/v1/files/..%2F..%2Fetc%2Fpasswd")
 	if err != nil {
 		t.Fatalf("request error = %v", err)
 	}
@@ -170,7 +170,7 @@ func TestManifestEndpoint(t *testing.T) {
 	data := randomBytes(400_000, 5)
 	res := upload(t, ts, data)
 
-	resp, err := http.Get(ts.URL + "/files/" + res.FileID + "/manifest")
+	resp, err := http.Get(ts.URL + "/v1/files/" + res.FileID + "/manifest")
 	if err != nil {
 		t.Fatalf("request error = %v", err)
 	}
@@ -196,7 +196,7 @@ func TestManifestEndpoint(t *testing.T) {
 
 func TestManifestEndpoint_UnknownFileID(t *testing.T) {
 	ts := newTestServer(t)
-	resp, err := http.Get(ts.URL + "/files/does-not-exist/manifest")
+	resp, err := http.Get(ts.URL + "/v1/files/does-not-exist/manifest")
 	if err != nil {
 		t.Fatalf("request error = %v", err)
 	}
@@ -228,7 +228,7 @@ func TestStatsEndpoint(t *testing.T) {
 
 func getStats(t *testing.T, ts *httptest.Server) map[string]any {
 	t.Helper()
-	resp, err := http.Get(ts.URL + "/stats")
+	resp, err := http.Get(ts.URL + "/v1/stats")
 	if err != nil {
 		t.Fatalf("stats request error = %v", err)
 	}

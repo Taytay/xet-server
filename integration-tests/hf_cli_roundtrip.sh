@@ -6,7 +6,11 @@
 # ($XETD_URL). This is the strongest possible verification that this server
 # is wire- and API-compatible with the real Hugging Face ecosystem: nothing
 # here exercises this project's own client code, only the unmodified `hf`
-# CLI.
+# CLI. Covers both `hf download REPO_ID FILENAME` (single named file) and
+# `hf download REPO_ID` (whole repo, no filename) — the latter exercises
+# huggingface_hub's snapshot_download, which calls two endpoints
+# (.../revision/{revision}, .../tree/{revision}) the single-file path never
+# touches at all.
 #
 # Needs `pipenv` with huggingface_hub + hf_xet installed (see Pipfile). Set
 # up once with:
@@ -102,3 +106,20 @@ fi
 
 cmp "$TEST_FILE" "$DOWNLOAD_DIR/model.bin"
 echo "real hf CLI upload + download round-trip byte-identical"
+
+# Whole-repo download (no filename argument) exercises a different code
+# path than the single-named-file download above: huggingface_hub's
+# snapshot_download first calls GET .../revision/{revision} then GET
+# .../tree/{revision} to resolve and enumerate the repo before downloading
+# anything, neither of which the single-file path above ever touches.
+echo "hf download $REPO_ID (whole repo, timeout: ${CMD_TIMEOUT}s)"
+WHOLE_REPO_DIR="$WORKDIR/downloaded-whole-repo"
+mkdir -p "$WHOLE_REPO_DIR"
+if ! runHf download "$REPO_ID" --local-dir "$WHOLE_REPO_DIR"; then
+    status=$?
+    [[ $status -eq 124 ]] && echo "TIMEOUT: 'hf download' (whole repo) exceeded ${CMD_TIMEOUT}s (see script header re: proxy hangs)."
+    exit 1
+fi
+
+cmp "$TEST_FILE" "$WHOLE_REPO_DIR/model.bin"
+echo "real hf CLI whole-repo download byte-identical"

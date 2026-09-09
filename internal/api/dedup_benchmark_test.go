@@ -59,7 +59,7 @@ func benchmarkUploadSteadyState(b *testing.B, data []byte) {
 
 	// Prime: first upload populates the chunk store, so every subsequent
 	// upload of the same bytes is a full-dedup steady state.
-	primeResp, err := http.Post(ts.URL+"/upload", "application/octet-stream", bytes.NewReader(data))
+	primeResp, err := http.Post(ts.URL+"/v1/upload", "application/octet-stream", bytes.NewReader(data))
 	if err != nil {
 		b.Fatalf("priming upload error = %v", err)
 	}
@@ -68,7 +68,7 @@ func benchmarkUploadSteadyState(b *testing.B, data []byte) {
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		resp, err := http.Post(ts.URL+"/upload", "application/octet-stream", bytes.NewReader(data))
+		resp, err := http.Post(ts.URL+"/v1/upload", "application/octet-stream", bytes.NewReader(data))
 		if err != nil {
 			b.Fatalf("upload error = %v", err)
 		}
@@ -90,7 +90,7 @@ func benchmarkUploadAlwaysNew(b *testing.B, size int) {
 	b.SetBytes(int64(size))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		resp, err := http.Post(ts.URL+"/upload", "application/octet-stream", bytes.NewReader(randomContentBytes(size)))
+		resp, err := http.Post(ts.URL+"/v1/upload", "application/octet-stream", bytes.NewReader(randomContentBytes(size)))
 		if err != nil {
 			b.Fatalf("upload error = %v", err)
 		}

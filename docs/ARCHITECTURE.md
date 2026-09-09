@@ -3,8 +3,8 @@
 Xet Server is two cooperating HTTP servers — a **CAS (Content Addressable
 Storage) server** and a **Hub API shim** — plus a set of protocol packages
 that give both servers wire compatibility with Hugging Face's real Xet
-ecosystem (`hf_xet`/xet-core), and a simpler standalone demo API kept
-alongside them for quick manual testing.
+ecosystem (`hf_xet`/xet-core), and a simpler standalone Xet Data API kept
+alongside the CAS server for quick manual testing.
 
 ## System overview
 
@@ -18,7 +18,7 @@ graph TB
         direction TB
         Hub["hubserver — Hub API shim\n━━━━━━━━━━━━━━━━━\nrepo create · preupload\nxet-{read,write}-token · commit\nresolve/HEAD metadata · revisions"]
         CAS["casserver — CAS HTTP API\n━━━━━━━━━━━━━━━━━\nxorb upload/fetch · shard upload\nreconstruction V1+V2 (Range-aware)\nglobal chunk-dedup · telemetry"]
-        Demo["api — simple demo API\n━━━━━━━━━━━━━━━━━\nPOST /upload · GET /files/{id}"]
+        XetData["api — Xet Data API\n━━━━━━━━━━━━━━━━━\nPOST /v1/upload · GET /v1/files/{id}\n(shares /v1 with CAS, disjoint paths)"]
     end
 
     subgraph "Protocol packages (internal/)"
@@ -51,13 +51,16 @@ graph TB
     style HFCli fill:#e1f5ff,stroke:#0099cc
     style Hub fill:#fff3e0,stroke:#ff9900
     style CAS fill:#e1ffe1,stroke:#00cc66,stroke-width:3px
-    style Demo fill:#f9f9f9,stroke:#999
+    style XetData fill:#f9f9f9,stroke:#999
 ```
 
-`cmd/xetd` runs the CAS server (and, if `-hub-addr` is set, the Hub shim as
-a second listener) plus the demo API — three separate `http.Handler`s
-mounted on independent muxes/ports, matching how huggingface.co's real Hub
-and CAS are actually separate services rather than one monolith.
+`cmd/xetd` runs the CAS server and the Xet Data API on one shared mux and
+port (both under `/v1`, on disjoint literal paths — see
+`internal/api`'s exported path constants), plus, if `-hub-addr` is set,
+the Hub shim as a second listener on its own port — matching how
+huggingface.co's real Hub and CAS are actually separate services, while
+keeping this project's own non-wire-compatible testing surface bundled
+with CAS rather than given a third port of its own.
 
 ## Upload flow
 
@@ -163,7 +166,11 @@ PROTOCOL.md).
 | `internal/ratelimit` | A hand-rolled per-source-IP token-bucket limiter gating the xorb/shard upload endpoints. Off by default. |
 | `internal/casserver` | The real Xet CAS HTTP API: xorb upload/fetch, shard upload, V1 and V2 (multi-range) reconstruction (Range-aware), a real global chunk-dedup index, telemetry, an operator-facing storage-stats endpoint, and periodic snapshot-based persistence for its in-memory indices. This is where the protocol packages above are wired together into an HTTP surface. |
 | `internal/hubserver` | A minimal shim of huggingface.co's Hub REST API (repo create, preupload, xet-token issuance, commit, resolve/HEAD) — separate from the CAS API, since real Hub and CAS are separate services. Supports real, independent revisions/branches per repo, and the same snapshot-based persistence as `casserver`. |
-| `internal/chunk`, `internal/manifest`, `internal/api`, `internal/client` | The original, simpler, non-wire-compatible chunk/dedup demo (gear-hash CDC + JSON manifests) this project started as. Kept for quick manual testing via `cmd/xet`/`internal/api`; unrelated to the CAS/Hub protocol work. |
+| `internal/chunk`, `internal/manifest`, `internal/api`, `internal/client` | The original, simpler, non-wire-compatible chunk/dedup Xet Data API (gear-hash CDC + JSON manifests) this project started as — mounted at `/v1` alongside CAS, on paths that never collide with it. Kept for quick manual testing via `cmd/xet`/`internal/api`; unrelated to the CAS/Hub protocol work. Has no repo or per-file ownership concept: `file_id` is a content hash, and any caller with read scope can fetch any file it knows the ID of. |
+| `internal/auth` | `Authenticator`/`Principal` (server-side AuthN/AuthZ) and `CredentialHelper` (client-side credential attachment) interfaces, plus built-in `NoAuth`/`StaticTokenAuth` and `NoopCredentialHelper`/`BearerCredentialHelper` implementations and the shared `ResolveToken`/`BearerToken` primitives every `-auth-token`-style flag in this project is built on. |
+| `internal/routing` | `Mount`/`MountWithVersion`/`Apply` — small helpers so `casserver`, `internal/api`, `hubserver`, and `cmd/xetd`'s own top-level mux each build their route table as one declarative list instead of a sequence of individual `mux.Handle` calls. |
+| `internal/apidocs` | Embeds this project's hand-authored OpenAPI 3.0 spec (`openapi.yaml`) and the vendored Swagger UI static assets (`third_party/swagger-ui-dist`) into the `xetd` binary via `go:embed`, serving both at `/api-docs/` — fully offline, no CDN dependency. |
+| `internal/landingpage` | Renders the small HTML page shown when a `xetd` port's root path (`/`) is opened directly in a browser — one variant for the CAS+Xet-Data port, one for the Hub shim port — listing that port's endpoints and a quick-start example. |
 
 ## Design decisions worth knowing
 
@@ -172,6 +179,17 @@ PROTOCOL.md).
   role) and only decompresses transiently, during upload, to compute the
   chunk hashes needed to verify the client's claimed xorb hash. It never
   needs to decompress again after that.
+- **Auth is pluggable and off by default.** `casserver`, `hubserver`, and
+  `internal/api` each take an `auth.Authenticator` (default `auth.NoAuth{}`,
+  i.e. no enforcement — every pre-v0.8.0 deployment's exact behavior) and
+  gate each route by the scope (`read`/`write`) the real Xet/HF convention
+  implies for it; each server's own operator/health endpoints (telemetry,
+  storage-stats, Xet Data's `stats`) are deliberately never gated. `xetd
+  -auth-token <secret>` (or `$XETD_AUTH_TOKEN`/`$HF_TOKEN`) installs the
+  built-in `auth.StaticTokenAuth`/`auth.BearerCredentialHelper` pair — a
+  single shared bearer token — but a deployment needing real per-user
+  identity implements its own `Authenticator`/`CredentialHelper` against
+  whatever it already has; neither server package needs to change.
 - **Presigned URLs are optional, not required.** `fetch_info` URLs point at
   a presigned S3/MinIO URL when the storage backend implements
   `storage.URLPresigner`, or fall back to the CAS server's own

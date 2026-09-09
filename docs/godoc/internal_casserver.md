@@ -31,6 +31,12 @@ This server never decompresses chunk payloads — like real CAS, it stores
 and serves xorb bytes as opaque blobs, and integrity is checked via the xorb
 footer's own hash tree rather than by re-verifying chunk contents.
 
+Every route above except telemetry and storage-stats requires the scope real
+xet-core's own OpenAPI spec documents for it (read for every GET, write for
+the two uploads), enforced via auth.Authenticator — see SetAuthenticator.
+The default (auth.NoAuth{}) enforces nothing, this server's behavior prior to
+v0.8.0.
+
 Package casserver's snapshot.go implements Server's persistence: a periodic (and
 shutdown-time) atomic write of every in-memory index to a single JSON file,
 and a load of that file on startup. This is deliberately NOT a write-ahead
@@ -40,6 +46,34 @@ full tradeoff writeup and why this was chosen anyway (atomic-swap is simple,
 needs no new dependency, and reuses the exact staging-file-then-rename pattern
 storage/fsstore.Store.Put already relies on for the same reason: a reader must
 never observe a half-written result).
+
+CONSTANTS
+
+const (
+	V1 = "/v1"
+	V2 = "/v2"
+
+	XorbsPath             = V1 + "/xorbs/{prefix}/{hash}"
+	ShardsPath            = V1 + "/shards"
+	ReconstructionsPath   = V1 + "/reconstructions/{file_id}"
+	ReconstructionsPathV2 = V2 + "/reconstructions/{file_id}"
+	ChunksPath            = V1 + "/chunks/{prefix}/{hash}"
+	TelemetryPath         = V1 + "/telemetry"
+	StoragestatsPath      = V1 + "/storage-stats"
+)
+    V1/V2 are this server's URL version prefixes — exported so cmd/xetd can
+    reference them directly when wiring routes onto its own top-level mux,
+    instead of re-typing "/v1"/"/v2" as a raw literal at the call site.
+    V2 exists solely for the multi-range-optimized reconstruction endpoint;
+    every other route here is V1.
+
+    XorbsPath, ShardsPath, ReconstructionsPath, ChunksPath, TelemetryPath,
+    and StoragestatsPath are the specific literal sub-paths (relative to
+    V1) this package registers below, also exported so any other package
+    referencing one of these paths (cmd/xetd, internal/landingpage, a future
+    client) uses the same named constant instead of a duplicated string literal.
+    ReconstructionsPathV2 is the V2 counterpart of ReconstructionsPath.
+
 
 TYPES
 
@@ -94,6 +128,13 @@ func (s *Server) LoadSnapshot(path string) error
     decide whether to start fresh or abort startup.
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request)
+
+func (s *Server) SetAuthenticator(a auth.Authenticator)
+    SetAuthenticator replaces this server's Authenticator (default
+    auth.NoAuth{}, i.e. no enforcement — this server's pre-v0.8.0 behavior).
+    Must be called before serving any traffic, for the same route-rebuild reason
+    as SetUploadRateLimiter. See auth.Authenticator's doc comment for how to
+    implement a custom one.
 
 func (s *Server) SetEvictionStats(statsFunc func() eviction.Stats)
     SetEvictionStats wires an eviction.Sweeper's Stats method into GET

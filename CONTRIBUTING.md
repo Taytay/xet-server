@@ -203,8 +203,8 @@ opening a PR — `go vet` won't catch a missing one, but reviewers will.
 ```
 Xet-Server/
 ├── cmd/
-│   ├── xetd/                 # server binary: CAS API + optional Hub API shim
-│   └── xet/                  # CLI client for the simple demo API
+│   ├── xetd/                 # server binary: CAS API + Xet Data API + optional Hub API shim
+│   └── xet/                  # CLI client for the Xet Data API
 ├── internal/
 │   ├── merklehash/           # BLAKE3-keyed Merkle hashing (xet-core DataHash port)
 │   ├── xorbformat/           # xorb binary format (chunk headers, V1 footer)
@@ -215,10 +215,16 @@ Xet-Server/
 │   ├── storage/              # Store interface + fsstore/s3store backends
 │   ├── eviction/              # optional storage-budget auto-pruning sweep
 │   ├── ratelimit/             # optional per-source-IP upload rate limiter
+│   ├── auth/                  # pluggable AuthN/AuthZ (Authenticator/CredentialHelper)
+│   ├── routing/                # declarative route-table helpers (Mount/Apply)
+│   ├── apidocs/                # embedded OpenAPI spec + Swagger UI (served at /api-docs)
+│   ├── landingpage/             # HTML landing pages for xetd's ports
 │   ├── casserver/            # wire-compatible CAS HTTP API
 │   ├── hubserver/            # Hub REST API shim (repo/commit/resolve)
-│   ├── chunk/, manifest/, api/, client/  # original simple chunk/dedup demo
+│   ├── chunk/, manifest/, api/, client/  # original simple chunk/dedup Xet Data API
 │   └── ...
+├── third_party/
+│   └── swagger-ui-dist/       # vendored Swagger UI static assets (see VENDORED.md)
 ├── scripts/                  # build_docs.go — own go.mod, keeps the main
 │                              # module dependency-free (goldmark/chroma/
 │                              # goldmark-mermaid live only here)

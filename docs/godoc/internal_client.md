@@ -10,7 +10,14 @@ TYPES
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	Cred    auth.CredentialHelper
 }
+    Client is a thin HTTP client for the Xet Data API (internal/api), mounted
+    at api.V1 (sharing that namespace with, but never overlapping the specific
+    paths of, the real CAS protocol). Cred, if set, is applied to every outgoing
+    request via its FillCredential method (see auth.CredentialHelper) — nil is
+    equivalent to auth.NoopCredentialHelper{}, this client's pre-v0.8.0 behavior
+    of attaching no credential at all.
 
 func New(baseURL string) *Client
 

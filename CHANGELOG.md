@@ -5,6 +5,154 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-08
+
+Closes this project's one remaining deliberately-deferred gap from v0.7.0:
+authentication. Pluggable AuthN/AuthZ across every HTTP surface this
+project exposes (the real Xet CAS protocol, the Hub API shim, and the Xet
+Data API), a matching client-side credential interface, and a
+`-auth-token`/environment-variable convention mirroring how the real `hf`
+CLI is configured — while keeping every pre-v0.8.0 deployment's behavior
+completely unchanged unless the new flag/env var is actually used. Also
+adds interactive API docs, a consistent URL versioning scheme across every
+server, and landing pages for both `xetd` ports.
+
+### Added
+- **`internal/auth`**: `Authenticator`/`Principal` (server-side AuthN/AuthZ)
+  and `CredentialHelper` (client-side credential attachment) as small,
+  independently implementable interfaces — mirroring the shape of real
+  xet-core's own `xet_client::common::auth::CredentialHelper` trait.
+  Ships two built-in implementations of each: `NoAuth`/`NoopCredentialHelper`
+  (the zero-config default — no enforcement, no credential sent, byte-for-
+  byte this project's pre-v0.8.0 behavior) and `StaticTokenAuth`/
+  `BearerCredentialHelper` (a single shared bearer token, compared with
+  `crypto/subtle.ConstantTimeCompare`, RFC 6750 case-insensitive scheme
+  matching). A third-party implementation of either interface works with
+  both `xetd` and `xet` unmodified — no changes to `casserver`, `hubserver`,
+  or `internal/api` required.
+- **Scope enforcement on every route** across `casserver` (CAS protocol,
+  `/v1`, `/v2`), `hubserver` (Hub API shim), and `internal/api` (Xet Data
+  API): write scope for uploads/commits/preupload/repo-create, read scope
+  for downloads/reconstructions/resolve/chunk-dedup lookups. Unauthenticated
+  requests get `401`; authenticated-but-insufficient-scope requests get
+  `403`. Each server's own operator/health endpoints (telemetry,
+  storage-stats, Xet Data's `stats`) are deliberately never gated, matching
+  how these aren't part of any real protocol to begin with.
+- **`xetd -auth-token <secret>`** (default `"None"`, disabling enforcement)
+  and **`xet -auth-token <secret>`** on `push`/`pull`/`stats`, wiring
+  `StaticTokenAuth`/`BearerCredentialHelper` into every server/client
+  constructed by these binaries.
+- **Environment variable fallback**, preferred over the flag on any
+  shared/multi-user machine since flag values leak via `ps`/shell history
+  in a way environment variables do not: `xetd` falls back to
+  `$XETD_AUTH_TOKEN`, then `$HF_TOKEN`; `xet` falls back to
+  `$XET_AUTH_TOKEN`, then `$HF_TOKEN` (the same variable the real `hf` CLI
+  reads, so an already-exported `HF_TOKEN` "just works" against this
+  server, on both the client and server side, with no separate secret to
+  configure). An explicit `-auth-token` flag always wins over either
+  variable. The precedence rule and the bearer-token-extraction logic
+  behind it are both exported from `internal/auth`
+  (`auth.ResolveToken`/`auth.BearerToken`) — the same primitives a future
+  relay/proxy in front of the real huggingface.co Xet backend would use to
+  resolve its own upstream credential, or to forward a caller's token
+  upstream unchanged.
+- **`internal/api`'s routes now share the `/v1` namespace with the CAS
+  protocol** (`upload`, `files/{id}`, `files/{id}/manifest`, `stats`)
+  instead of living unprefixed at the server root (`/upload`,
+  `/files/{id}`, `/stats`) — matching `casserver`'s own `/v1`,`/v2`
+  convention instead of being the one unversioned surface on the same
+  process; the two APIs' literal paths never collide (`casserver`'s own
+  `/v1` routes are `xorbs`, `shards`, `reconstructions`, `chunks`,
+  `telemetry`, `storage-stats`). `internal/client.Client` and every
+  integration test were updated to match; this is a breaking path change
+  for this API only (not the wire-compatible CAS/Hub protocols, which are
+  untouched since real clients depend on their exact paths).
+- **`internal/routing`**: `Mount`/`MountWithVersion`/`Apply` — every
+  server's route table (`casserver`, `internal/api`, `hubserver`,
+  `cmd/xetd`'s own top-level mux) is now built as one declarative
+  `[]routing.Route` list instead of a sequence of individual
+  `mux.Handle`/`HandleFunc` calls. Paired with exported path constants on
+  each server (`casserver.V1`/`.XorbsPath`/`.ShardsPath`/etc.,
+  `api.V1`/`.UploadPath`/`.FilesPrefix`/`.StatsPath`) so every version
+  prefix and literal path has exactly one definition, referenced by
+  `cmd/xetd`'s mux wiring, `internal/landingpage`'s endpoint tables, and
+  `internal/client`'s request-URL building — no path segment is
+  hand-typed as a duplicate string literal anywhere outside the
+  constant's own declaration.
+- **`internal/apidocs/openapi.yaml`**: a hand-authored, source-verified
+  OpenAPI 3.0 spec covering every endpoint across `casserver`,
+  `hubserver`, and `internal/api`, including the auth model. Served
+  through a fully offline Swagger UI at `/api-docs/` on the CAS server's
+  address — no CDN dependency, since both the spec and the vendored
+  Swagger UI static assets (`third_party/swagger-ui-dist`) are compiled
+  into the `xetd` binary via `go:embed` (see `internal/apidocs`).
+- **`internal/landingpage`**: opening `xetd`'s CAS port or Hub shim port
+  directly in a browser (e.g. `http://localhost:8420/`) now renders a
+  short HTML page listing that port's endpoints and a quick-start example,
+  instead of falling through to whatever handler used to own the bare `/`
+  route. On the Hub shim port, implemented as a thin wrapper that
+  intercepts only an exact `GET /` (not a second `http.ServeMux`, which
+  would have let `HEAD /` silently fall back to the landing page's `GET`
+  handler and swallow real resolve-path traffic — caught by a regression
+  test before it shipped).
+- **`xet -server` is now genuinely optional**, falling back to
+  `$XET_SERVER`, then `http://localhost:8420` — matching `-auth-token`'s
+  own flag/env/default precedence exactly. (It always had a default value
+  in practice; only the usage text and flag description wrongly implied
+  it was required, and there was no environment-variable override.)
+- **`docs/MIRRORING.md`**: a practical, copy-pasteable guide to
+  self-hosting a real model mirror with this server — starting it,
+  securing it with `-auth-token`, pointing the real `hf` CLI at it, and
+  uploading/downloading whole repos or single files. Every command in it
+  was run against a live server while writing it, which is what surfaced
+  the whole-repo-download gap fixed below.
+
+### Fixed
+- **`internal/api` (the Xet Data API) had no auth wiring at all** —
+  `-auth-token`/the client-side credential helpers had no effect on
+  `xet push`/`pull`/`stats`, since those commands talk to `/v1/upload`,
+  `/v1/files`, `/v1/stats`, not the CAS protocol's own `/v1` routes.
+  `internal/api.Server` now has the same `SetAuthenticator`/`requireScope`
+  pattern as `casserver`: write scope for `upload`, read scope for
+  `files/{id}` and its manifest, `stats` left unauthenticated (an
+  operator endpoint, not part of any real protocol).
+- **`hubserver`'s `POST /api/repos/create` route bypassed scope
+  enforcement entirely.** It was registered as its own literal
+  `http.ServeMux` pattern, which Go's mux matches in preference to the
+  wildcard `POST /api/{rest...}` pattern that carries the actual
+  `requireScope` check — so the scope check inside `handleAPIPost`'s
+  `rest == "repos/create"` branch was unreachable dead code. Repo creation
+  is now dispatched through `handleAPIPost` like every other `/api/`
+  route, with no separate literal registration.
+- **`hf download REPO_ID` (whole repo, no filename) 404'd** — discovered
+  while writing `docs/MIRRORING.md` by actually running the command
+  against a live server rather than assuming it worked because
+  single-file download already did. `huggingface_hub`'s
+  `snapshot_download` (what a filename-less `hf download` uses) calls two
+  endpoints neither `hubserver` implemented at all:
+  `GET .../revision/{revision}` (resolve a revision before listing files)
+  and `GET .../tree/{revision}` (enumerate every file in one call,
+  recursively). Both are now implemented (`internal/hubserver/repo.go`,
+  `tree.go`), verified against the real installed `huggingface_hub`
+  package's source (not the public docs) for the exact URL templates and
+  JSON field names expected.
+- **`hf upload ... --revision <new-branch-name>` fatally errored instead
+  of creating the branch** — found while fixing the gap above:
+  `hf upload`'s CLI command checks whether a revision exists via the same
+  `GET .../revision/{revision}` endpoint, expecting a `RevisionNotFound`
+  error it specifically catches (via an `X-Error-Code` response header,
+  not the status code alone) before calling `POST .../branch/{branch}` to
+  create it — this shim returned a plain `404` with no header, which
+  `huggingface_hub` doesn't map to that specific exception, so it
+  propagated as a fatal error instead of triggering branch creation. Both
+  the header and the missing branch-creation endpoint are now
+  implemented.
+- **The three new hubserver endpoints above weren't reflected in
+  `internal/apidocs/openapi.yaml` or either landing page's endpoint
+  table** — caught in review right after implementing them, before this
+  release shipped with docs already stale on day one. Both are now
+  updated and cross-checked live against a running server's `/api-docs/`.
+
 ## [0.7.0] - 2026-09-08
 
 A protocol-completeness release: every gap this project's own "Where this

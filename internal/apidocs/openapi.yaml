@@ -1,0 +1,908 @@
+openapi: 3.0.3
+info:
+  title: Xet Server API
+  version: 0.8.0
+  description: |
+    HTTP APIs exposed by `xetd`: a wire-compatible Xet CAS server
+    (`internal/casserver`, mounted at `/v1` and `/v2`), an optional Hub API
+    shim (`internal/hubserver`, mounted on a separate port via `-hub-addr`)
+    that lets the real `hf` CLI talk to this server end-to-end, and the Xet
+    Data API (`internal/api`, mounted at `/v1` alongside the CAS protocol,
+    on a disjoint set of literal paths) — a simple, non-wire-compatible
+    chunk/dedup API for quick manual testing via the `xet` CLI.
+
+    ## Authentication
+
+    Every endpoint except telemetry/storage-stats (CAS) and `/v1/stats`
+    (Xet Data API) is gated by a pluggable `auth.Authenticator`,
+    defaulting to no enforcement at all (this server's pre-v0.8.0
+    behavior). Enabled via `xetd -auth-token <secret>` (or
+    `$XETD_AUTH_TOKEN`/`$HF_TOKEN`), which installs a single shared bearer
+    token checked against every request:
+
+    - **401 Unauthorized** — no `Authorization` header, or a token that
+      fails validation entirely (wrong token, malformed header).
+    - **403 Forbidden** — a valid token that lacks the scope (`read` or
+      `write`) the endpoint requires.
+
+    See `internal/auth`'s package doc for the `Authenticator`/`Principal`
+    (server-side) and `CredentialHelper` (client-side) interfaces —
+    implementing either lets a custom auth backend work with this server's
+    existing routes unmodified.
+  license:
+    name: See repository LICENSE
+servers:
+  - url: http://localhost:8420
+    description: Default CAS + Xet Data API address (xetd -addr)
+  - url: http://localhost:8421
+    description: Default Hub API shim address (xetd -hub-addr), when enabled
+tags:
+  - name: CAS
+    description: >-
+      Wire-compatible Xet Content-Addressable Storage protocol
+      (hf_xet/xet-core clients speak this directly), mounted at /v1 and /v2.
+  - name: Hub
+    description: >-
+      Hub API shim (huggingface_hub-compatible), mounted on a separate port
+      via -hub-addr. Lets the real `hf` CLI work end-to-end against xetd.
+  - name: Xet Data
+    description: >-
+      Simple, non-wire-compatible chunk/dedup API for manual testing via
+      the `xet` CLI. Mounted at /v1 alongside the CAS protocol, on a
+      disjoint set of literal paths (upload, files/{id}, stats) that never
+      collide with the CAS protocol's own /v1 routes.
+security:
+  - bearerAuth: []
+components:
+  responses:
+    Unauthorized:
+      description: No credential, or one that fails validation entirely.
+      content:
+        text/plain:
+          schema: { type: string }
+    Forbidden:
+      description: Valid credential, but lacking the scope this endpoint requires.
+      content:
+        text/plain:
+          schema: { type: string }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Optional. Only enforced if xetd was started with -auth-token (or
+        $XETD_AUTH_TOKEN/$HF_TOKEN) set to something other than "None". A
+        server with no auth configured accepts every request regardless of
+        whether this header is present.
+  schemas:
+    ErrorResponse:
+      type: object
+      description: >-
+        casserver's plain-text error body (Content-Type: text/plain via
+        http.Error) is NOT this shape — only hubserver and the Xet Data
+        API's JSON error paths use this. See each endpoint's response for
+        its actual error content-type.
+      properties:
+        error:
+          type: string
+      required: [error]
+    IndexRange:
+      type: object
+      description: Chunk-index range; End is exclusive.
+      properties:
+        start: { type: integer, format: int64 }
+        end: { type: integer, format: int64 }
+      required: [start, end]
+    ByteRange:
+      type: object
+      description: Byte range; End is inclusive.
+      properties:
+        start: { type: integer, format: int64 }
+        end: { type: integer, format: int64 }
+      required: [start, end]
+    UploadXorbResponse:
+      type: object
+      properties:
+        was_inserted:
+          type: boolean
+          description: false if this xorb hash was already stored (dedup hit).
+      required: [was_inserted]
+    UploadShardResponse:
+      type: object
+      properties:
+        result:
+          type: integer
+          description: >-
+            0 = already exists, 1 = SyncPerformed. This server always
+            returns 1 (it has no separate shard-dedup store).
+      required: [result]
+    ReconstructionTerm:
+      type: object
+      properties:
+        hash: { type: string, description: Xorb hash (hex) this term reads from. }
+        range: { $ref: '#/components/schemas/IndexRange' }
+        unpacked_length: { type: integer, format: int64 }
+      required: [hash, range, unpacked_length]
+    FetchInfoEntry:
+      type: object
+      properties:
+        url: { type: string, format: uri }
+        url_range: { $ref: '#/components/schemas/ByteRange' }
+        range: { $ref: '#/components/schemas/IndexRange' }
+      required: [url, url_range, range]
+    ReconstructionResponseV1:
+      type: object
+      properties:
+        offset_into_first_range: { type: integer, format: int64 }
+        terms:
+          type: array
+          items: { $ref: '#/components/schemas/ReconstructionTerm' }
+        fetch_info:
+          type: object
+          description: Keyed by xorb hash (hex).
+          additionalProperties:
+            type: array
+            items: { $ref: '#/components/schemas/FetchInfoEntry' }
+      required: [offset_into_first_range, terms, fetch_info]
+    XorbRangeDescriptor:
+      type: object
+      properties:
+        chunks: { $ref: '#/components/schemas/IndexRange' }
+        bytes: { $ref: '#/components/schemas/ByteRange' }
+      required: [chunks, bytes]
+    XorbMultiRangeFetch:
+      type: object
+      properties:
+        url: { type: string, format: uri }
+        ranges:
+          type: array
+          items: { $ref: '#/components/schemas/XorbRangeDescriptor' }
+      required: [url, ranges]
+    ReconstructionResponseV2:
+      type: object
+      properties:
+        offset_into_first_range: { type: integer, format: int64 }
+        terms:
+          type: array
+          items: { $ref: '#/components/schemas/ReconstructionTerm' }
+        xorbs:
+          type: object
+          description: Keyed by xorb hash (hex).
+          additionalProperties:
+            type: array
+            items: { $ref: '#/components/schemas/XorbMultiRangeFetch' }
+      required: [offset_into_first_range, terms, xorbs]
+    StorageStatsResponse:
+      type: object
+      properties:
+        eviction_enabled: { type: boolean }
+        budget_bytes: { type: integer, format: int64 }
+        evictions_total: { type: integer, format: int64 }
+        bytes_freed_total: { type: integer, format: int64 }
+      required: [eviction_enabled]
+    CreateRepoRequest:
+      type: object
+      properties:
+        name: { type: string }
+        organization: { type: string }
+        type: { type: string, description: 'Defaults to "model" if empty.' }
+      required: [name]
+    CreateRepoResponse:
+      type: object
+      properties:
+        url: { type: string, description: 'Resolved repo ID, e.g. "org/name".' }
+      required: [url]
+    XetTokenResponse:
+      type: object
+      properties:
+        casUrl: { type: string, format: uri }
+        exp: { type: integer, format: int64, description: Unix seconds. }
+        accessToken: { type: string }
+      required: [casUrl, exp, accessToken]
+    RepoInfoResponse:
+      type: object
+      description: >-
+        Small subset of the real Hub's ModelInfo/DatasetInfo/SpaceInfo
+        shape — huggingface_hub's snapshot_download only ever reads sha.
+      properties:
+        id: { type: string, description: 'The repo ID, e.g. "org/name".' }
+        sha:
+          type: string
+          description: >-
+            Set to the revision name itself (e.g. "main"), not a real git
+            commit hash — this shim has no separate commit-hash identity
+            for a revision distinct from its name.
+        private: { type: boolean }
+      required: [id, sha]
+    TreeEntry:
+      type: object
+      description: >-
+        One element of the tree-listing response array — deserialized by
+        huggingface_hub's RepoFile. type is always "file"; this shim has
+        no folder concept.
+      properties:
+        type: { type: string, enum: [file] }
+        path: { type: string }
+        size: { type: integer, format: int64 }
+        oid: { type: string, description: Plain SHA-256 hex, as declared in the original commit. }
+        xetHash: { type: string, description: 'Optional; omitted unless already known to this shim.' }
+      required: [type, path, size, oid]
+    CommitLfsFileValue:
+      type: object
+      properties:
+        path: { type: string }
+        oid: { type: string, description: Plain SHA-256 hex. }
+        size: { type: integer, format: int64 }
+      required: [path, oid, size]
+    CommitResponse:
+      type: object
+      properties:
+        commitOid: { type: string, description: 40 hex characters. }
+        commitUrl: { type: string }
+        pullRequestUrl: { type: string }
+      required: [commitOid, commitUrl]
+    PreuploadRequestFile:
+      type: object
+      properties:
+        path: { type: string }
+        size: { type: integer, format: int64 }
+      required: [path, size]
+    PreuploadRequest:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/PreuploadRequestFile' }
+    PreuploadFileInfo:
+      type: object
+      properties:
+        path: { type: string }
+        uploadMode:
+          type: string
+          enum: [lfs, regular]
+          description: '"regular" if size == 0, else "lfs".'
+        shouldIgnore: { type: boolean }
+        oid: { type: string, description: Never populated by this server. }
+      required: [path, uploadMode, shouldIgnore]
+    PreuploadResponse:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/PreuploadFileInfo' }
+      required: [files]
+    UploadResult:
+      type: object
+      properties:
+        file_id: { type: string }
+        name: { type: string }
+        size: { type: integer, format: int64 }
+        sha256: { type: string }
+        chunks_total: { type: integer }
+        chunks_new: { type: integer }
+        bytes_stored: { type: integer, format: int64 }
+        bytes_on_wire: { type: integer, format: int64 }
+        dedup_percent:
+          type: number
+          format: double
+          description: '100 * (1 - bytes_stored/size); 0 if size is 0.'
+      required:
+        - file_id
+        - size
+        - sha256
+        - chunks_total
+        - chunks_new
+        - bytes_stored
+        - bytes_on_wire
+        - dedup_percent
+    ChunkRef:
+      type: object
+      properties:
+        hash: { type: string }
+        offset: { type: integer, format: int64 }
+        length: { type: integer }
+      required: [hash, offset, length]
+    Manifest:
+      type: object
+      properties:
+        file_id: { type: string }
+        size: { type: integer, format: int64 }
+        sha256: { type: string }
+        chunks:
+          type: array
+          items: { $ref: '#/components/schemas/ChunkRef' }
+      required: [file_id, size, sha256, chunks]
+    XetDataStatsResponse:
+      type: object
+      properties:
+        unique_chunks: { type: integer, format: int64 }
+        unique_chunk_bytes: { type: integer, format: int64 }
+        files_stored: { type: integer, format: int64 }
+      required: [unique_chunks, unique_chunk_bytes, files_stored]
+paths:
+  /v1/xorbs/{prefix}/{hash}:
+    post:
+      tags: [CAS]
+      summary: Upload a serialized xorb
+      description: >-
+        Requires write scope. {prefix} must be the literal "default".
+        Body is opaque binary (chunk headers + compressed payloads, no
+        footer — see internal/xorbformat), capped at 128 MiB.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, enum: [default] } }
+        - { name: hash, in: path, required: true, schema: { type: string }, description: Merkle xorb hash, hex. }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Uploaded (or already present — see was_inserted).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadXorbResponse' }
+        '400':
+          description: >-
+            Bad prefix/hash, malformed xorb, unsupported/failed
+            decompression, or hash mismatch between URL and computed
+            content hash.
+          content: { text/plain: { schema: { type: string } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: Body exceeds the 128 MiB max xorb size.
+          content: { text/plain: { schema: { type: string } } }
+        '500':
+          description: Storage or internal failure.
+          content: { text/plain: { schema: { type: string } } }
+    get:
+      tags: [CAS]
+      summary: Fetch raw xorb bytes
+      description: >-
+        Requires read scope. Supports a single-range `Range: bytes=<start>-<end>`
+        header (both bounds required — no open-ended or multi-range
+        requests). Byte-serving endpoint backing the URLs handed out in
+        reconstruction fetch_info.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, enum: [default] } }
+        - { name: hash, in: path, required: true, schema: { type: string } }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string, example: 'bytes=0-1023' }
+      responses:
+        '200':
+          description: Full xorb bytes (no Range header sent).
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: Partial content for a satisfiable Range request.
+          headers:
+            Content-Range: { schema: { type: string, example: 'bytes 0-1023/2048' } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400':
+          description: Bad prefix/hash.
+          content: { text/plain: { schema: { type: string } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown xorb hash.
+        '416':
+          description: Malformed or unsatisfiable Range header.
+        '500':
+          description: Storage read failure.
+          content: { text/plain: { schema: { type: string } } }
+    head:
+      tags: [CAS]
+      summary: Fetch xorb size
+      description: >-
+        Requires read scope. Note (source-verified, undocumented elsewhere):
+        unlike GET/POST on this same path, this handler does NOT validate
+        {prefix} against "default" — any prefix value is accepted.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string } }
+        - { name: hash, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Xorb exists.
+          headers:
+            Content-Length: { schema: { type: integer, format: int64 } }
+        '400':
+          description: Bad hash.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown xorb hash.
+  /v1/shards:
+    post:
+      tags: [CAS]
+      summary: Upload a serialized shard
+      description: >-
+        Requires write scope. Body is opaque binary (file-info + xorb-info
+        sections, no footer — see internal/shardformat), capped at 16 MiB,
+        buffered in full before parsing.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Shard accepted and indexed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadShardResponse' }
+        '400':
+          description: Malformed shard.
+          content: { text/plain: { schema: { type: string } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: Body exceeds the 16 MiB max shard size.
+          content: { text/plain: { schema: { type: string } } }
+  /v1/reconstructions/{file_id}:
+    get:
+      tags: [CAS]
+      summary: File to xorb/chunk-range reconstruction map (V1)
+      description: >-
+        Requires read scope. Supports the same single-range Range header
+        semantics as xorb fetch, applied against the file's total unpacked
+        size.
+      parameters:
+        - { name: file_id, in: path, required: true, schema: { type: string } }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string, example: 'bytes=0-1023' }
+      responses:
+        '200':
+          description: Reconstruction map for the full file or requested range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReconstructionResponseV1' }
+        '400':
+          description: Bad file_id.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown file_id.
+        '416':
+          description: Malformed or unsatisfiable Range header.
+        '500':
+          description: Reconstruction references an unknown xorb, or fetch-URL build failed.
+  /v2/reconstructions/{file_id}:
+    get:
+      tags: [CAS]
+      summary: File to xorb/chunk-range reconstruction map (V2, multi-range-optimized)
+      description: >-
+        Requires read scope. Same underlying data as V1, grouped by xorb
+        hash (xorbs) instead of one fetch_info entry per term — fewer
+        signed URLs when a file's reconstruction touches the same xorb
+        across multiple non-contiguous terms. Same Range/416 semantics as V1.
+      parameters:
+        - { name: file_id, in: path, required: true, schema: { type: string } }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string, example: 'bytes=0-1023' }
+      responses:
+        '200':
+          description: Reconstruction map for the full file or requested range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReconstructionResponseV2' }
+        '400':
+          description: Bad file_id.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown file_id.
+        '416':
+          description: Malformed or unsatisfiable Range header.
+        '500':
+          description: Reconstruction references an unknown xorb, or fetch-URL build failed.
+  /v1/chunks/{prefix}/{hash}:
+    get:
+      tags: [CAS]
+      summary: Global chunk-dedup lookup
+      description: >-
+        Requires read scope. {prefix} must be the literal
+        "default-merkledb" (distinct from the xorb-upload prefix). Returns
+        the RAW BYTES of whichever previously-uploaded shard referenced
+        this chunk hash — not the chunk itself; the client re-parses the
+        returned shard to find dedup-eligible chunks. This is the real
+        wire contract per xet-core's own OpenAPI spec.
+      parameters:
+        - { name: prefix, in: path, required: true, schema: { type: string, enum: [default-merkledb] } }
+        - { name: hash, in: path, required: true, schema: { type: string }, description: Chunk hash, hex. }
+      responses:
+        '200':
+          description: Raw bytes of a shard that referenced this chunk hash.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400':
+          description: Bad prefix/hash.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No uploaded shard has ever referenced this chunk hash.
+  /v1/telemetry:
+    post:
+      tags: [CAS]
+      summary: No-op telemetry ack
+      description: >-
+        Never gated by auth, regardless of server configuration — a
+        fire-and-forget client diagnostic with nothing sensitive to
+        protect. Request body is ignored entirely.
+      security: []
+      responses:
+        '200':
+          description: Always succeeds.
+  /v1/storage-stats:
+    get:
+      tags: [CAS]
+      summary: Eviction/storage policy stats
+      description: >-
+        Never gated by auth, regardless of server configuration.
+        Operator-facing; not part of the real Xet CAS API.
+      security: []
+      responses:
+        '200':
+          description: Current storage/eviction stats.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StorageStatsResponse' }
+  /api/repos/create:
+    post:
+      tags: [Hub]
+      summary: Create (or no-op re-touch) a repo
+      description: Requires write scope. Idempotent — repeat calls with the same name are no-ops.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRepoRequest' }
+      responses:
+        '200':
+          description: Repo exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateRepoResponse' }
+        '400':
+          description: Invalid body or missing name.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/{repo_type}s/{repo_id}/revision/{revision}:
+    get:
+      tags: [Hub]
+      summary: Repo info at a revision (resolve revision before listing/downloading)
+      description: >-
+        Requires read scope. huggingface_hub's snapshot_download calls
+        this before list_repo_tree/per-file downloads (`hf download
+        REPO_ID` with no filename); `hf upload`'s CLI command also calls
+        it to check whether a target --revision already exists before
+        creating it. A missing revision returns 404 with
+        X-Error-Code: RevisionNotFound — required for huggingface_hub to
+        raise its specific RevisionNotFoundError instead of a generic,
+        uncaught error.
+      parameters:
+        - { name: repo_type, in: path, required: true, schema: { type: string }, example: model }
+        - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
+        - { name: revision, in: path, required: true, schema: { type: string }, example: main }
+      responses:
+        '200':
+          description: Repo/revision info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RepoInfoResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown revision (repo is implicitly created on first touch, but a revision is not).
+          headers:
+            X-Error-Code: { schema: { type: string, enum: [RevisionNotFound] } }
+  /api/{repo_type}s/{repo_id}/tree/{revision}:
+    get:
+      tags: [Hub]
+      summary: List every file committed to a revision
+      description: >-
+        Requires read scope. huggingface_hub's list_repo_tree, called
+        with recursive=True by snapshot_download to enumerate files
+        before downloading a whole repo. Response is a bare JSON array
+        (not an object wrapping one) — huggingface_hub's paginate() helper
+        does `yield from r.json()`. An optional trailing path segment
+        (.../tree/{revision}/{path_in_repo}) scopes the listing to files
+        under that path; omitted here since this shim's only tested
+        caller (recursive, root-level) never sends one.
+      parameters:
+        - { name: repo_type, in: path, required: true, schema: { type: string }, example: model }
+        - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
+        - { name: revision, in: path, required: true, schema: { type: string }, example: main }
+      responses:
+        '200':
+          description: Every file committed to this revision (or under path_in_repo, if given), sorted by path.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TreeEntry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown revision.
+          headers:
+            X-Error-Code: { schema: { type: string, enum: [RevisionNotFound] } }
+  /api/{repo_type}s/{repo_id}/branch/{branch}:
+    post:
+      tags: [Hub]
+      summary: Create a branch (revision)
+      description: >-
+        Requires write scope. Called by `hf upload`'s CLI command after
+        a revision-info lookup reports the target --revision doesn't
+        exist yet. Idempotent, matching real create_branch(exist_ok=True)
+        — repeat calls for the same branch name are harmless no-ops. This
+        shim's revisions already spring into existence implicitly on
+        first commit; this just does the same thing eagerly, in response
+        to an explicit request.
+      parameters:
+        - { name: repo_type, in: path, required: true, schema: { type: string }, example: model }
+        - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
+        - { name: branch, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                startingPoint: { type: string, description: Ignored by this shim. }
+      responses:
+        '200':
+          description: Branch created (or already existed).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/{repo_type}s/{repo_id}/xet-read-token/{revision}:
+    get:
+      tags: [Hub]
+      summary: Issue a CAS endpoint + bearer token (read)
+      description: >-
+        Requires read scope. Functionally identical to the write-token
+        endpoint below (this shim issues an unrestricted token either
+        way) except for which scope gates it.
+      parameters:
+        - { name: repo_type, in: path, required: true, schema: { type: string }, example: model }
+        - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
+        - { name: revision, in: path, required: true, schema: { type: string }, example: main }
+      responses:
+        '200':
+          description: Token issued.
+          headers:
+            X-Xet-Cas-Url: { schema: { type: string } }
+            X-Xet-Access-Token: { schema: { type: string } }
+            X-Xet-Token-Expiration: { schema: { type: string }, description: Unix seconds, decimal string. }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/XetTokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Random token generation failed.
+  /api/{repo_type}s/{repo_id}/xet-write-token/{revision}:
+    get:
+      tags: [Hub]
+      summary: Issue a CAS endpoint + bearer token (write)
+      description: Requires write scope. See xet-read-token — identical response shape.
+      parameters:
+        - { name: repo_type, in: path, required: true, schema: { type: string }, example: model }
+        - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
+        - { name: revision, in: path, required: true, schema: { type: string }, example: main }
+      responses:
+        '200':
+          description: Token issued.
+          headers:
+            X-Xet-Cas-Url: { schema: { type: string } }
+            X-Xet-Access-Token: { schema: { type: string } }
+            X-Xet-Token-Expiration: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/XetTokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Random token generation failed.
+  /api/{repo_type}s/{repo_id}/commit/{revision}:
+    post:
+      tags: [Hub]
+      summary: Commit file entries to a revision
+      description: >-
+        Requires write scope. Body is ndjson, one JSON object per line;
+        only lines with key "lfsFile" are recorded (others, e.g. "header",
+        are skipped). Scanner buffer capped at 10 MiB per line. Creates the
+        named revision implicitly if it doesn't already exist.
+      parameters:
+        - { name: repo_type, in: path, required: true, schema: { type: string } }
+        - { name: repo_id, in: path, required: true, schema: { type: string } }
+        - { name: revision, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+              description: >-
+                Newline-delimited JSON. Each line: {"key": "lfsFile",
+                "value": <CommitLfsFileValue>} (or any other key, ignored).
+              example: |
+                {"key":"header","value":{"summary":"a commit"}}
+                {"key":"lfsFile","value":{"path":"model.bin","oid":"abc123...","size":500000}}
+      responses:
+        '200':
+          description: Commit recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommitResponse' }
+        '400':
+          description: Invalid ndjson line, or a line exceeded the 10 MiB buffer.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Random commit OID generation failed.
+  /api/{repo_type}s/{repo_id}/preupload/{revision}:
+    post:
+      tags: [Hub]
+      summary: Negotiate per-file upload mode
+      description: >-
+        Requires write scope. Stateless — repo_type/repo_id/revision path
+        segments are parsed but not used by this handler.
+      parameters:
+        - { name: repo_type, in: path, required: true, schema: { type: string } }
+        - { name: repo_id, in: path, required: true, schema: { type: string } }
+        - { name: revision, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PreuploadRequest' }
+      responses:
+        '200':
+          description: Upload mode per file.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PreuploadResponse' }
+        '400':
+          description: Invalid body.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /{repo_id}/resolve/{revision}/{filename}:
+    head:
+      tags: [Hub]
+      summary: File metadata (triggers the Xet download path)
+      description: >-
+        Requires read scope. huggingface_hub's HEAD call is what triggers
+        the Xet download path client-side: it looks for X-Xet-Hash plus
+        X-Xet-Refresh-Route, and downloads via hf_xet instead of calling
+        GET on this same URL. repo_id is always treated as repo type
+        "model" (not encoded in resolve URLs).
+      parameters:
+        - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
+        - { name: revision, in: path, required: true, schema: { type: string }, example: main }
+        - { name: filename, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: File metadata.
+          headers:
+            X-Repo-Commit: { schema: { type: string } }
+            ETag: { schema: { type: string } }
+            X-Linked-Etag: { schema: { type: string } }
+            X-Linked-Size: { schema: { type: string } }
+            Content-Length: { schema: { type: string } }
+            X-Xet-Hash: { schema: { type: string } }
+            X-Xet-Refresh-Route: { schema: { type: string, format: uri } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >-
+            Revision doesn't exist, filename not committed, or the file's
+            SHA-256/size isn't known to CAS yet (shard not uploaded).
+    get:
+      tags: [Hub]
+      summary: File metadata + unimplemented direct download
+      description: >-
+        Requires read scope. Same lookups/headers/404s as HEAD, but never
+        actually serves file bytes — always 501 once metadata is found.
+        Real clients use the Xet download path signaled by the headers
+        instead of calling GET here.
+      parameters:
+        - { name: repo_id, in: path, required: true, schema: { type: string } }
+        - { name: revision, in: path, required: true, schema: { type: string } }
+        - { name: filename, in: path, required: true, schema: { type: string } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Same conditions as HEAD.
+        '501':
+          description: Direct GET not supported; use the Xet download path via X-Xet-Hash.
+          content: { text/plain: { schema: { type: string } } }
+  /v1/upload:
+    post:
+      tags: [Xet Data]
+      summary: Chunk, dedup, and store a file
+      description: Requires write scope.
+      parameters:
+        - { name: name, in: query, required: false, schema: { type: string }, description: Echoed back in the response; not used for storage/hashing. }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Upload summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Storage or manifest write failure.
+  /v1/files/{id}:
+    get:
+      tags: [Xet Data]
+      summary: Download a previously-uploaded file
+      description: >-
+        Requires read scope. No Range header support — always streams the
+        full file.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Full file bytes.
+          headers:
+            Content-Length: { schema: { type: integer, format: int64 } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown or invalid file id.
+        '500':
+          description: A chunk referenced by the manifest is missing.
+  /v1/files/{id}/manifest:
+    get:
+      tags: [Xet Data]
+      summary: Fetch a file's chunk manifest
+      description: Requires read scope.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Manifest.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Manifest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown or invalid file id.
+  /v1/stats:
+    get:
+      tags: [Xet Data]
+      summary: Store-wide dedup stats
+      description: Never gated by auth, regardless of server configuration.
+      security: []
+      responses:
+        '200':
+          description: Current stats.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/XetDataStatsResponse' }

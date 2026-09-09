@@ -80,7 +80,7 @@ type URLPresigner interface {
 
 // Deleter is an optional capability: backends that support removing a
 // previously-stored blob implement it. Not part of the core Store
-// interface since not every caller needs delete (the demo API's chunk
+// interface since not every caller needs delete (the Xet Data API's chunk
 // store, for instance, never removes anything) — this exists for callers
 // like a storage-budget eviction sweep that do. Deleting an
 // already-absent key is not an error (idempotent).
