@@ -5,14 +5,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"xet-server/internal/api"
 	"xet-server/internal/auth"
-	"xet-server/internal/manifest"
 )
+
+// defaultHTTPClient bounds connect/TLS-handshake/response-header latency
+// (10s each) without a blanket request Timeout — a large xorb push/pull
+// can legitimately take longer than any single one of these phases
+// without being unhealthy. Mirrors internal/hfclient's own
+// defaultHTTPClient (see its doc comment for the full rationale); this
+// package's own risk profile differs (a one-shot CLI invocation against
+// a local xetd, not a long-running server under sustained concurrent
+// load), but a hung or unreachable server — e.g. a stale -server flag
+// pointing at a host that accepts connections but never responds —
+// should still fail fast rather than hang the CLI command indefinitely.
+var defaultHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 10 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
 // Client is a thin HTTP client for the Xet Data API (internal/api),
 // mounted at api.V1 (sharing that namespace with, but never overlapping
@@ -28,7 +50,7 @@ type Client struct {
 }
 
 func New(baseURL string) *Client {
-	return &Client{BaseURL: baseURL, HTTP: http.DefaultClient, Cred: auth.NoopCredentialHelper{}}
+	return &Client{BaseURL: baseURL, HTTP: defaultHTTPClient, Cred: auth.NoopCredentialHelper{}}
 }
 
 // route builds c.BaseURL+path, where path is one of internal/api's
@@ -121,28 +143,6 @@ func (c *Client) Pull(fileID, localPath string) error {
 	return err
 }
 
-// Manifest fetches the reconstruction manifest for fileID.
-func (c *Client) Manifest(fileID string) (*manifest.Manifest, error) {
-	req, err := http.NewRequest(http.MethodGet, c.route(api.FilesPrefix+fileID+"/manifest"), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("manifest fetch failed: %s: %s", resp.Status, body)
-	}
-	var m manifest.Manifest
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
-		return nil, err
-	}
-	return &m, nil
-}
-
 // Stats fetches store-wide dedup stats from the server.
 func (c *Client) Stats() (map[string]any, error) {
 	req, err := http.NewRequest(http.MethodGet, c.route(api.StatsPath), nil)
@@ -154,6 +154,10 @@ func (c *Client) Stats() (map[string]any, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("stats fetch failed: %s: %s", resp.Status, body)
+	}
 	var stats map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
 		return nil, err

@@ -1,4 +1,4 @@
-GO_VERSION ?= 1.21
+GO_VERSION ?= 1.27
 PYTHON_VERSION ?= 3.14
 
 DOCS_PORT ?= 8000
@@ -19,7 +19,7 @@ endif
 	test tests \
 	integration-test integration-tests \
 	docs docs-serve \
-	run clean \
+	run run-proxy clean \
 	all
 
 help: ## Show this help message
@@ -55,6 +55,7 @@ lint: vet ## Run Linter on Packages
 
 build: pre-check ## Build the xetd server and xet CLI binaries into bin/
 	go build -o bin/xetd ./cmd/xetd
+	go build -o bin/xet-proxyd ./cmd/xet-proxyd
 	go build -o bin/xet ./cmd/xet
 
 tests: test
@@ -65,10 +66,13 @@ test: pre-check ## Run unit tests
 integration-tests: integration-test
 
 integration-test: build ## Run integration tests (usage: make integration-test TEST=integration-tests/push_pull_roundtrip.sh)
-	@PYTHON_VERSION=$(PYTHON_VERSION) ./integrationTests.sh ./bin/xetd ./bin/xet $(if $(TEST),$(TEST),integration-tests)
+	@PYTHON_VERSION=$(PYTHON_VERSION) ./integrationTests.sh ./bin/xetd ./bin/xet ./bin/xet-proxyd $(if $(TEST),$(TEST),integration-tests)
 
 run: build ## Run xetd locally on :8420 with data in ./xet-data
 	./bin/xetd -addr :8420 -data ./xet-data
+
+run-proxy: build ## Run xet-proxyd locally on :8420 (CAS) / :8421 (Hub), relaying to real huggingface.co, with data in ./xet-proxy-data
+	./bin/xet-proxyd -addr :8420 -hub-addr :8421 -data ./xet-proxy-data
 
 docs: pre-check ## Regenerate docs/godoc/*.md and render all docs (README, CONTRIBUTING, CHANGELOG, docs/*.md) to browsable HTML in docs/build/
 	cd scripts && go run build_docs.go
@@ -80,6 +84,7 @@ docs-serve: pre-check ## Build docs and serve docs/build/ locally for browsing
 clean: ## Clean build artifacts, local server data, generated docs HTML, and the pipenv virtualenv
 	rm -rf bin
 	rm -rf xet-data
+	rm -rf xet-proxy-data
 	rm -rf docs/build
 	@pipenv --venv >/dev/null 2>&1 && pipenv --rm || true
 

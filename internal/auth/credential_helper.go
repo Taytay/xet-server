@@ -50,3 +50,18 @@ func (c *BearerCredentialHelper) FillCredential(req *http.Request) error {
 }
 
 func (c *BearerCredentialHelper) WhoAmI() string { return "bearer" }
+
+// CredentialFromRequest returns a CredentialHelper that forwards r's own
+// "Authorization: Bearer <token>" header unchanged on an outgoing
+// request (NoopCredentialHelper if r carries none) — the shared building
+// block a relay/proxy (internal/proxycas, internal/proxyhub) uses to
+// implement pure credential passthrough: whatever bearer token the
+// calling client sent, forwarded upstream exactly as received, never
+// replaced by a secret the proxy layer itself holds.
+func CredentialFromRequest(r *http.Request) CredentialHelper {
+	token := bearerToken(r)
+	if token == "" {
+		return NoopCredentialHelper{}
+	}
+	return NewBearerCredentialHelper(token)
+}

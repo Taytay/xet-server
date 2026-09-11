@@ -2,6 +2,7 @@ package casserver
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,50 +10,68 @@ import (
 	"xet-server/internal/shardformat"
 )
 
-// maxShardBytes caps a single shard upload's body size. Shards are
-// metadata (file/xorb info entries), bounded by chunk count rather than
-// file size — even a shard describing a maximally-chunked maxXorbBytes
-// xorb (128 MiB / DefaultMinSize 4 KiB ≈ 32K chunks) stays well under a
-// few MB. This cap exists to bound handleUploadShard's io.ReadAll, which
-// (unlike the xorb path) buffers the whole body in memory rather than
-// streaming to a temp file — shard bodies are always small enough that
-// this is fine, but an unbounded ReadAll still lets a hostile client force
-// arbitrary memory growth by simply not capping Content-Length.
-const maxShardBytes = 16 * 1024 * 1024
-
 // chunkDedupPrefix is the only prefix xet-core's real CAS API accepts for
 // GET /v1/chunks/{prefix}/{hash} (see openapi/cas.openapi.yaml's
 // PrefixGlobalDedupeParam) — distinct from xorbPrefix ("default"), which
 // is for a different endpoint.
 const chunkDedupPrefix = "default-merkledb"
 
-// handleUploadShard implements POST /v1/shards: parse the serialized
-// shard and merge its file-reconstruction entries into the server's
-// in-memory index, keyed by file hash. xet-core reports 0 (already
-// exists) vs 1 (SyncPerformed); this server has no separate shard dedup
-// store, so it always reports 1 once the shard parses successfully.
-//
-// Every chunk hash referenced by the shard's xorb-info section is also
-// indexed against this shard's raw uploaded bytes, backing the global
+// maxShardBytes caps a single shard upload's body size. Shards are
+// metadata (file/xorb info entries), bounded by chunk count rather than
+// file size — even a shard describing a maximally-chunked maxXorbBytes
+// xorb (128 MiB / DefaultMinSize 4 KiB ≈ 32K chunks) stays well under a
+// few MB. This cap exists to bound IngestShard's io.ReadAll, which
+// (unlike the xorb path) buffers the whole body in memory rather than
+// streaming to a temp file — shard bodies are always small enough that
+// this is fine, but an unbounded ReadAll still lets a hostile client force
+// arbitrary memory growth by simply not capping Content-Length.
+const maxShardBytes = 16 * 1024 * 1024
+
+// handleUploadShard implements POST /v1/shards: read the body (capped at
+// maxShardBytes) and delegate to IngestShard — see its doc comment for
+// what indexing a shard actually does.
+func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxShardBytes)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			httpError(w, "read body (exceeds max shard size or connection error): "+err.Error(), http.StatusRequestEntityTooLarge)
+		} else {
+			httpError(w, "read body: "+err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+
+	if err := s.IngestShard(body); err != nil {
+		httpError(w, "malformed shard: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, uploadShardResponse{Result: 1})
+}
+
+// IngestShard parses body as a serialized shard and merges its
+// file-reconstruction entries into this server's in-memory fileRecon
+// index (keyed by file hash), and indexes every chunk hash referenced by
+// the shard's xorb-info section against body itself, backing the global
 // chunk-dedup lookup (GET /v1/chunks/{prefix}/{hash} — see
 // handleChunkDedup): the real wire contract for that endpoint is "return
 // the shard bytes that reference this chunk," which a real client parses
 // itself to discover chunks it can dedup against without re-uploading —
 // see docs/PROTOCOL.md's global-dedup section for the full story of how
 // this was confirmed against xet-core's own client source.
-func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxShardBytes)
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		httpError(w, "read body (exceeds max shard size or connection error): "+err.Error(), http.StatusRequestEntityTooLarge)
-		return
-	}
-
+//
+// Exported so a caller embedding this Server as a caching layer (e.g.
+// internal/proxyhub or internal/proxycas, relaying a real client's shard
+// upload write-through to a real upstream CAS and wanting this server to
+// also reflect it immediately) can feed it shard bytes through the
+// identical parsing/indexing path handleUploadShard uses.
+func (s *Server) IngestShard(body []byte) error {
 	shard, err := shardformat.ReadShard(bytes.NewReader(body))
 	if err != nil {
-		httpError(w, "malformed shard: "+err.Error(), http.StatusBadRequest)
-		return
+		return err
 	}
 
 	s.fileReconMu.Lock()
@@ -97,5 +116,5 @@ func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 	s.chunkDedupMu.Unlock()
 	slog.Debug("shard chunk-dedup index updated", "newChunkEntries", chunkCount)
 
-	writeJSON(w, uploadShardResponse{Result: 1})
+	return nil
 }

@@ -28,6 +28,16 @@ const ChunkHeaderSize = 8
 
 FUNCTIONS
 
+func DecompressChunkPayload(scheme CompressionScheme, payload []byte, uncompressedLen uint32) ([]byte, error)
+    DecompressChunkPayload returns the uncompressed bytes of one chunk's payload
+    per its declared compression scheme. Real hf_xet clients upload xorbs
+    without a footer (chunk metadata is reconstructed by the server from the
+    raw chunk stream — see casserver.IngestXorb), so this is the only way to
+    obtain a chunk's true content and independently verify its claimed hash.
+    Exported (rather than kept package-internal to casserver) since it's a pure
+    codec-dispatch function with no casserver-specific state — a natural fit for
+    this package alongside the rest of the wire-format logic it already owns.
+
 func WriteChunkHeader(w io.Writer, h ChunkHeader) error
     WriteChunkHeader writes h's 8-byte wire representation to w.
 
@@ -90,6 +100,23 @@ type FooterV1 struct {
     written after a xorb's chunk section, carrying the xorb's content hash,
     per-chunk hashes, and both physical (compressed) and logical (uncompressed)
     chunk boundary offsets.
+
+func DeriveFooter(r interface {
+	io.ReadSeeker
+	io.ReaderAt
+}) (footer FooterV1, computedHash merklehash.Hash, err error)
+    DeriveFooter independently reconstructs a xorb's V1 footer and content
+    hash by scanning r's chunk headers (via ScanChunks) and decompressing each
+    chunk's payload (via DecompressChunkPayload) — the same reconstruction real
+    hf_xet clients rely on the server side to perform, since a real upload never
+    includes a footer at all ("XORBs are sent without footer - the server/client
+    reconstructs it from chunk data", per xet-core's file_upload_session.rs).
+
+    Used by casserver.IngestXorb to independently verify a freshly -uploaded
+    xorb's claimed hash against its actual chunk contents.
+
+    r must implement io.ReaderAt in addition to io.ReadSeeker, to read each
+    chunk's payload independently of ScanChunks' own sequential Seek position.
 
 func ParseFooterV1(r io.Reader) (FooterV1, error)
     ParseFooterV1 reads a V1 footer from r, which must be positioned at the

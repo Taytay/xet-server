@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+
+	"xet-server/internal/merklehash"
 )
 
 // handleResolve implements HEAD and GET /{repoID}/resolve/{revision}/{filename}:
@@ -34,14 +36,32 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 		return
 	}
 
-	xetHash, known := s.CAS.XetHashForSHA256(ref.SHA256Hex)
-	slog.Debug("resolve xetHash lookup", "sha256Hex", ref.SHA256Hex, "known", known)
-	if !known {
-		// The shard carrying this file's metadata_ext hasn't been uploaded
-		// yet (or ever will be, e.g. an interrupted upload) — nothing to
-		// serve.
-		http.NotFound(w, r)
-		return
+	// ref.XetHash, when already known (e.g. this file was learned from an
+	// upstream response that already carried it — see IngestFile — or
+	// restored from a snapshot), replaces the CAS.XetHashForSHA256
+	// bridge lookup as the identifier to check. It is still only ever
+	// used as a LOOKUP KEY, never as proof of anything by itself: the
+	// size returned below always comes from CAS.FileSize(xetHash), which
+	// sums fileRecon entries that were only ever populated from actually
+	// -verified reconstruction data (a real ingested xorb's claimed hash
+	// checked against its recomputed content hash — see
+	// casserver.IngestXorb). If FileSize can't find it, that's a clean
+	// 404 — "the reconstruction isn't actually available" — never
+	// papered over with ref's own (client-declared, unverified) Size.
+	var xetHash merklehash.Hash
+	if !ref.XetHash.IsZero() {
+		xetHash = ref.XetHash
+	} else {
+		var known bool
+		xetHash, known = s.CAS.XetHashForSHA256(ref.SHA256Hex)
+		slog.Debug("resolve xetHash lookup", "sha256Hex", ref.SHA256Hex, "known", known)
+		if !known {
+			// The shard carrying this file's metadata_ext hasn't been
+			// uploaded yet (or ever will be, e.g. an interrupted upload)
+			// — nothing to serve.
+			http.NotFound(w, r)
+			return
+		}
 	}
 	size, known := s.CAS.FileSize(xetHash)
 	slog.Debug("resolve fileSize lookup", "xetHash", xetHash.Hex(), "known", known)

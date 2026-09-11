@@ -10,6 +10,7 @@ package hubserver
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sort"
 )
@@ -73,7 +74,9 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request, repoType
 	// wrapping one — unlike every other response this shim returns via
 	// writeJSON.
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(entries)
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		slog.Error("hubserver: encode response", "error", err)
+	}
 }
 
 // isUnderPath reports whether path is exactly pathInRepo or nested under

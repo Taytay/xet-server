@@ -140,3 +140,56 @@ func TestSourceIP_FallsBackToRawRemoteAddrWithoutPort(t *testing.T) {
 		t.Errorf("sourceIP() = %q, want raw RemoteAddr as fallback", got)
 	}
 }
+
+func TestAllow_PrunesFullyRefilledStaleBucketsAfterPruneEvery(t *testing.T) {
+	// Regression test: without pruning, a long-running Limiter (e.g.
+	// cmd/xet-proxyd's shared one) would retain one bucket per source IP
+	// ever seen for its entire process lifetime.
+	l := New(2, 1) // burst 2, refill 1/sec: fully refills after 2s
+	clock := withClock(l, time.Now())
+
+	l.Allow("1.2.3.4")
+	if _, ok := l.buckets["1.2.3.4"]; !ok {
+		t.Fatal("bucket for 1.2.3.4 missing immediately after its own Allow call")
+	}
+
+	// Advance well past a full refill for the stale key, then drive
+	// enough Allow calls (against a DIFFERENT key) to cross pruneEvery
+	// and trigger a sweep.
+	clock.Advance(10 * time.Second)
+	for i := 0; i < pruneEvery; i++ {
+		l.Allow("9.9.9.9")
+	}
+
+	if _, ok := l.buckets["1.2.3.4"]; ok {
+		t.Error("bucket for 1.2.3.4 still present after a prune sweep well past its full refill time")
+	}
+	// Pruning must never affect behavior: a fresh Allow for the pruned
+	// key still gets a full burst, indistinguishable from having kept it.
+	for i := 0; i < 2; i++ {
+		if !l.Allow("1.2.3.4") {
+			t.Fatalf("Allow() call %d for re-created bucket = false, want true within burst", i+1)
+		}
+	}
+}
+
+func TestAllow_NeverPrunesWithZeroRefillRate(t *testing.T) {
+	// RefillPerSecond <= 0 means a bucket can never "fully refill" —
+	// pruning it would be observably different from keeping it (the
+	// pruned/re-created bucket gets a full burst it hadn't earned back).
+	l := New(1, 0)
+	clock := withClock(l, time.Now())
+
+	l.Allow("1.2.3.4") // exhausts the only token
+	clock.Advance(24 * time.Hour)
+	for i := 0; i < pruneEvery; i++ {
+		l.Allow("9.9.9.9")
+	}
+
+	if _, ok := l.buckets["1.2.3.4"]; !ok {
+		t.Error("bucket for 1.2.3.4 was pruned despite RefillPerSecond <= 0 (can never legitimately refill)")
+	}
+	if l.Allow("1.2.3.4") {
+		t.Error("Allow() = true for a zero-refill-rate key that had already exhausted its only token")
+	}
+}

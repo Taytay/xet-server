@@ -4,13 +4,18 @@ A practical, copy-pasteable guide to running your own Hugging Face
 Hub-compatible model host, so `hf download` and `hf upload` work against
 your own server instead of huggingface.co — for private model mirrors, air-gapped
 environments, or just keeping a large set of checkpoints somewhere you
-control.
+control. Sections 1–8 cover `xetd`, where you deliberately upload the
+content you want hosted; section 9 covers `xet-proxyd`, which instead
+transparently caches whatever's requested through it from the real
+huggingface.co — read that section if you want a mirror with no manual
+upload step, or one that stays useful even after huggingface.co itself
+becomes unreachable.
 
 This guide only uses the real `hf` CLI (from `huggingface_hub`) — nothing
 in `cmd/xet`/`internal/api` (the "Xet Data API") is needed for this. If
 you've never used this project before, skim
 [Architecture](../docs/ARCHITECTURE.md) first; this guide assumes you
-already have `xetd` built (`make build` from the repo root).
+already have `xetd`/`xet-proxyd` built (`make build` from the repo root).
 
 ## 1. What you're actually running
 
@@ -165,13 +170,53 @@ default. See
 (`-max-storage-bytes`) if you want old, unused xorbs evicted automatically
 once total storage crosses a budget.
 
+## 9. A different kind of mirror: `xet-proxyd` (transparent caching, not manual re-hosting)
+
+Everything above assumes you're deliberately `hf upload`-ing content you
+already have onto your own `xetd`. If instead you want a mirror that
+**transparently caches whatever real models get requested through it** —
+no manual upload step, no deciding in advance what to host — use
+`xet-proxyd` instead:
+
+```bash
+./bin/xet-proxyd -addr :8420 -hub-addr :8421 -data ./xet-proxy-data \
+  -upstream-hub-url https://huggingface.co
+```
+
+Point `HF_ENDPOINT` at `:8421` exactly like you would for `xetd` — every
+`hf download` (and `hf upload`, relayed straight through to the real Hub)
+just works, with no repo-by-repo setup. The first time any model is
+requested it's fetched from the real huggingface.co and cached; every
+request after that (from you or anyone else pointed at this proxy) is
+served locally, and **keeps being servable even if huggingface.co itself
+becomes unreachable** — that's the entire reason this exists, not a side
+effect. See the main README's
+[Caching pull-through proxy](../README.md#caching-pull-through-proxy-xet-proxyd)
+section for the full flag reference (rate limiting, cache TTL, the
+`-no-cache` pure-relay escape hatch), and its
+[Offline handoff](../README.md#offline-handoff-proving-the-point)
+subsection for the step-by-step "huggingface.co is really gone now" story:
+stop the proxy, point a plain `xetd` at the exact same `-data` directory,
+and every model that was ever requested through the proxy keeps working,
+byte-identical, forever — no proxy process required.
+
+This is the practical answer to "what do I do the day huggingface.co
+shuts down or I lose access to it": run `xet-proxyd` starting today, let
+it accumulate a cache of whatever your team actually uses, and that cache
+is already a complete, working, disconnected model store the moment you
+need one.
+
 ## What this is not
 
 This is this project's own reimplementation of the Xet CAS + Hub
 protocols (see [Where this diverges from real Xet](../README.md#where-this-diverges-from-real-xet)
-for the exact, current list of gaps) — not huggingface.co, and not
-connected to it in any way. Nothing you upload here is visible on
-huggingface.co, and nothing on huggingface.co is visible here, unless you
-separately mirror it yourself (e.g. `hf download` from the real Hub, then
-`hf upload` the same files to your own server with `HF_ENDPOINT` pointed
-at each in turn).
+for the exact, current list of gaps) — not huggingface.co. A plain
+`xetd` mirror (sections 1–8 above) has no connection to huggingface.co at
+all: nothing you upload is visible there, and nothing there is visible
+here, unless you separately mirror it yourself (e.g. `hf download` from
+the real Hub, then `hf upload` the same files to your own server with
+`HF_ENDPOINT` pointed at each in turn). `xet-proxyd` (section 9) is the
+one deliberate exception — by design, it DOES talk to the real
+huggingface.co on a cache miss; anything it caches came from a real,
+successful request to the real Hub/CAS, not fabricated or copied any
+other way.

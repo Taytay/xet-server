@@ -221,12 +221,12 @@ func (s *Server) handleAPIGet(w http.ResponseWriter, r *http.Request) {
 		if !s.requireScope(w, r, auth.ScopeRead) {
 			return
 		}
-		s.handleXetToken(w, r, repoType, repoID, readToken)
+		s.handleXetToken(w, r, repoType, repoID)
 	case "xet-write-token":
 		if !s.requireScope(w, r, auth.ScopeWrite) {
 			return
 		}
-		s.handleXetToken(w, r, repoType, repoID, writeToken)
+		s.handleXetToken(w, r, repoType, repoID)
 	case "revision":
 		if !s.requireScope(w, r, auth.ScopeRead) {
 			return
@@ -377,10 +377,3 @@ func httpErrorJSON(w http.ResponseWriter, msg string, code int) {
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
-
-type xetTokenType int
-
-const (
-	readToken xetTokenType = iota
-	writeToken
-)

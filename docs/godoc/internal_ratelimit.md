@@ -4,10 +4,17 @@
 package ratelimit // import "xet-server/internal/ratelimit"
 
 Package ratelimit implements a hand-rolled per-source-IP token-bucket rate
-limiter, used to blunt a single client hammering the expensive upload endpoints
-(chunk decompression + hashing) without needing a new dependency — a token
-bucket is simple enough to write directly and keeps the rest of this project's
-zero-external-dependency posture for the main module.
+limiter, used to blunt a single client hammering an expensive endpoint without
+needing a new dependency — a token bucket is simple enough to write directly and
+keeps the rest of this project's zero-external-dependency posture for the main
+module.
+
+Scope varies by caller: casserver.Server.SetUploadRateLimiter gates only
+its upload endpoints (uploads are the expensive local operation there:
+chunk decompression + hashing), while proxycas.Server. SetRateLimiter and
+proxyhub.Server.SetRateLimiter both gate EVERY route — for a caching proxy,
+a read that misses cache costs a real outbound call to the real upstream,
+not just a write.
 
 TYPES
 
@@ -29,6 +36,12 @@ func (l *Limiter) Allow(key string) bool
     Allow reports whether a request from key (typically a source IP) may proceed
     right now, consuming one token if so.
 
+func (l *Limiter) AllowRequest(r *http.Request) bool
+    AllowRequest reports whether r's source IP may proceed right now (consuming
+    one token if so) — the same check Middleware applies inline, exposed for a
+    caller (proxyhub.Server.gate) that needs to gate a request without wrapping
+    it in an http.Handler.
+
 func (l *Limiter) Middleware(next http.Handler) http.Handler
     Middleware wraps next so that requests exceeding the per-source-IP rate get
     a 429 Too Many Requests with a Retry-After header instead of reaching next.
@@ -42,4 +55,8 @@ func (l *Limiter) RetryAfterSeconds(key string) int
     one token again, for a 429 response's Retry-After header. Not exact under
     concurrent access (another request could consume the next token first),
     but close enough to give a well-behaved client a reasonable backoff hint.
+
+func (l *Limiter) RetryAfterSecondsForRequest(r *http.Request) int
+    RetryAfterSecondsForRequest is RetryAfterSeconds keyed by r's own source IP
+    — see AllowRequest's doc comment for why this exists alongside Middleware.
 ```

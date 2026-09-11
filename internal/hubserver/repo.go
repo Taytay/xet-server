@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -50,7 +51,9 @@ func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("hubserver: encode response", "error", err)
+	}
 }
 
 // repoInfoResponse is GET /api/{repo_type}s/{repo_id}/revision/{revision}'s
@@ -133,10 +136,11 @@ type xetTokenResponse struct {
 // issues a CAS endpoint + bearer token, both as a JSON body (what hf_xet's
 // Rust client actually parses) and via the X-Xet-* response headers
 // (huggingface_hub's parse_xet_connection_info_from_headers, used on the
-// resolve/download path). Auth is not modeled — any request succeeds and
+// resolve/download path). Read vs write reach here via distinct routes
+// (see hubserver.go's dispatch) but get identical, unrestricted
+// treatment — auth is not modeled here at all; any request succeeds and
 // gets a fresh random token with a generous expiry.
-func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType, repoID string, kind xetTokenType) {
-	_ = kind // read vs write both get the same unrestricted token; no scope enforcement here
+func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType, repoID string) {
 	s.getOrCreateRepo(repoType, repoID)
 
 	token, err := randomToken()

@@ -133,6 +133,15 @@ type CredentialHelper interface {
     (e.g. to fetch a short-lived token from an internal service before each
     request) is a small, self-contained task.
 
+func CredentialFromRequest(r *http.Request) CredentialHelper
+    CredentialFromRequest returns a CredentialHelper that forwards r's own
+    "Authorization: Bearer <token>" header unchanged on an outgoing request
+    (NoopCredentialHelper if r carries none) — the shared building block a
+    relay/proxy (internal/proxycas, internal/proxyhub) uses to implement pure
+    credential passthrough: whatever bearer token the calling client sent,
+    forwarded upstream exactly as received, never replaced by a secret the proxy
+    layer itself holds.
+
 type NoAuth struct{}
     NoAuth is the default Authenticator: every request succeeds, and the
     returned Principal holds every scope unconditionally. This is exactly

@@ -2,6 +2,13 @@
 // API (AWS S3, MinIO, etc.) using hand-rolled SigV4 request signing
 // (internal/sigv4) instead of a third-party SDK. Uses path-style addressing
 // (http://endpoint/bucket/key), which both MinIO and AWS S3 support.
+//
+// Currently library-only: neither cmd/xetd nor cmd/xet-proxyd exposes a
+// flag to select this backend over internal/storage/fsstore (both
+// binaries construct an fsstore.Store directly) — a caller wanting S3
+// storage today has to build their own main package around this
+// package. See its own tests (this package's live-MinIO test) for a
+// working usage example.
 package s3store
 
 import (
@@ -9,6 +16,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +33,25 @@ var (
 	_ storage.Sizer        = (*Store)(nil)
 )
 
+// defaultHTTPClient bounds connect/TLS-handshake/response-header latency
+// (10s each) without a blanket request Timeout — a large xorb GET/PUT
+// can legitimately take longer than any single one of these phases
+// without being unhealthy. Mirrors internal/hfclient's own
+// defaultHTTPClient (see its doc comment for the full rationale): a
+// hung or unreachable S3/MinIO endpoint (a misconfigured -s3-endpoint,
+// a backend outage) should fail a request fast rather than hold a
+// casserver request handler's goroutine open indefinitely.
+var defaultHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 10 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
+
 type Store struct {
 	Endpoint string // e.g. "http://localhost:9000", no trailing slash
 	Bucket   string
@@ -40,7 +67,7 @@ func New(endpoint, bucket, prefix, accessKey, secretKey, region string) *Store {
 		Bucket:   bucket,
 		Prefix:   prefix,
 		Signer:   sigv4.New(accessKey, secretKey, region, "s3"),
-		HTTP:     http.DefaultClient,
+		HTTP:     defaultHTTPClient,
 		Now:      time.Now,
 	}
 }

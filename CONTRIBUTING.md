@@ -63,8 +63,10 @@ make integration-test TEST=integration-tests/push_pull_roundtrip.sh
 the Hub API shim) and runs every `integration-tests/*.sh` script against
 it, with a per-test timeout (`XET_IT_TEST_TIMEOUT`, default 10s) so a
 single hanging test doesn't block the whole suite. Scripts receive `$XET`,
-`$XETD_URL`, `$HUB_URL`, `$WORKDIR`, and `$PYTHON_VERSION` — see the header
-comment in `integrationTests.sh` for the full contract.
+`$XETD`, `$XET_PROXYD` (the built `xet-proxyd` binary, for tests that
+start their own proxy instance rather than using the shared `xetd`),
+`$XETD_URL`, `$HUB_URL`, `$WORKDIR`, and `$PYTHON_VERSION` — see the
+header comment in `integrationTests.sh` for the full contract.
 
 A test script can `exit 77` to **SKIP** instead of fail, for cases that
 depend on an optional external dependency not being present (see
@@ -89,6 +91,19 @@ a known environment limitation (`hf_xet`'s Rust HTTP client doesn't always
 honor `NO_PROXY` for localhost), not a protocol bug — see the script's
 header comment and [docs/PROTOCOL.md](docs/PROTOCOL.md) for details.
 
+`integration-tests/xet_proxyd_offline_handoff.sh` uses the same real `hf`
+CLI to prove `xet-proxyd`'s whole reason to exist: upload+download through
+a running proxy (relaying to a second, local `xetd` standing in for the
+real Hub, so this needs no network access), shut the proxy down, tear
+down its upstream entirely, start a fresh plain `xetd` pointed at the
+proxy's own `-data` directory, and download the same file again with
+nothing else running. This is what caught two real bugs during
+development — a missing `shouldIgnore` field silently dropped on relay
+(crashed the real `hf` CLI with a `KeyError`) and a snapshot-filename
+mismatch between the two binaries that would have made the whole handoff
+silently load nothing — both fixed and now pinned by this test and unit
+regression tests alongside it.
+
 ### Fuzz tests
 
 Every binary/wire-format parser that touches attacker-controlled bytes has
@@ -98,7 +113,13 @@ in a `fuzz_test.go` alongside its package: `internal/merklehash`,
 `internal/shardformat`, `internal/casserver` (just `parseByteRange`).
 These found a real, confirmed allocation-size DoS during this project's
 first fuzzing pass — see [docs/PROTOCOL.md](docs/PROTOCOL.md)'s §7 for the
-full story and the general rule it generalizes to.
+full story and the general rule it generalizes to. `internal/reconwire`
+(the reconstruction-response clipping/grouping logic, extracted out of
+`casserver` so `proxycas` can safely feed it untrusted upstream data via
+`casserver.Server.IngestFileRecon`) has its own fuzz target,
+`FuzzBuildV1_NeverPanics`, verifying arbitrary out-of-range chunk indices
+return an error instead of panicking — the exact bug class this
+extraction was designed to make independently testable.
 
 ```bash
 go test ./internal/shardformat/... -run '^$' -fuzz '^FuzzReadShard$' -fuzztime 60s
@@ -126,8 +147,17 @@ goes further: sustained concurrent mixed valid/invalid traffic, an
 upload interrupted mid-body followed by a clean retry, and
 upload/fetch/eviction-sweep interleaving under a tight storage budget —
 each checked against actual data integrity (byte-identical round-trips),
-not just "didn't crash." Run these as part of `make test` like any other
-Go test; they're intentionally fast enough not to need a separate target.
+not just "didn't crash." `internal/proxycas/chaos_test.go` and
+`internal/proxyhub/chaos_test.go` cover the same class of scenario for
+`xet-proxyd` specifically — a fully-hung-before-headers upstream, a
+connected-but-frozen mid-body response, a connection reset mid-transfer,
+and thundering-herd concurrent requests on a cold cache key — each
+asserting the proxy's fallback-to-cache rule still holds and that a
+truncated/reset upstream response is never cached as if it were complete
+(`casserver.IngestXorb`'s independent hash re-derivation is what actually
+guarantees this; the chaos tests confirm it empirically rather than
+assuming it). Run these as part of `make test` like any other Go test;
+they're intentionally fast enough not to need a separate target.
 
 ### Benchmarks
 
@@ -204,6 +234,7 @@ opening a PR — `go vet` won't catch a missing one, but reviewers will.
 Xet-Server/
 ├── cmd/
 │   ├── xetd/                 # server binary: CAS API + Xet Data API + optional Hub API shim
+│   ├── xet-proxyd/           # caching pull-through proxy for the real huggingface.co
 │   └── xet/                  # CLI client for the Xet Data API
 ├── internal/
 │   ├── merklehash/           # BLAKE3-keyed Merkle hashing (xet-core DataHash port)
@@ -214,13 +245,17 @@ Xet-Server/
 │   ├── sigv4/                # from-scratch AWS SigV4 request signer
 │   ├── storage/              # Store interface + fsstore/s3store backends
 │   ├── eviction/              # optional storage-budget auto-pruning sweep
-│   ├── ratelimit/             # optional per-source-IP upload rate limiter
+│   ├── ratelimit/             # optional per-source-IP rate limiter (uploads on xetd, every route on xet-proxyd)
 │   ├── auth/                  # pluggable AuthN/AuthZ (Authenticator/CredentialHelper)
 │   ├── routing/                # declarative route-table helpers (Mount/Apply)
 │   ├── apidocs/                # embedded OpenAPI spec + Swagger UI (served at /api-docs)
-│   ├── landingpage/             # HTML landing pages for xetd's ports
+│   ├── landingpage/             # HTML landing pages for xetd's and xet-proxyd's ports
 │   ├── casserver/            # wire-compatible CAS HTTP API
 │   ├── hubserver/            # Hub REST API shim (repo/commit/resolve)
+│   ├── hfclient/             # upstream HTTP client xet-proxyd uses to talk to the real Hub/CAS
+│   ├── reconwire/            # reconstruction wire types + clipping/grouping logic (shared by casserver and, indirectly, proxycas)
+│   ├── proxycas/             # CAS-facing half of xet-proxyd (embeds a real casserver.Server)
+│   ├── proxyhub/             # Hub-facing half of xet-proxyd (embeds a real hubserver.Server)
 │   ├── chunk/, manifest/, api/, client/  # original simple chunk/dedup Xet Data API
 │   └── ...
 ├── third_party/
@@ -232,6 +267,7 @@ Xet-Server/
 ├── docs/
 │   ├── ARCHITECTURE.md       # system diagram + package responsibilities
 │   ├── PROTOCOL.md           # wire-compatibility deep dive
+│   ├── MIRRORING.md          # self-hosting guide, including xet-proxyd
 │   ├── godoc/                # generated package reference (commit these; `make docs`)
 │   └── build/                # rendered HTML (gitignored; `make docs-serve`)
 └── Makefile

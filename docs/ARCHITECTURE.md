@@ -62,6 +62,72 @@ huggingface.co's real Hub and CAS are actually separate services, while
 keeping this project's own non-wire-compatible testing surface bundled
 with CAS rather than given a third port of its own.
 
+## Caching pull-through proxy (`cmd/xet-proxyd`)
+
+```mermaid
+graph TB
+    subgraph "Real client (unmodified)"
+        HFCli2["hf CLI / huggingface_hub / hf_xet"]
+    end
+
+    subgraph "cmd/xet-proxyd"
+        direction TB
+        ProxyHub["proxyhub\n━━━━━━━━━━━━━━━━━\nembeds a real hubserver.Server\nfetch-and-ingest on a miss\nfalls back to cache on ANY upstream failure"]
+        ProxyCAS["proxycas\n━━━━━━━━━━━━━━━━━\nembeds a real casserver.Server\nfetch-and-ingest on a miss\nsame fallback-on-failure rule"]
+    end
+
+    subgraph "internal/hfclient"
+        direction LR
+        HubClient["Client\nHub API calls"]
+        CASClient["CASClient\nCAS API calls"]
+    end
+
+    RealHub["huggingface.co Hub API"]
+    RealCAS["real Xet CAS\n(per-repo URL, from\nxet-token response)"]
+
+    HFCli2 -->|"HF_ENDPOINT"| ProxyHub
+    HFCli2 -.->|"or point hf_xet directly at"| ProxyCAS
+    ProxyHub -->|"X-Xet-Cas-Url header,\nrewritten to point HERE"| ProxyCAS
+    ProxyHub --> HubClient
+    ProxyCAS --> CASClient
+    HubClient -->|"relay on cache miss"| RealHub
+    CASClient -->|"relay on cache miss"| RealCAS
+
+    style HFCli2 fill:#e1f5ff,stroke:#0099cc
+    style ProxyHub fill:#fff3e0,stroke:#ff9900
+    style ProxyCAS fill:#e1ffe1,stroke:#00cc66,stroke-width:3px
+    style RealHub fill:#f9f9f9,stroke:#999
+    style RealCAS fill:#f9f9f9,stroke:#999
+```
+
+`internal/proxycas`/`internal/proxyhub` are thin wrappers around a real,
+embedded `casserver.Server`/`hubserver.Server` — the exact same engines
+`cmd/xetd` runs — rather than a separate implementation of caching logic.
+Each wrapper's own job is narrow: check whether the embedded server
+already has what a request needs (via its `Has*` API); if so, delegate
+straight to it with no upstream call at all. On a miss, fetch from the
+real Hub/CAS via `internal/hfclient`, feed the result into the embedded
+server via its `Ingest*` API (`IngestXorb`, `IngestShard`,
+`IngestFileRecon`, `IngestRepoInfo`, `IngestFile`, `IngestCommit` — see
+each server's own doc comments), then delegate. **Any upstream failure —
+network error, timeout, 5xx — falls back to whatever's already cached, no
+matter how old**, rather than erroring: this fallback rule is the whole
+reason the proxy exists, and it's why `proxycas`/`proxyhub`'s own cache
+directory ends up being a byte-for-byte real `xetd` data directory (same
+snapshot filenames, same on-disk format) — a caller who's finished relying
+on the real huggingface.co can hand that directory to a plain `xetd`
+directly, with no proxy process required at all. See
+[MIRRORING.md](MIRRORING.md) for the practical version of this story.
+
+The CAS-facing proxy has no fixed upstream CAS URL of its own — real Xet
+CAS's base URL is discovered per-repo, via the Hub's own
+`xet-{read,write}-token` response, not a well-known address (see
+`internal/hfclient`'s package doc comment) — so it learns the real
+upstream CAS URL only as a side effect of the Hub-facing proxy relaying
+one of those calls (`proxyhub.Server.UpstreamCASBaseURL`). A request to
+the CAS-facing port before the Hub-facing port has relayed any traffic at
+all gets a `503`, not a hang or a silent wrong answer.
+
 ## Upload flow
 
 ```mermaid
@@ -170,7 +236,12 @@ PROTOCOL.md).
 | `internal/auth` | `Authenticator`/`Principal` (server-side AuthN/AuthZ) and `CredentialHelper` (client-side credential attachment) interfaces, plus built-in `NoAuth`/`StaticTokenAuth` and `NoopCredentialHelper`/`BearerCredentialHelper` implementations and the shared `ResolveToken`/`BearerToken` primitives every `-auth-token`-style flag in this project is built on. |
 | `internal/routing` | `Mount`/`MountWithVersion`/`Apply` — small helpers so `casserver`, `internal/api`, `hubserver`, and `cmd/xetd`'s own top-level mux each build their route table as one declarative list instead of a sequence of individual `mux.Handle` calls. |
 | `internal/apidocs` | Embeds this project's hand-authored OpenAPI 3.0 spec (`openapi.yaml`) and the vendored Swagger UI static assets (`third_party/swagger-ui-dist`) into the `xetd` binary via `go:embed`, serving both at `/api-docs/` — fully offline, no CDN dependency. |
-| `internal/landingpage` | Renders the small HTML page shown when a `xetd` port's root path (`/`) is opened directly in a browser — one variant for the CAS+Xet-Data port, one for the Hub shim port — listing that port's endpoints and a quick-start example. |
+| `internal/landingpage` | Renders the small HTML page shown when a `xetd`/`xet-proxyd` port's root path (`/`) is opened directly in a browser — one variant per port per binary (CAS+Xet-Data, Hub shim, proxy CAS, proxy Hub) — listing that port's endpoints and a quick-start example. |
+| `internal/hfclient` | The upstream HTTP client `xet-proxyd` uses to talk to the *real* Hub API and real Xet CAS — `Client` for Hub calls, `CASClient` for CAS calls (a separate base URL, discovered per-repo from a Hub xet-token response, never configured directly). Every call takes the caller's own bearer token and forwards it upstream completely unchanged (pure credential passthrough — this package never holds or uses a secret of its own). Its `defaultHTTPClient` bounds connect/TLS-handshake/response-header latency without a blanket request timeout, so a hung real huggingface.co fails fast without aborting a legitimately large, slow-but-progressing xorb transfer. |
+| `internal/reconwire` | The wire types (`ResponseV1`/`ResponseV2`/`Term`/etc.) and response-building logic (`BuildV1`/`BuildV2`) behind `GET /v1\|v2/reconstructions/{file_id}` — extracted out of `casserver` so this clipping/grouping logic has one independently-tested home, callable from both `casserver`'s own handlers and (indirectly, via `casserver.Server.IngestFileRecon`) `proxycas`'s cached-reconstruction path. Bounds-checks every chunk-index field before indexing a footer's slices, since entries reaching it via `proxycas` originated from an untrusted upstream response. |
+| `internal/proxycas` | The CAS-facing half of `xet-proxyd`: a thin wrapper embedding a real `casserver.Server` as its serving engine. On each request, checks whether the embedded server already has what's needed (`Has*`); on a miss, fetches from the real Xet CAS via `internal/hfclient`, feeds it into the embedded server via `Ingest*`, then delegates. Any upstream failure falls back to whatever's already cached, regardless of age — this fallback is the whole reason the proxy exists. |
+| `internal/proxyhub` | The Hub-facing half of `xet-proxyd`: the same embed-and-delegate design as `proxycas`, wrapping a real `hubserver.Server`. Xet-token is the one endpoint that can't delegate to the embedded server at all (`hubserver`'s own handler mints a fake token, worthless against the real CAS) — this package caches the real token value itself, with `CasURL` rewritten to point at the proxy's own CAS-facing address. `-cache-ttl` controls how long cached metadata is served before attempting a live refresh; it never affects whether the fallback-on-failure rule applies. |
+| `cmd/xet-proxyd` | The binary wiring `proxycas`+`proxyhub` together into a two-port caching pull-through proxy for the real huggingface.co — see [Caching pull-through proxy](#caching-pull-through-proxy-cmdxet-proxyd) above for the full design and [MIRRORING.md](MIRRORING.md) for the practical offline-handoff story. |
 
 ## Design decisions worth knowing
 
@@ -212,3 +283,28 @@ PROTOCOL.md).
   the process is killed (not just on a clean exit). See
   [PROTOCOL.md](PROTOCOL.md)'s persistence section for the full tradeoff
   writeup and why atomic-snapshot was chosen over a WAL for this project.
+- **The proxy embeds real servers instead of reimplementing caching
+  logic.** An earlier design for `xet-proxyd` considered a standalone
+  cache implementation duplicating `casserver`/`hubserver`'s own
+  byte-range serving, reconstruction-building, and repo/revision
+  tracking. `internal/proxycas`/`internal/proxyhub` embed the real
+  engines instead: every request either delegates straight to
+  already-tested code, or fetches from upstream and feeds the result into
+  that same code via its own `Ingest*` API before delegating. This means
+  the two hardest parts of a correct Xet cache — byte-range/reconstruction
+  serving and repo/revision state — have exactly one implementation each
+  in this whole project, not two that could silently drift apart. It's
+  also what makes the offline-handoff property fall out for free: the
+  embedded server's own snapshot format IS a real `xetd` data directory,
+  with no separate export/import step needed.
+- **Any upstream failure falls back to cache, unconditionally — this is
+  the proxy's retry strategy for reads.** No separate retry-with-backoff
+  logic was added for read paths: a network error, timeout, or 5xx from
+  the real Hub/CAS immediately serves whatever's already cached,
+  regardless of age. This was a deliberate choice over exponential
+  backoff or similar — the existing fallback already produces the
+  correct user-visible outcome (a working `hf download`) faster than any
+  retry loop could, and adding one would only delay reaching that same
+  fallback. Writes (commit, preupload, repo/branch creation) are always
+  relayed live with no fallback at all — only the real Hub can accept a
+  real commit, so there is nothing to fall back to.

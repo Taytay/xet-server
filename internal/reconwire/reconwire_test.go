@@ -1,0 +1,268 @@
+package reconwire
+
+// Tests for BuildV1/BuildV2's clipping and grouping logic, driven
+// directly against fake FooterLookup/FetchURLBuilder callbacks — no HTTP
+// server needed, since this package is a pure function of its inputs
+// (see the package doc comment). internal/casserver's own integration
+// tests exercise this same logic end-to-end through real HTTP requests;
+// these tests pin the logic itself in isolation.
+
+import (
+	"errors"
+	"testing"
+
+	"xet-server/internal/merklehash"
+	"xet-server/internal/shardformat"
+	"xet-server/internal/xorbformat"
+)
+
+func hashFromByte(b byte) merklehash.Hash {
+	var buf [32]byte
+	for i := range buf {
+		buf[i] = b
+	}
+	h, _ := merklehash.FromRawBytes(buf[:])
+	return h
+}
+
+func fakeFooterLookup(footers map[merklehash.Hash]xorbformat.FooterV1) FooterLookup {
+	return func(hash merklehash.Hash) (xorbformat.FooterV1, bool) {
+		f, ok := footers[hash]
+		return f, ok
+	}
+}
+
+func fakeFetchURLBuilder() (FetchURLBuilder, *int) {
+	calls := 0
+	return func(hash merklehash.Hash) (string, error) {
+		calls++
+		return "https://example.invalid/" + hash.Hex(), nil
+	}, &calls
+}
+
+func TestBuildV1_WholeFileSingleXorb(t *testing.T) {
+	xorbHash := hashFromByte(0x11)
+	entries := []shardformat.FileDataSequenceEntry{
+		{XorbHash: xorbHash, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 2},
+	}
+	footers := map[merklehash.Hash]xorbformat.FooterV1{
+		xorbHash: {ChunkBoundaryOffsets: []uint32{50, 110}},
+	}
+	fetchURL, calls := fakeFetchURLBuilder()
+
+	resp, err := BuildV1(entries, 0, 99, fakeFooterLookup(footers), fetchURL)
+	if err != nil {
+		t.Fatalf("BuildV1() error = %v", err)
+	}
+	if len(resp.Terms) != 1 {
+		t.Fatalf("got %d terms, want 1", len(resp.Terms))
+	}
+	if resp.Terms[0].Hash != xorbHash.Hex() {
+		t.Errorf("term hash = %q, want %q", resp.Terms[0].Hash, xorbHash.Hex())
+	}
+	if resp.OffsetIntoFirstRange != 0 {
+		t.Errorf("OffsetIntoFirstRange = %d, want 0", resp.OffsetIntoFirstRange)
+	}
+	entriesFor := resp.FetchInfo[xorbHash.Hex()]
+	if len(entriesFor) != 1 {
+		t.Fatalf("got %d fetch_info entries, want 1", len(entriesFor))
+	}
+	if entriesFor[0].URLRange != (ByteRange{Start: 0, End: 109}) {
+		t.Errorf("URLRange = %+v, want {0 109}", entriesFor[0].URLRange)
+	}
+	if *calls != 1 {
+		t.Errorf("fetchURL called %d times, want 1", *calls)
+	}
+}
+
+func TestBuildV1_RangeSkipsTermsOutsideWindow(t *testing.T) {
+	xorb1 := hashFromByte(0x11)
+	xorb2 := hashFromByte(0x22)
+	entries := []shardformat.FileDataSequenceEntry{
+		{XorbHash: xorb1, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 1},
+		{XorbHash: xorb2, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 1},
+	}
+	footers := map[merklehash.Hash]xorbformat.FooterV1{
+		xorb1: {ChunkBoundaryOffsets: []uint32{100}},
+		xorb2: {ChunkBoundaryOffsets: []uint32{100}},
+	}
+	fetchURL, _ := fakeFetchURLBuilder()
+
+	// Range [150, 199] falls entirely within the second term (byte offset
+	// 100-199) — the first term (0-99) must be skipped entirely.
+	resp, err := BuildV1(entries, 150, 199, fakeFooterLookup(footers), fetchURL)
+	if err != nil {
+		t.Fatalf("BuildV1() error = %v", err)
+	}
+	if len(resp.Terms) != 1 {
+		t.Fatalf("got %d terms, want 1 (first term outside window must be skipped)", len(resp.Terms))
+	}
+	if resp.Terms[0].Hash != xorb2.Hex() {
+		t.Errorf("term hash = %q, want %q", resp.Terms[0].Hash, xorb2.Hex())
+	}
+	if resp.OffsetIntoFirstRange != 50 {
+		t.Errorf("OffsetIntoFirstRange = %d, want 50 (150 - termStart 100)", resp.OffsetIntoFirstRange)
+	}
+}
+
+func TestBuildV1_UnknownFooterReturnsError(t *testing.T) {
+	xorbHash := hashFromByte(0x11)
+	entries := []shardformat.FileDataSequenceEntry{
+		{XorbHash: xorbHash, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 1},
+	}
+	fetchURL, _ := fakeFetchURLBuilder()
+
+	_, err := BuildV1(entries, 0, 99, fakeFooterLookup(nil), fetchURL)
+	if err == nil {
+		t.Fatal("expected an error for an unknown xorb footer, got nil")
+	}
+	var unknownFooter *ErrUnknownXorbFooter
+	if !errors.As(err, &unknownFooter) {
+		t.Errorf("error = %v, want *ErrUnknownXorbFooter", err)
+	}
+	if unknownFooter.Hash != xorbHash {
+		t.Errorf("ErrUnknownXorbFooter.Hash = %s, want %s", unknownFooter.Hash.Hex(), xorbHash.Hex())
+	}
+}
+
+func TestBuildV2_GroupsMultipleTermsUnderOneXorb(t *testing.T) {
+	xorbHash := hashFromByte(0x11)
+	entries := []shardformat.FileDataSequenceEntry{
+		{XorbHash: xorbHash, UnpackedSegmentBytes: 50, ChunkIndexStart: 0, ChunkIndexEnd: 1},
+		{XorbHash: xorbHash, UnpackedSegmentBytes: 50, ChunkIndexStart: 1, ChunkIndexEnd: 2},
+	}
+	footers := map[merklehash.Hash]xorbformat.FooterV1{
+		xorbHash: {ChunkBoundaryOffsets: []uint32{50, 110}},
+	}
+	fetchURL, calls := fakeFetchURLBuilder()
+
+	resp, err := BuildV2(entries, 0, 99, fakeFooterLookup(footers), fetchURL)
+	if err != nil {
+		t.Fatalf("BuildV2() error = %v", err)
+	}
+	fetches := resp.Xorbs[xorbHash.Hex()]
+	if len(fetches) != 1 {
+		t.Fatalf("got %d XorbMultiRangeFetch entries, want 1 (grouped under one URL)", len(fetches))
+	}
+	if len(fetches[0].Ranges) != 2 {
+		t.Errorf("got %d ranges, want 2 (both terms grouped under the same xorb)", len(fetches[0].Ranges))
+	}
+	// The URL builder must only be called once per distinct xorb hash,
+	// even though two terms reference it — the whole point of V2's
+	// grouping optimization.
+	if *calls != 1 {
+		t.Errorf("fetchURL called %d times, want 1 (reused across both terms)", *calls)
+	}
+}
+
+func TestBuildV2_UnknownFooterReturnsError(t *testing.T) {
+	xorbHash := hashFromByte(0x11)
+	entries := []shardformat.FileDataSequenceEntry{
+		{XorbHash: xorbHash, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 1},
+	}
+	fetchURL, _ := fakeFetchURLBuilder()
+
+	_, err := BuildV2(entries, 0, 99, fakeFooterLookup(nil), fetchURL)
+	if err == nil {
+		t.Fatal("expected an error for an unknown xorb footer, got nil")
+	}
+}
+
+func TestFileSize_SumsUnpackedSegmentBytes(t *testing.T) {
+	entries := []shardformat.FileDataSequenceEntry{
+		{UnpackedSegmentBytes: 100},
+		{UnpackedSegmentBytes: 250},
+	}
+	if got := FileSize(entries); got != 350 {
+		t.Errorf("FileSize() = %d, want 350", got)
+	}
+}
+
+// TestBuildV1_ChunkIndexOutOfRangeReturnsErrorNotPanic pins the fix for a
+// real reachable crash: entries can originate from an untrusted upstream
+// reconstruction response (internal/proxycas ingests one into
+// casserver.Server.IngestFileRecon without re-deriving it — see the
+// package doc comment), so a term whose ChunkIndexEnd exceeds its xorb's
+// actual footer chunk count must be rejected with an error, never index
+// footer.ChunkBoundaryOffsets out of bounds.
+func TestBuildV1_ChunkIndexOutOfRangeReturnsErrorNotPanic(t *testing.T) {
+	xorbHash := hashFromByte(0x11)
+	entries := []shardformat.FileDataSequenceEntry{
+		// The footer below has only 2 chunks (ChunkBoundaryOffsets has 2
+		// entries), but this term claims chunk index 5 — a hostile or
+		// malformed upstream response shape.
+		{XorbHash: xorbHash, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 5},
+	}
+	footers := map[merklehash.Hash]xorbformat.FooterV1{
+		xorbHash: {ChunkBoundaryOffsets: []uint32{50, 100}},
+	}
+	fetchURL, _ := fakeFetchURLBuilder()
+
+	_, err := BuildV1(entries, 0, 99, fakeFooterLookup(footers), fetchURL)
+	if err == nil {
+		t.Fatal("expected an error for an out-of-range chunk index, got nil")
+	}
+	var outOfRange *ErrChunkIndexOutOfRange
+	if !errors.As(err, &outOfRange) {
+		t.Errorf("error = %v, want *ErrChunkIndexOutOfRange", err)
+	}
+}
+
+func TestBuildV2_ChunkIndexOutOfRangeReturnsErrorNotPanic(t *testing.T) {
+	xorbHash := hashFromByte(0x11)
+	entries := []shardformat.FileDataSequenceEntry{
+		{XorbHash: xorbHash, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 5},
+	}
+	footers := map[merklehash.Hash]xorbformat.FooterV1{
+		xorbHash: {ChunkBoundaryOffsets: []uint32{50, 100}},
+	}
+	fetchURL, _ := fakeFetchURLBuilder()
+
+	_, err := BuildV2(entries, 0, 99, fakeFooterLookup(footers), fetchURL)
+	if err == nil {
+		t.Fatal("expected an error for an out-of-range chunk index, got nil")
+	}
+	var outOfRange *ErrChunkIndexOutOfRange
+	if !errors.As(err, &outOfRange) {
+		t.Errorf("error = %v, want *ErrChunkIndexOutOfRange", err)
+	}
+}
+
+// FuzzBuildV1_NeverPanics drives BuildV1 with adversarial
+// FileDataSequenceEntry values — untrusted-shaped input by construction
+// (see the package doc comment on why entries is not always internally
+// consistent) — asserting only that it never panics, regardless of how
+// the chunk-index fields relate to the footer's actual chunk count.
+func FuzzBuildV1_NeverPanics(f *testing.F) {
+	f.Add(uint32(0), uint32(1), uint32(2))
+	f.Add(uint32(0), uint32(0), uint32(2))       // zero-width range
+	f.Add(uint32(5), uint32(2), uint32(2))       // start > end
+	f.Add(uint32(0), uint32(1000000), uint32(2)) // wildly out of range
+	f.Add(uint32(0), uint32(0), uint32(0))       // empty footer
+
+	f.Fuzz(func(t *testing.T, chunkIndexStart, chunkIndexEnd, footerChunkCount uint32) {
+		if footerChunkCount > 10000 {
+			footerChunkCount = footerChunkCount % 10000 // bound allocation
+		}
+		boundaryOffsets := make([]uint32, footerChunkCount)
+		for i := range boundaryOffsets {
+			boundaryOffsets[i] = uint32(i) * 10
+		}
+		xorbHash := hashFromByte(0x11)
+		entries := []shardformat.FileDataSequenceEntry{
+			{XorbHash: xorbHash, UnpackedSegmentBytes: 100, ChunkIndexStart: chunkIndexStart, ChunkIndexEnd: chunkIndexEnd},
+		}
+		footers := map[merklehash.Hash]xorbformat.FooterV1{
+			xorbHash: {ChunkBoundaryOffsets: boundaryOffsets},
+		}
+		fetchURL, _ := fakeFetchURLBuilder()
+
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("BuildV1 panicked on chunkIndexStart=%d chunkIndexEnd=%d footerChunkCount=%d: %v",
+					chunkIndexStart, chunkIndexEnd, footerChunkCount, r)
+			}
+		}()
+		BuildV1(entries, 0, 99, fakeFooterLookup(footers), fetchURL)
+	})
+}

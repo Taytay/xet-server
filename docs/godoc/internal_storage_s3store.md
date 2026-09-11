@@ -8,6 +8,12 @@ HTTP API (AWS S3, MinIO, etc.) using hand-rolled SigV4 request signing
 (internal/sigv4) instead of a third-party SDK. Uses path-style addressing
 (http://endpoint/bucket/key), which both MinIO and AWS S3 support.
 
+Currently library-only: neither cmd/xetd nor cmd/xet-proxyd exposes a flag to
+select this backend over internal/storage/fsstore (both binaries construct
+an fsstore.Store directly) — a caller wanting S3 storage today has to build
+their own main package around this package. See its own tests (this package's
+live-MinIO test) for a working usage example.
+
 TYPES
 
 type Store struct {

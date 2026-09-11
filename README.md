@@ -16,6 +16,15 @@ live `hf_xet` client, with several real wire-format quirks discovered only
 by capturing and replaying genuine client traffic. See
 [docs/PROTOCOL.md](docs/PROTOCOL.md) for that story.
 
+Also included: **`xet-proxyd`**, a caching pull-through proxy for the real
+huggingface.co — not just a performance cache, but an offline-resilience
+layer. Point it at the real Hub, use it like a normal `HF_ENDPOINT`, and
+every repo/file it has successfully served once stays servable via `hf
+download`/`hf upload` even after huggingface.co becomes unreachable —
+including handing its cache directory to a plain `xetd` as a permanent,
+disconnected replacement. See [Caching pull-through proxy](#caching-pull-through-proxy-xet-proxyd)
+below.
+
 ---
 
 # Table of Contents
@@ -28,6 +37,7 @@ by capturing and replaying genuine client traffic. See
   - [Authentication](#authentication)
   - [Point the real `hf` CLI at it](#point-the-real-hf-cli-at-it)
   - [Xet Data API + CLI](#xet-data-api--cli)
+- [Caching pull-through proxy (`xet-proxyd`)](#caching-pull-through-proxy-xet-proxyd)
 - [HTTP API](#http-api)
   - [Interactive API docs (Swagger UI)](#interactive-api-docs-swagger-ui)
 - [Storage backends](#storage-backends)
@@ -37,7 +47,7 @@ by capturing and replaying genuine client traffic. See
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 - [Contributing](#contributing)
-- [Related Projects](#related-projects)
+- [Acknowledgments & Related Projects](#acknowledgments--related-projects)
 
 ---
 
@@ -53,6 +63,14 @@ by capturing and replaying genuine client traffic. See
   resolve/HEAD) that the real `hf upload`/`hf download` shell commands work
   against this server via `HF_ENDPOINT` — including real, independent
   revisions/branches per repo, not just an implicit `main`.
+- **`xet-proxyd`: a caching pull-through proxy for the real huggingface.co**
+  (`cmd/xet-proxyd`, `internal/proxycas`, `internal/proxyhub`,
+  `internal/hfclient`) — an offline-resilience layer, not just a
+  performance cache: any repo metadata or xorb bytes it has successfully
+  relayed once stay servable even after the real huggingface.co becomes
+  unreachable, and its cache directory is a real `xetd` data directory a
+  plain `xetd` can take over directly, no proxy process required. See
+  [Caching pull-through proxy](#caching-pull-through-proxy-xet-proxyd).
 - **Real BLAKE3-keyed Merkle hashing** (`internal/merklehash`): a
   byte-for-byte port of xet-core's `DataHash`, verified against xet-core's
   own published reference vectors — not an approximation.
@@ -74,10 +92,13 @@ by capturing and replaying genuine client traffic. See
 - **Zero required external dependencies to build the demo path**; the
   protocol path adds exactly one pure-Go module
   (`github.com/zeebo/blake3`), pinned in `go.sum`.
-- **Optional storage auto-pruning and upload rate limiting**
+- **Optional storage auto-pruning and request rate limiting**
   (`internal/eviction`, `internal/ratelimit`): bounded, observable
-  defense-in-depth for a server left running against untrusted uploads —
+  defense-in-depth for a server left running against untrusted traffic —
   neither adds a dependency, and both are off unless explicitly enabled.
+  `xetd` rate-limits uploads only (the expensive local operation there);
+  `xet-proxyd` rate-limits every route on both ports, since even a read
+  can trigger a real outbound call to the real huggingface.co.
 - **Optional dedup-hit content verification** (`internal/storage`'s
   `VerifyingStore`): byte-compares an incoming upload against the stored
   blob on a dedup hit instead of trusting the content hash alone,
@@ -90,7 +111,8 @@ by capturing and replaying genuine client traffic. See
   `GET /v2/reconstructions/{file_id}` returns the multi-range-optimized
   response shape instead of always falling back to V1.
 - **Restart-surviving metadata persistence**: `casserver`/`hubserver`
-  periodically (and on graceful shutdown) checkpoint their in-memory
+  (and, identically, `xet-proxyd`'s embedded copies of each) periodically
+  (and on graceful shutdown) checkpoint their in-memory
   reconstruction/repo indices to disk as an atomic JSON snapshot — see
   `-snapshot-interval` below.
 - **Real-client regression fixtures**: several packages carry
@@ -107,6 +129,11 @@ and the key design decisions). Short version:
 - `cmd/xetd` runs the CAS server, and — with `-hub-addr` — the Hub API shim
   as a second HTTP listener, matching how huggingface.co's real Hub and
   CAS are actually separate services.
+- `cmd/xet-proxyd` runs a caching pull-through proxy in front of the real
+  huggingface.co, on the same two-port shape as `xetd` — a drop-in
+  alternative for the same ports, backed by the real Hub instead of being
+  the only copy of the data. See
+  [Caching pull-through proxy](#caching-pull-through-proxy-xet-proxyd).
 - `cmd/xet` is a small CLI for the Xet Data API only (not the
   wire-compatible protocol — use the real `hf` CLI for that).
 
@@ -114,7 +141,7 @@ and the key design decisions). Short version:
 
 ## Prerequisites
 
-- Go 1.21 or later
+- Go 1.27 or later
 - GNU Make
 - Bash (for integration tests)
 - (Optional, for the real `hf` CLI round-trip test) `pipenv`, to install
@@ -132,7 +159,7 @@ air-gapped environment), copy `.env.example` to `.env` and set
 
 ```bash
 make pre-check   # verify Go/bash are present
-make build       # -> bin/xetd, bin/xet
+make build       # -> bin/xetd, bin/xet-proxyd, bin/xet
 ```
 
 # Usage
@@ -262,6 +289,122 @@ own `/v1/xorbs/{hash}`. File IDs are not secrets and this store is not
 multi-tenant — don't run it multi-tenant without adding that isolation
 yourself first.
 
+# Caching pull-through proxy (`xet-proxyd`)
+
+`xet-proxyd` sits in front of the **real** huggingface.co and transparently
+caches everything it relays — not primarily for speed, but for
+**offline resilience**: once it has successfully served a repo's metadata
+or a file's xorb bytes, that data keeps being servable via `hf download`/
+`hf upload` even if huggingface.co goes down, gets rate-limited, or
+disappears entirely. It's built by embedding the exact same
+`internal/casserver.Server`/`internal/hubserver.Server` engines `xetd`
+uses, rather than reimplementing caching logic separately — so its cache
+directory is a real `xetd` data directory a plain `xetd` can take over
+directly, with no proxy process running at all (see
+[Offline handoff](#offline-handoff-proving-the-point) below).
+
+```bash
+# Two ports, same shape as xetd: -addr (CAS-facing), -hub-addr (Hub-facing).
+# Point HF_ENDPOINT at -hub-addr and the real hf CLI works through it
+# end-to-end, same as pointing it at a local xetd.
+./bin/xet-proxyd -addr :8420 -hub-addr :8421 -data ./xet-proxy-data
+
+export HF_ENDPOINT="http://localhost:8421"
+export HF_TOKEN="anything"   # forwarded upstream unchanged — see below
+hf download someuser/some-model --local-dir ./downloaded
+```
+
+Or via `make run-proxy` (same as above, with `./xet-proxy-data`).
+
+Same as `xetd`, opening either port's root path in a browser shows a
+landing page ("Xet Proxy Server" / "Xet Proxy Server — Hub API shim")
+listing that port's endpoints; the CAS-facing port also serves the same
+offline Swagger UI at `/api-docs/` (identical spec — the wire protocol is
+the same one `xetd` implements). Note the CAS-facing port can't answer
+anything about a repo it hasn't seen yet until the Hub-facing port relays
+at least one real Hub call — see the "bootstrap" note below.
+
+**Every request that can't be served from cache is relayed live to the
+real huggingface.co** (`-upstream-hub-url`, defaulting to
+`https://huggingface.co`, falling back to `$HF_URL`) — the caller's own
+`Authorization` header is forwarded upstream completely unchanged
+(`internal/hfclient`'s pure-passthrough design: this proxy never holds or
+uses a credential of its own). `-auth-token`/`$XET_PROXYD_AUTH_TOKEN`
+gates access to **this proxy itself** — a separate concern from the
+upstream credential entirely.
+
+**Any upstream failure — network error, timeout, 5xx — falls back to
+whatever is already cached, no matter how old**, rather than erroring;
+this fallback is the whole reason the proxy exists. `-cache-ttl` (default
+`-1`, meaning "always try upstream first") controls how long cached Hub
+metadata (repo-info, tree, xet-token, resolve) is served without even
+attempting a live refresh; it never affects the CAS byte cache, which is
+content-addressed and can't go stale by definition. `-metadata-call-timeout`
+(default `30s`) bounds each individual metadata call so a slow-but-not-dead
+upstream doesn't hold up the fallback path longer than necessary — it
+never applies to tree listing, which pages internally within one call and
+can legitimately take longer for a very large repo.
+
+`-no-cache` disables all of this — a pure-relay escape hatch (every
+request goes straight to upstream, nothing is read or written locally)
+for when you specifically want a stateless relay rather than the default
+offline-resilient caching mode.
+
+**Bootstrap note: the CAS-facing port needs the Hub-facing port to have
+relayed at least one real request first.** Real Xet CAS has no single
+well-known base URL — each repo's Hub `xet-{read,write}-token` response
+hands back a *per-repo* CAS URL, and the CAS-facing proxy only learns it
+as a side effect of the Hub-facing proxy relaying one of those calls. A
+request straight to `-addr` (a raw `curl`, or `hf_xet`'s low-level API
+pointed directly at the CAS port) before ANY traffic has gone through
+`-hub-addr` gets `503 upstream CAS URL not yet known`. Always drive
+traffic through `HF_ENDPOINT` pointed at `-hub-addr` first — a real `hf
+download`/`hf upload` (or even just one xet-token round-trip) — and the
+CAS port works for the rest of that process's life, including everything
+already cached from a previous run.
+
+Rate limiting (`-rate-limit-rps`/`-rate-limit-burst`, off by default)
+gates **every route on both ports**, not just uploads like `xetd`'s own
+`-rate-limit-rps` — a cache-missing read costs a real outbound call to
+huggingface.co just as much as a write does, so both need the same
+protection. One shared limiter covers both ports, so a client can't double
+its effective budget by splitting requests across them.
+
+`-snapshot-interval` (default `1m`) persists both the CAS-facing and
+Hub-facing caches to `-data` — using the **exact same filenames** `xetd`
+itself reads and writes (`casserver-snapshot.json`/
+`hubserver-snapshot.json`), which is what makes the handoff below work at
+all.
+
+## Offline handoff, proving the point
+
+```bash
+# 1. Cache something while online:
+./bin/xet-proxyd -addr :8420 -hub-addr :8421 -data ./xet-proxy-data &
+HF_ENDPOINT=http://localhost:8421 hf download someuser/some-model --local-dir ./downloaded
+
+# 2. Stop the proxy (a final snapshot is taken automatically):
+kill %1
+
+# 3. huggingface.co is gone / unreachable / you're fully offline now.
+#    Point a PLAIN xetd at the SAME data directory — no -upstream-hub-url,
+#    no network, nothing but what step 1 already cached:
+./bin/xetd -addr :8420 -hub-addr :8421 -data ./xet-proxy-data
+
+# 4. The exact same download still works, byte-identical, forever:
+HF_ENDPOINT=http://localhost:8421 hf download someuser/some-model --local-dir ./downloaded-again
+cmp -r ./downloaded ./downloaded-again
+```
+
+This isn't a hypothetical — `integration-tests/xet_proxyd_offline_handoff.sh`
+runs exactly this sequence (against a local stand-in Hub, so it needs no
+network access) as part of `make integration-test`: upload+download
+through the proxy via the real `hf` CLI, shut the proxy down, tear down
+its upstream entirely, start a fresh plain `xetd` on the handed-off data
+directory, and download again with nothing else running. This is `xet-proxyd`'s
+whole reason to exist: a practical path off huggingface.co, not just a
+faster mirror of it.
+
 # HTTP API
 
 ## Interactive API docs (Swagger UI)
@@ -386,11 +529,16 @@ every script in `integration-tests/`, with a per-test timeout so a hang
 doesn't block the suite. `integration-tests/hf_cli_roundtrip.sh` drives the
 **real, unmodified `hf` CLI** through a full upload+download round-trip —
 the strongest compatibility check available — and skips cleanly (not a
-failure) if `pipenv`/its environment aren't set up:
+failure) if `pipenv`/its environment aren't set up. `integration-tests/xet_proxyd_offline_handoff.sh`
+proves `xet-proxyd`'s whole reason to exist the same way: real `hf`
+upload+download through a running proxy, then the proxy AND its upstream
+are both torn down entirely and a plain `xetd` takes over the proxy's data
+directory directly — the same download must still succeed, byte-identical,
+with nothing but that directory:
 
 ```bash
 make install             # pipenv --python 3.14 && pipenv install
-make integration-test    # now includes hf_cli_roundtrip.sh
+make integration-test    # now includes hf_cli_roundtrip.sh and xet_proxyd_offline_handoff.sh
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#2-running-tests) for the full test
@@ -401,9 +549,14 @@ compression benchmarks.
 
 # Documentation
 
+- **[docs/FAQ.md](docs/FAQ.md)** — why Xet's chunking/dedup model exists
+  at all instead of plain S3/HTTP hosting, why this project exists, why
+  `xet-proxyd` exists, and other questions worth answering once instead
+  of repeatedly
 - **[docs/MIRRORING.md](docs/MIRRORING.md)** — practical guide to
   self-hosting your own model mirror: `hf download`/`hf upload` against
-  your own server instead of huggingface.co, step by step
+  your own server instead of huggingface.co, step by step, including
+  `xet-proxyd`'s transparent-caching alternative
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system diagram,
   upload/download sequence diagrams, package responsibility table, design
   decisions
@@ -437,6 +590,16 @@ restart-surviving persistence (all as of v0.7.0), and pluggable
 authentication/authorization (as of v0.8.0 — see
 [Authentication](#authentication)).
 
+`xet-proxyd` (new in v0.9.0) has one known, deliberate gap: on a cold
+start with `-hub-addr` disabled (or before the Hub-facing port has relayed
+any traffic), the CAS-facing port has no way to learn the real upstream
+CAS base URL and returns `503` for anything it doesn't already have
+cached — see the bootstrap note in
+[Caching pull-through proxy](#caching-pull-through-proxy-xet-proxyd).
+This is inherent to how real Xet CAS's base URL is discovered (per-repo,
+via the Hub's own token response, not a fixed well-known address), not a
+gap this project could close without deviating from the real protocol.
+
 # Troubleshooting
 
 ### Debugging `xetd` itself
@@ -452,6 +615,11 @@ This is the fastest way to see whether a request from `hf upload`/`hf
 download` (or anything else) actually reached the server, and what it did
 once it got there — see [docs/PROTOCOL.md](docs/PROTOCOL.md)'s "How these
 were found" section for how this was used to track down real bugs.
+`DEBUG=1 ./bin/xet-proxyd ...` does the same for the proxy — useful for
+telling whether a slow/failed request actually reached the real
+huggingface.co or was served from cache. `xet` (the CLI client) has no
+`DEBUG` flag: it's a one-shot command that already prints its result
+directly, not a long-running server with request traffic to log.
 
 ### `hf upload`/`hf download` hangs or times out
 If you're in a sandboxed/corporate network that proxies all outbound
@@ -495,12 +663,44 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. Short version:
 4. If you touch protocol/wire-format behavior, read
    [docs/PROTOCOL.md](docs/PROTOCOL.md) first
 
-# Related Projects
+# Acknowledgments & Related Projects
 
-- [Hugging Face Xet](https://huggingface.co/docs/hub/en/xet/index)
-- [xet-core](https://github.com/huggingface/xet-core) (the real Rust
-  implementation this project is wire-compatible with)
-- [zig-xet](https://github.com/jedisct1/zig-xet) (an independent
-  third-party reference implementation, used to verify the ByteGrouping4
-  codec)
-- [Git LFS](https://git-lfs.com/)
+This project only exists because of work other people published openly.
+Thank you to:
+
+- [Hugging Face](https://huggingface.co) and the **Xet** team for
+  designing and documenting [the Xet protocol](https://huggingface.co/docs/hub/en/xet/index)
+  this project reimplements, and for
+  [xet-core](https://github.com/huggingface/xet-core) (the real Rust
+  implementation this project is wire-compatible with) — the ultimate
+  source of truth every byte here was checked against.
+- [jedisct1](https://github.com/jedisct1) for
+  [zig-xet](https://github.com/jedisct1/zig-xet), an independent
+  third-party reference implementation used to verify this project's own
+  `ByteGrouping4` codec against a second, unrelated source rather than
+  trusting a single implementation.
+- [zeebo](https://github.com/zeebo) for
+  [`blake3`](https://github.com/zeebo/blake3), the one external Go
+  dependency this project takes on for its main module — a correct,
+  well-tested BLAKE3 implementation is exactly the kind of primitive
+  worth depending on rather than reimplementing (see
+  [docs/FAQ.md](docs/FAQ.md) for why).
+- The [swagger-ui](https://github.com/swagger-api/swagger-ui) project,
+  whose static assets (vendored under `third_party/swagger-ui-dist`,
+  Apache-2.0 — see its own `VENDORED.md`) power this project's fully
+  offline `/api-docs/` UI.
+- [yuin/goldmark](https://github.com/yuin/goldmark),
+  [alecthomas/chroma](https://github.com/alecthomas/chroma), and
+  [abhg/goldmark-mermaid](https://github.com/abhg/goldmark-mermaid),
+  which render this repo's own Markdown docs (`scripts/build_docs.go`,
+  its own module so these never touch the main `xet-server` module's
+  dependency graph).
+- The [Git LFS](https://git-lfs.com/) project, for defining the large-file
+  Git workflow that Xet's chunking/dedup model improves on — and for
+  being the widely-understood baseline this README's
+  [FAQ](docs/FAQ.md#why-not-just-put-model-files-in-s3-or-any-plain-http-file-host-instead-of-building-all-this)
+  compares against.
+- Everyone who publishes public specs (LZ4, AWS Signature Version 4,
+  OpenAPI 3.0) clearly enough that a from-scratch, independently-verified
+  implementation is actually possible without access to any reference
+  server's source code.

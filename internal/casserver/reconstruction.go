@@ -1,5 +1,12 @@
 package casserver
 
+// reconstruction.go dispatches GET /v1|v2/reconstructions/{file_id}:
+// looks up fileID's shard-derived reconstruction entries, clips them to
+// the requested byte range, and delegates the actual V1/V2 response
+// shape to internal/reconwire (shared with internal/proxycas, which
+// needs byte-identical clipping/grouping logic once it has a file's
+// complete reconstruction cached — see reconwire's package doc comment).
+
 import (
 	"context"
 	"fmt"
@@ -8,6 +15,7 @@ import (
 	"time"
 
 	"xet-server/internal/merklehash"
+	"xet-server/internal/reconwire"
 	"xet-server/internal/shardformat"
 	"xet-server/internal/storage"
 	"xet-server/internal/xorbformat"
@@ -31,11 +39,7 @@ func (s *Server) reconstructionWindow(fileID merklehash.Hash, rangeHeader string
 		return nil, 0, 0, false, nil
 	}
 
-	var fileSize int64
-	for _, e := range entries {
-		fileSize += int64(e.UnpackedSegmentBytes)
-	}
-
+	fileSize := reconwire.FileSize(entries)
 	start, end, hasRange, rangeErr := parseByteRange(rangeHeader, fileSize)
 	if rangeErr != nil {
 		return entries, 0, 0, true, rangeErr
@@ -44,6 +48,35 @@ func (s *Server) reconstructionWindow(fileID merklehash.Hash, rangeHeader string
 		start, end = 0, fileSize-1
 	}
 	return entries, start, end, true, nil
+}
+
+// IngestFileRecon records fileID's complete reconstruction entries
+// as if a shard had described it — for a caller embedding this Server
+// as a caching layer (e.g. internal/proxycas) that learned a file's
+// reconstruction from an upstream CAS response rather than from a real
+// shard upload. entries must be the file's COMPLETE ordered term list
+// (not a byte-range-clipped subset — see internal/proxycas's own
+// handleReconstruction doc comment for why a Range-limited upstream
+// response can never safely populate this): reconstructionWindow and
+// every downstream reader assumes fileRecon[fileID] represents the
+// whole file, and a caller that violates that would silently truncate
+// every future request for it.
+func (s *Server) IngestFileRecon(fileID merklehash.Hash, entries []shardformat.FileDataSequenceEntry) {
+	s.fileReconMu.Lock()
+	s.fileRecon[fileID] = entries
+	s.fileReconMu.Unlock()
+}
+
+// HasFileRecon reports whether this server already has a complete
+// reconstruction on file for fileID — a caller embedding this Server
+// uses this to decide whether a reconstruction request can be served
+// entirely from local state or needs an upstream fetch (+ IngestFileRecon)
+// first.
+func (s *Server) HasFileRecon(fileID merklehash.Hash) bool {
+	s.fileReconMu.RLock()
+	defer s.fileReconMu.RUnlock()
+	_, ok := s.fileRecon[fileID]
+	return ok
 }
 
 // handleReconstructionV1 implements GET /v1/reconstructions/{file_id}: looks
@@ -77,101 +110,12 @@ func (s *Server) handleReconstructionV1(w http.ResponseWriter, r *http.Request) 
 	}
 
 	baseURL := baseURLFromRequest(r)
-
-	resp := reconstructionResponseV1{
-		FetchInfo: make(map[string][]fetchInfoEntry),
+	resp, err := reconwire.BuildV1(entries, rangeStart, rangeEnd, s.lookupXorbFooter, s.xorbFetchURLFor(r.Context(), baseURL))
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-
-	var fileOffset int64
-	firstTerm := true
-	for _, e := range entries {
-		termStart := fileOffset
-		termEnd := fileOffset + int64(e.UnpackedSegmentBytes) // exclusive
-		fileOffset = termEnd
-
-		// Skip terms entirely outside the requested window.
-		if termEnd <= rangeStart || termStart > rangeEnd {
-			continue
-		}
-		if firstTerm {
-			resp.OffsetIntoFirstRange = rangeStart - termStart
-			firstTerm = false
-		}
-
-		_, physStart, physEnd, ok := s.xorbFooterAndPhysicalRange(e)
-		if !ok {
-			httpError(w, fmt.Sprintf("reconstruction references unknown xorb %s", e.XorbHash.Hex()), http.StatusInternalServerError)
-			return
-		}
-
-		resp.Terms = append(resp.Terms, reconstructionTerm{
-			Hash:           e.XorbHash.Hex(),
-			Range:          indexRange{Start: e.ChunkIndexStart, End: e.ChunkIndexEnd},
-			UnpackedLength: e.UnpackedSegmentBytes,
-		})
-
-		fetchURL, err := s.xorbFetchURL(r.Context(), e.XorbHash, baseURL)
-		if err != nil {
-			httpError(w, "build fetch URL: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		resp.FetchInfo[e.XorbHash.Hex()] = append(resp.FetchInfo[e.XorbHash.Hex()], fetchInfoEntry{
-			URL:      fetchURL,
-			URLRange: byteRange{Start: physStart, End: physEnd - 1},
-			Range:    indexRange{Start: e.ChunkIndexStart, End: e.ChunkIndexEnd},
-		})
-	}
-
 	writeJSON(w, resp)
-}
-
-// xorbFooterAndPhysicalRange looks up e.XorbHash's footer, bumps its
-// last-access time (see the comment on the call site this replaces for
-// why), and computes the physical (compressed+header) byte range e's
-// chunk-index range occupies within that xorb — logic shared by both V1
-// and V2 reconstruction, since both need the same physical byte range per
-// term, just packaged into differently-shaped responses.
-func (s *Server) xorbFooterAndPhysicalRange(e shardformat.FileDataSequenceEntry) (footer xorbformat.FooterV1, physStart, physEnd int64, ok bool) {
-	s.xorbMu.RLock()
-	f, known := s.xorbFooters[e.XorbHash]
-	s.xorbMu.RUnlock()
-	if !known {
-		return xorbformat.FooterV1{}, 0, 0, false
-	}
-	// A client requesting reconstruction is about to fetch this xorb —
-	// either from our own byte-serving endpoint (which also bumps this on
-	// the actual fetch) or from a presigned URL, which we'd otherwise
-	// never observe at all. Bumping here means eviction sees "about to be
-	// needed" even in the presigned-URL case.
-	s.xorbMu.Lock()
-	s.xorbLastAccess[e.XorbHash] = time.Now()
-	s.xorbMu.Unlock()
-
-	physStart = 0
-	if e.ChunkIndexStart > 0 {
-		physStart = int64(f.ChunkBoundaryOffsets[e.ChunkIndexStart-1])
-	}
-	physEnd = int64(f.ChunkBoundaryOffsets[e.ChunkIndexEnd-1])
-	return f, physStart, physEnd, true
-}
-
-// xorbFetchURL returns a presigned URL if the storage backend supports it
-// (storage.URLPresigner — e.g. S3/MinIO), otherwise a URL pointing back at
-// this server's own byte-serving endpoint.
-func (s *Server) xorbFetchURL(ctx context.Context, xorbHash merklehash.Hash, baseURL string) (string, error) {
-	if presigner, ok := s.xorbs.(storage.URLPresigner); ok {
-		return presigner.PresignGet(ctx, xorbHash.Hex(), 3600)
-	}
-	return fmt.Sprintf("%s/v1/xorbs/%s/%s", baseURL, xorbPrefix, xorbHash.Hex()), nil
-}
-
-func baseURLFromRequest(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return fmt.Sprintf("%s://%s", scheme, r.Host)
 }
 
 // handleReconstructionV2 implements GET /v2/reconstructions/{file_id}: the
@@ -205,72 +149,61 @@ func (s *Server) handleReconstructionV2(w http.ResponseWriter, r *http.Request) 
 	}
 
 	baseURL := baseURLFromRequest(r)
-
-	resp := reconstructionResponseV2{
-		Xorbs: make(map[string][]xorbMultiRangeFetch),
+	resp, err := reconwire.BuildV2(entries, rangeStart, rangeEnd, s.lookupXorbFooter, s.xorbFetchURLFor(r.Context(), baseURL))
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	// One fetch URL per xorb hash, reused across every term that touches
-	// it — computed lazily on first sight of each hash rather than
-	// upfront, since most files only ever touch a handful of xorbs.
-	fetchURLByXorb := make(map[string]string)
-
-	var fileOffset int64
-	firstTerm := true
-	for _, e := range entries {
-		termStart := fileOffset
-		termEnd := fileOffset + int64(e.UnpackedSegmentBytes) // exclusive
-		fileOffset = termEnd
-
-		if termEnd <= rangeStart || termStart > rangeEnd {
-			continue
-		}
-		if firstTerm {
-			resp.OffsetIntoFirstRange = rangeStart - termStart
-			firstTerm = false
-		}
-
-		_, physStart, physEnd, ok := s.xorbFooterAndPhysicalRange(e)
-		if !ok {
-			httpError(w, fmt.Sprintf("reconstruction references unknown xorb %s", e.XorbHash.Hex()), http.StatusInternalServerError)
-			return
-		}
-
-		resp.Terms = append(resp.Terms, reconstructionTerm{
-			Hash:           e.XorbHash.Hex(),
-			Range:          indexRange{Start: e.ChunkIndexStart, End: e.ChunkIndexEnd},
-			UnpackedLength: e.UnpackedSegmentBytes,
-		})
-
-		xorbHex := e.XorbHash.Hex()
-		fetchURL, cached := fetchURLByXorb[xorbHex]
-		if !cached {
-			fetchURL, err = s.xorbFetchURL(r.Context(), e.XorbHash, baseURL)
-			if err != nil {
-				httpError(w, "build fetch URL: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			fetchURLByXorb[xorbHex] = fetchURL
-		}
-
-		descriptor := xorbRangeDescriptor{
-			Chunks: indexRange{Start: e.ChunkIndexStart, End: e.ChunkIndexEnd},
-			Bytes:  byteRange{Start: physStart, End: physEnd - 1},
-		}
-
-		fetches := resp.Xorbs[xorbHex]
-		if len(fetches) == 0 || fetches[0].URL != fetchURL {
-			// Either the first range seen for this xorb, or (shouldn't
-			// happen in practice, since fetchURLByXorb caches one URL per
-			// xorb per response) a different URL than what's already
-			// there — start a new XorbMultiRangeFetch entry.
-			resp.Xorbs[xorbHex] = append(fetches, xorbMultiRangeFetch{URL: fetchURL, Ranges: []xorbRangeDescriptor{descriptor}})
-		} else {
-			fetches[0].Ranges = append(fetches[0].Ranges, descriptor)
-			resp.Xorbs[xorbHex] = fetches
-		}
-	}
-
 	writeJSON(w, resp)
+}
+
+// lookupXorbFooter is reconwire.FooterLookup's implementation against
+// this server's own xorbFooters index — also bumps xorbLastAccess (see
+// the comment on the logic this replaces for why): a client requesting
+// reconstruction is about to fetch this xorb, either from our own
+// byte-serving endpoint (which also bumps this on the actual fetch) or
+// from a presigned URL, which we'd otherwise never observe at all.
+// Bumping here means eviction sees "about to be needed" even in the
+// presigned-URL case.
+func (s *Server) lookupXorbFooter(hash merklehash.Hash) (xorbformat.FooterV1, bool) {
+	s.xorbMu.RLock()
+	f, known := s.xorbFooters[hash]
+	s.xorbMu.RUnlock()
+	if !known {
+		return xorbformat.FooterV1{}, false
+	}
+	s.xorbMu.Lock()
+	s.xorbLastAccess[hash] = time.Now()
+	s.xorbMu.Unlock()
+	return f, true
+}
+
+// xorbFetchURLFor returns a reconwire.FetchURLBuilder bound to ctx and
+// baseURL — reconwire's function-typed callback signature takes no
+// context/baseURL of its own (those are HTTP-request-scoped, not part of
+// the pure clipping logic reconwire implements).
+func (s *Server) xorbFetchURLFor(ctx context.Context, baseURL string) reconwire.FetchURLBuilder {
+	return func(hash merklehash.Hash) (string, error) {
+		return s.xorbFetchURL(ctx, hash, baseURL)
+	}
+}
+
+// xorbFetchURL returns a presigned URL if the storage backend supports it
+// (storage.URLPresigner — e.g. S3/MinIO), otherwise a URL pointing back at
+// this server's own byte-serving endpoint.
+func (s *Server) xorbFetchURL(ctx context.Context, xorbHash merklehash.Hash, baseURL string) (string, error) {
+	if presigner, ok := s.xorbs.(storage.URLPresigner); ok {
+		return presigner.PresignGet(ctx, xorbHash.Hex(), 3600)
+	}
+	return fmt.Sprintf("%s/v1/xorbs/%s/%s", baseURL, xorbPrefix, xorbHash.Hex()), nil
+}
+
+func baseURLFromRequest(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s", scheme, r.Host)
 }
 
 // handleChunkDedup implements GET /v1/chunks/{prefix}/{hash}: the real

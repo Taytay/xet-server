@@ -75,6 +75,19 @@ const (
     ReconstructionsPathV2 is the V2 counterpart of ReconstructionsPath.
 
 
+VARIABLES
+
+var ErrMalformedXorb = errors.New("casserver: malformed xorb")
+    ErrMalformedXorb is returned (wrapped) by IngestXorb when r's bytes don't
+    parse as a valid chunk stream (see xorbformat.DeriveFooter) — maps to a 400
+    at handleUploadXorb's HTTP boundary.
+
+var ErrXorbHashMismatch = errors.New("casserver: xorb hash in URL does not match hash computed from chunk contents")
+    ErrXorbHashMismatch is returned (wrapped) by IngestXorb when claimedHash
+    doesn't match the hash independently computed from r's chunk contents — maps
+    to a 400 at handleUploadXorb's HTTP boundary.
+
+
 TYPES
 
 type Server struct {
@@ -117,6 +130,70 @@ func (s *Server) ForgetKey(key string)
     uploaded — a client that still needs it must re-upload (real Xet clients
     already handle a missing xorb by re-deriving it from the source file,
     since CAS storage is explicitly not guaranteed permanent).
+
+func (s *Server) HasFileRecon(fileID merklehash.Hash) bool
+    HasFileRecon reports whether this server already has a complete
+    reconstruction on file for fileID — a caller embedding this Server uses this
+    to decide whether a reconstruction request can be served entirely from local
+    state or needs an upstream fetch (+ IngestFileRecon) first.
+
+func (s *Server) HasXorbBytes(ctx context.Context, hash merklehash.Hash) (bool, error)
+    HasXorbBytes reports whether hash's raw bytes are present in this server's
+    storage backend — distinct from HasXorbFooter (footer/size indexing and
+    blob storage are updated together by IngestXorb/ handleUploadXorb, but a
+    caller embedding this Server may want to confirm both independently, e.g.
+    after a restart with a stale index).
+
+func (s *Server) HasXorbFooter(hash merklehash.Hash) bool
+    HasXorbFooter reports whether this server has a footer indexed for hash —
+    a caller embedding this Server (see IngestXorb's doc comment) uses this to
+    decide whether a reconstruction it's about to serve can be built entirely
+    from local state, or needs to fetch/ingest the xorb first.
+
+func (s *Server) IngestFileRecon(fileID merklehash.Hash, entries []shardformat.FileDataSequenceEntry)
+    IngestFileRecon records fileID's complete reconstruction entries as if a
+    shard had described it — for a caller embedding this Server as a caching
+    layer (e.g. internal/proxycas) that learned a file's reconstruction from
+    an upstream CAS response rather than from a real shard upload. entries
+    must be the file's COMPLETE ordered term list (not a byte-range-clipped
+    subset — see internal/proxycas's own handleReconstruction doc comment for
+    why a Range-limited upstream response can never safely populate this):
+    reconstructionWindow and every downstream reader assumes fileRecon[fileID]
+    represents the whole file, and a caller that violates that would silently
+    truncate every future request for it.
+
+func (s *Server) IngestShard(body []byte) error
+    IngestShard parses body as a serialized shard and merges its
+    file-reconstruction entries into this server's in-memory fileRecon index
+    (keyed by file hash), and indexes every chunk hash referenced by the shard's
+    xorb-info section against body itself, backing the global chunk-dedup lookup
+    (GET /v1/chunks/{prefix}/{hash} — see handleChunkDedup): the real wire
+    contract for that endpoint is "return the shard bytes that reference this
+    chunk," which a real client parses itself to discover chunks it can dedup
+    against without re-uploading — see docs/PROTOCOL.md's global-dedup section
+    for the full story of how this was confirmed against xet-core's own client
+    source.
+
+    Exported so a caller embedding this Server as a caching layer (e.g.
+    internal/proxyhub or internal/proxycas, relaying a real client's shard
+    upload write-through to a real upstream CAS and wanting this server to
+    also reflect it immediately) can feed it shard bytes through the identical
+    parsing/indexing path handleUploadShard uses.
+
+func (s *Server) IngestXorb(ctx context.Context, claimedHash merklehash.Hash, r io.Reader) (written bool, err error)
+    IngestXorb validates, stores, and indexes a xorb's raw chunk-stream bytes
+    (read from r, with no footer — see handleUploadXorb's doc comment on why:
+    real hf_xet clients never send one) under claimedHash, exactly as a real
+    client's upload would. Returns written=true if this was a new xorb (false if
+    claimedHash was already present — Put's normal dedup semantics).
+
+    Exported so a caller embedding this Server as a caching layer (e.g.
+    internal/proxycas, wrapping this server instead of reimplementing its
+    upload-validation/indexing logic independently) can feed it xorb bytes
+    fetched from elsewhere — an upstream CAS response, not an HTTP request
+    body — through the identical validation and storage path a real upload goes
+    through, so anything this method accepts is guaranteed servable afterward
+    the same way a directly-uploaded xorb is.
 
 func (s *Server) LoadSnapshot(path string) error
     LoadSnapshot reads a snapshot previously written by Snapshot and restores

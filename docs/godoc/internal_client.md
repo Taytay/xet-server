@@ -21,9 +21,6 @@ type Client struct {
 
 func New(baseURL string) *Client
 
-func (c *Client) Manifest(fileID string) (*manifest.Manifest, error)
-    Manifest fetches the reconstruction manifest for fileID.
-
 func (c *Client) Pull(fileID, localPath string) error
     Pull downloads fileID and writes it to localPath.
 

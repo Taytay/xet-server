@@ -12,6 +12,10 @@
 #                       need to start their OWN xetd instance with different
 #                       flags, e.g. -auth-token, rather than using the
 #                       shared no-auth instance at $XETD_URL/$HUB_URL)
+#   $XET_PROXYD      - path to the built xet-proxyd binary (for tests that
+#                       start their own xet-proxyd instance, e.g. the
+#                       offline-handoff test — proves a plain xetd can
+#                       read a proxy's cache directory directly)
 #   $XETD_URL        - base URL of the running xetd CAS server
 #   $HUB_URL         - base URL of the running xetd Hub API shim
 #   $WORKDIR         - a fresh scratch directory, unique to this test
@@ -35,10 +39,11 @@ set -u
 
 XETD_BIN="${1:-bin/xetd}"
 XET_BIN="${2:-bin/xet}"
-TARGET="${3:-integration-tests}"
+XET_PROXYD_BIN="${3:-bin/xet-proxyd}"
+TARGET="${4:-integration-tests}"
 
-if [[ -z "$XETD_BIN" || -z "$XET_BIN" ]]; then
-    echo "Usage: $0 <xetd-binary> <xet-binary> [test-dir-or-file]" >&2
+if [[ -z "$XETD_BIN" || -z "$XET_BIN" || -z "$XET_PROXYD_BIN" ]]; then
+    echo "Usage: $0 <xetd-binary> <xet-binary> <xet-proxyd-binary> [test-dir-or-file]" >&2
     exit 1
 fi
 
@@ -50,9 +55,14 @@ if [[ ! -x "$XET_BIN" ]]; then
     echo "ERROR: xet binary not found or not executable: $XET_BIN" >&2
     exit 1
 fi
+if [[ ! -x "$XET_PROXYD_BIN" ]]; then
+    echo "ERROR: xet-proxyd binary not found or not executable: $XET_PROXYD_BIN" >&2
+    exit 1
+fi
 
 XETD_BIN="$(cd "$(dirname "$XETD_BIN")" && pwd)/$(basename "$XETD_BIN")"
 XET_BIN="$(cd "$(dirname "$XET_BIN")" && pwd)/$(basename "$XET_BIN")"
+XET_PROXYD_BIN="$(cd "$(dirname "$XET_PROXYD_BIN")" && pwd)/$(basename "$XET_PROXYD_BIN")"
 
 # ---- colors -----------------------------------------------------------------
 
@@ -131,6 +141,7 @@ logInfo "xetd is ready (pid $SERVER_PID)"
 
 export XET="$XET_BIN"
 export XETD="$XETD_BIN"
+export XET_PROXYD="$XET_PROXYD_BIN"
 export XETD_URL
 export HUB_URL
 export PYTHON_VERSION="${PYTHON_VERSION:-3}"

@@ -5,6 +5,224 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-11
+
+The big one: `xet-proxyd`, a caching pull-through proxy in front of the
+**real** huggingface.co — not primarily a performance cache, but an
+offline-resilience layer. Point it at the real Hub, use it like any other
+`HF_ENDPOINT`, and every repo/file it has successfully relayed once stays
+servable via `hf download`/`hf upload` even after huggingface.co becomes
+unreachable — including handing its cache directory to a plain `xetd` as
+a permanent, disconnected replacement, with zero conversion step. Built
+by embedding the exact same `casserver.Server`/`hubserver.Server` engines
+`xetd` already runs, rather than a second, separately-maintained caching
+implementation. Also: rate limiting and bounded timeouts across the whole
+client/server stack, chaos tests for slow/hanging upstream behavior, a
+manual lint pass (this sandbox's `staticcheck`/`golangci-lint` are both
+broken against the pinned Go toolchain) that found and fixed several real
+bugs, and a full documentation pass covering all of the above.
+
+### Added
+- **`cmd/xet-proxyd`**: the caching pull-through proxy binary, two ports
+  mirroring `xetd`'s own `-addr`/`-hub-addr` split. `-upstream-hub-url`
+  (falling back to `$HF_URL`, then the real huggingface.co) is the only
+  new required concept; every other flag name/default matches `xetd`'s
+  own where the same idea applies (`-data`, `-auth-token`,
+  `-snapshot-interval`, `-rate-limit-rps`/`-rate-limit-burst`). New
+  proxy-specific flags: `-no-cache` (pure-relay escape hatch, disabling
+  all local caching and offline fallback), `-cache-ttl` (how long cached
+  Hub metadata is served before attempting a live refresh; `-1` default
+  means "always try live first"), `-metadata-call-timeout` (bounds a
+  single repo-info/resolve/xet-token upstream call so a slow-but-not-dead
+  real Hub doesn't hold up the fallback-to-cache path longer than
+  necessary — never applied to tree listing, which pages internally
+  within one call). `-addr`/`-hub-addr`/`-data` share `xetd`'s defaults,
+  since this proxy is meant to be a drop-in alternative for the same two
+  ports.
+- **`internal/proxycas`/`internal/proxyhub`**: thin wrappers embedding a
+  real `casserver.Server`/`hubserver.Server` as their serving engine.
+  Each request either delegates straight to the embedded server (if it
+  already has what's needed — checked via new `Has*` methods), or
+  fetches from upstream via `internal/hfclient` and feeds the result into
+  the embedded server via new `Ingest*` methods (`IngestXorb`,
+  `IngestShard`, `IngestFileRecon`, `IngestRepoInfo`, `IngestFile`,
+  `IngestCommit`) before delegating. **Any upstream failure — network
+  error, timeout, 5xx — falls back to whatever's already cached, no
+  matter how old** — this fallback rule is the whole reason the proxy
+  exists; no separate retry-with-backoff logic was added on top of it,
+  since it already reaches the correct outcome (a working `hf download`)
+  as fast as possible. Writes (commit, preupload, repo/branch creation)
+  are always relayed live with no fallback — only the real Hub can
+  accept a real commit.
+- **`internal/hfclient`**: the upstream HTTP client `xet-proxyd` uses to
+  talk to the real Hub API (`Client`) and real Xet CAS (`CASClient`,
+  whose base URL is discovered per-repo from a Hub xet-token response,
+  never configured directly — matching how a real `hf_xet` client itself
+  discovers it). Every call forwards the caller's own bearer token
+  upstream completely unchanged (pure credential passthrough — this
+  package never holds a secret of its own). `defaultHTTPClient` bounds
+  connect/TLS-handshake/response-header latency (10s each) without a
+  blanket request timeout, so a hung real huggingface.co fails fast
+  without aborting a legitimately large, slow-but-progressing xorb
+  transfer.
+- **`internal/reconwire`**: the reconstruction wire types
+  (`ResponseV1`/`ResponseV2`/`Term`/etc.) and response-building logic
+  (`BuildV1`/`BuildV2`) extracted out of `casserver`, so this
+  clipping/grouping logic has one independently-tested, fuzzed home
+  rather than living only inline in `casserver`'s handlers. Bounds-checks
+  every chunk-index field before indexing a footer's slices (a real,
+  previously-reachable panic once untrusted upstream data — via
+  `proxycas`'s ingest path — could reach it with an out-of-range index),
+  returning a new `ErrChunkIndexOutOfRange` instead. Verified with a new
+  fuzz target, `FuzzBuildV1_NeverPanics`.
+- **Rate limiting on `xet-proxyd`, gating every route on both ports** —
+  `-rate-limit-rps`/`-rate-limit-burst`, one `ratelimit.Limiter` shared
+  across both ports so a client can't double its effective budget by
+  splitting requests across them. Broader in scope than `xetd`'s own
+  upload-only `-rate-limit-rps`: for a caching proxy, a cache-missing
+  read costs a real outbound call to huggingface.co just as much as a
+  write does. `internal/ratelimit.Limiter` also gained automatic pruning
+  of fully-refilled-and-idle buckets (`pruneEvery`), so a long-running
+  proxy fielding traffic from many distinct source IPs doesn't retain a
+  bucket per IP forever.
+- **Bounded execution under load across the whole stack**: HTTP servers
+  (`xetd`, `xet-proxyd`) gained `ReadHeaderTimeout`/`IdleTimeout`; every
+  HTTP client (`hfclient`, `internal/client`, `s3store`) gained a shared
+  `defaultHTTPClient` with bounded connect/TLS-handshake/response-header
+  phases but no blanket request timeout (so a legitimately large,
+  slow-but-progressing transfer is never aborted early); `xet-proxyd`
+  gained `-metadata-call-timeout` for single-shot Hub metadata calls; a
+  real A→B→C consistency bug was fixed — both binaries previously only
+  ever gracefully shut down their CAS-facing `http.Server`, leaving the
+  Hub-facing one (when `-hub-addr` was set) killed abruptly with no
+  connection draining, and `xet-proxyd`'s own shutdown timeout was too
+  short to exceed what an in-flight handler blocked on a real slow
+  upstream call could still legitimately be doing (raised from 10s to
+  60s, with a comment explaining why `xetd`'s 10s remains correct for
+  itself — its handlers only ever touch local storage).
+- **Chaos tests for slow/hanging upstream behavior**
+  (`internal/proxycas/chaos_test.go`, `internal/proxyhub/chaos_test.go`,
+  `internal/hfclient/timeout_test.go`, `internal/proxyhub/timeout_test.go`):
+  a fully-hung-before-headers upstream, a connected-but-frozen mid-body
+  response, a connection reset mid-transfer, thundering-herd concurrent
+  requests on a cold cache key, and — for `proxyhub` specifically — an
+  upstream that's healthy for the first call and then dies, proving
+  every subsequent request for the same resource still succeeds from
+  cache rather than re-failing outright.
+- **Landing pages + `/api-docs/` Swagger UI on `xet-proxyd`**
+  (`landingpage.ProxyCASHandler`/`ProxyHubHandler`) — previously missing
+  entirely; both ports now match `xetd`'s own "Xet Server"/"Xet Server —
+  Hub API shim" title convention ("Xet Proxy Server"/"Xet Proxy Server —
+  Hub API shim").
+- **`integration-tests/xet_proxyd_offline_handoff.sh`**: the strongest
+  proof this project has that `xet-proxyd` actually does what it claims.
+  Drives the real `hf` CLI through a running proxy (relaying to a second,
+  local `xetd` standing in for the real Hub, so this needs no network
+  access) for an upload+download round-trip, gracefully shuts the proxy
+  down, tears down its upstream entirely, starts a fresh plain `xetd`
+  pointed at the proxy's own `-data` directory, and downloads the same
+  file again with nothing else running — byte-identical. Wired into
+  `integrationTests.sh` (now takes the built `xet-proxyd` binary as a
+  required third positional argument, exported to test scripts as
+  `$XET_PROXYD`) and `make integration-test`.
+- **`docs/FAQ.md`**: why Xet's chunking/dedup model exists instead of
+  plain S3/HTTP hosting, why this project exists, why `xet-proxyd`
+  exists, and other questions worth answering once. Linked from the main
+  README's Documentation section.
+- **`docs/MIRRORING.md` §9** and a new "Caching pull-through proxy"
+  section (with its own architecture diagram) in the main README and
+  `docs/ARCHITECTURE.md`, covering `xet-proxyd` end-to-end: the offline-
+  handoff story, the CAS-facing port's Hub-relay bootstrap requirement,
+  and every new flag.
+- **Acknowledgments** section in the main README (merged into the former
+  "Related Projects" section), crediting xet-core/Hugging Face, zig-xet,
+  `zeebo/blake3`, swagger-ui, and the Go tooling `scripts/build_docs.go`
+  depends on.
+
+### Fixed
+- **A missing `shouldIgnore` field silently dropped on relay** —
+  `hfclient.PreuploadResult` only had `Path`/`UploadMode`, so decoding a
+  real Hub preupload response and re-serializing it through
+  `proxyhub.handlePreupload` dropped `shouldIgnore` (and `oid`) entirely.
+  Harmless against this project's own `hubserver` (which always sends
+  `false`/omits `oid`), but crashed the **real** `hf` CLI with a
+  `KeyError` the moment a real preupload response was relayed through
+  the proxy — `huggingface_hub`'s `_fetch_upload_modes` reads
+  `file["shouldIgnore"]` unconditionally, with no default. Found by
+  `integration-tests/xet_proxyd_offline_handoff.sh` actually driving the
+  real `hf` CLI through the proxy, not by any unit test — the existing
+  `hfclient`/`proxyhub` preupload tests never asserted the field
+  round-tripped at all. Fixed, and both a unit test
+  (`TestPreupload_SendsFilesAndParsesResult`) and a dedicated regression
+  test (`TestPreupload_RelaysShouldIgnoreFieldToRealHfClient`) now pin it.
+- **`xet-proxyd`'s snapshot filenames didn't match `xetd`'s** —
+  `proxycas-snapshot.json`/`proxyhub-snapshot.json` vs. `xetd`'s
+  `casserver-snapshot.json`/`hubserver-snapshot.json`. Since
+  `casSrv.Embedded`/`hubSrv.Embedded` are real `*casserver.Server`/
+  `*hubserver.Server` instances producing the identical snapshot format
+  either binary's own `Load`/`Snapshot` methods read and write, this
+  silently defeated the entire "hand this proxy's `-data` directory to a
+  plain `xetd`" design the program exists for — a plain `xetd` pointed at
+  a proxy's data directory would find no snapshot at all and start with
+  zero cached Hub metadata. Also: `xet-proxyd` was never snapshotting its
+  Hub-facing cache at all (only the CAS-facing one), so even a same-binary
+  restart would lose every cached repo/revision/file/resolve/xet-token
+  entry. Both fixed together (filenames aligned, both servers now
+  snapshotted on the same interval and on shutdown) — this is exactly
+  what `xet_proxyd_offline_handoff.sh` above was written to catch, and it
+  did, on its first real run.
+- **`-no-cache` broke `xet-proxyd`'s CAS port permanently** —
+  `proxyhub.handleXetToken` only recorded the real upstream CAS base URL
+  (`casURLCache`) when `!s.NoCache`, but `UpstreamCASBaseURL()` (which the
+  CAS-facing proxy needs for every single request) has nothing to do with
+  per-response caching — it's routing state, learned once and needed
+  forever after. Under `-no-cache`, this left the CAS-facing proxy
+  permanently 503ing, contradicting `-no-cache`'s own documented behavior
+  ("every request is relayed live"). Fixed: the CAS URL is now recorded
+  unconditionally.
+- **Two real correctness bugs found via a manual line-by-line review**
+  (this sandbox's `staticcheck`/`golangci-lint` are both broken against
+  the pinned Go 1.27.1 toolchain, so a background-agent-driven manual
+  pass substituted for them): a ranged xorb fetch
+  (`casserver.handleFetchXorb`) set `Content-Type`/`Content-Length`
+  *after* calling `WriteHeader` for the `206` case, silently dropping
+  `Content-Length` from every ranged response (Go snapshots headers at
+  `WriteHeader` time); and `HEAD /v1/xorbs/{prefix}/{hash}` (both
+  `casserver.handleHeadXorb` and `proxycas.handleHeadXorb`) skipped the
+  prefix-validation check the sibling `GET` handler already enforced,
+  letting a mismatched-prefix `HEAD` trigger a real upstream fetch+cache
+  write it should have rejected with `400`. Both fixed with regression
+  tests.
+- **`proxycas.writeFetchError` collapsed every non-404 upstream failure
+  to a blanket `502`**, including a `401`/`403` (the caller's own
+  credential rejected by the real upstream) — inconsistent with
+  `proxyhub.writeUpstreamError`'s identical-in-spirit policy of relaying
+  the real upstream status for the same class of failure. Now relays any
+  4xx as-is, reserving `502` for actual network/5xx faults.
+- **An unbounded `io.ReadAll` on `proxycas.handleUploadXorb`'s request
+  body** — unlike its sibling `handleUploadShard` (already capped via
+  `http.MaxBytesReader`) and `casserver`'s own upload handler, a hostile
+  client could force unbounded heap growth. Now capped at the same
+  128 MiB `casserver` itself uses.
+
+### Notes
+- **Manual lint pass**: beyond the two fixes above, this pass also
+  removed several genuinely dead code paths (`client.Client.Manifest`,
+  `hubserver`'s unused `xetTokenType` parameter, `proxycas`'s unused
+  `V1`/`V2` re-exports), fixed multiple stale doc comments describing a
+  pre-refactor design, added logging to `proxycas`/`proxyhub` (previously
+  silent on every 4xx/5xx, unlike every other server package in this
+  project), and extracted a shared clipping loop out of
+  `reconwire.BuildV1`/`BuildV2`'s near-duplicate bodies. See
+  `internal/proxycas`, `internal/proxyhub`, `internal/hubserver`,
+  `internal/client`, `internal/reconwire`, `internal/ratelimit` for the
+  full diffs.
+- **`GO_VERSION` in the `Makefile` was stale** (`1.21`, when `go.mod`
+  requires `1.27.1` and has for several releases) — corrected to `1.27`;
+  README's Prerequisites updated to match.
+- **`make run-proxy`** added, mirroring `make run`'s convenience for
+  `xetd`.
+
 ## [0.8.0] - 2026-09-08
 
 Closes this project's one remaining deliberately-deferred gap from v0.7.0:

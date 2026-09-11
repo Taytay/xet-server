@@ -1,9 +1,15 @@
 // Package ratelimit implements a hand-rolled per-source-IP token-bucket
-// rate limiter, used to blunt a single client hammering the expensive
-// upload endpoints (chunk decompression + hashing) without needing a new
-// dependency — a token bucket is simple enough to write directly and
-// keeps the rest of this project's zero-external-dependency posture for
-// the main module.
+// rate limiter, used to blunt a single client hammering an expensive
+// endpoint without needing a new dependency — a token bucket is simple
+// enough to write directly and keeps the rest of this project's
+// zero-external-dependency posture for the main module.
+//
+// Scope varies by caller: casserver.Server.SetUploadRateLimiter gates
+// only its upload endpoints (uploads are the expensive local operation
+// there: chunk decompression + hashing), while proxycas.Server.
+// SetRateLimiter and proxyhub.Server.SetRateLimiter both gate EVERY
+// route — for a caching proxy, a read that misses cache costs a real
+// outbound call to the real upstream, not just a write.
 package ratelimit
 
 import (
@@ -34,7 +40,14 @@ type Limiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
 	now     func() time.Time // overridable for tests; defaults to time.Now
+	sinceGC int              // Allow calls since the last pruneStale sweep
 }
+
+// pruneEvery bounds how often Allow triggers a pruneStale sweep — a
+// fixed call count rather than a background goroutine/ticker, so an
+// idle Limiter (no calls at all) costs nothing, matching bucket's own
+// lazy-refill design.
+const pruneEvery = 1024
 
 // New creates a Limiter allowing burst requests immediately per source
 // IP, refilling at refillPerSecond tokens/second thereafter (fractional
@@ -57,6 +70,11 @@ func (l *Limiter) Allow(key string) bool {
 		b = &bucket{tokens: l.Burst, lastSeen: l.now()}
 		l.buckets[key] = b
 	}
+	l.sinceGC++
+	if l.sinceGC >= pruneEvery {
+		l.sinceGC = 0
+		l.pruneStale()
+	}
 	l.mu.Unlock()
 
 	b.mu.Lock()
@@ -74,6 +92,31 @@ func (l *Limiter) Allow(key string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// pruneStale removes every bucket that's been idle long enough to have
+// fully refilled (i.e. dropping it is behaviorally identical to keeping
+// it: the next Allow for that key just recreates it at full burst,
+// exactly what a fully-refilled bucket already holds) — without this, a
+// long-running process fielding traffic from many distinct source IPs
+// (e.g. cmd/xet-proxyd, an internet-facing proxy) would retain a bucket
+// per IP ever seen for its entire lifetime, an unbounded memory
+// footprint under exactly the kind of traffic this limiter exists to
+// blunt. Caller must hold l.mu.
+func (l *Limiter) pruneStale() {
+	if l.RefillPerSecond <= 0 {
+		return
+	}
+	fullRefill := time.Duration(l.Burst/l.RefillPerSecond*float64(time.Second)) + time.Second
+	cutoff := l.now().Add(-fullRefill)
+	for key, b := range l.buckets {
+		b.mu.Lock()
+		stale := b.lastSeen.Before(cutoff)
+		b.mu.Unlock()
+		if stale {
+			delete(l.buckets, key)
+		}
+	}
 }
 
 // RetryAfterSeconds estimates how many seconds until key's bucket has at
@@ -101,6 +144,21 @@ func (l *Limiter) RetryAfterSeconds(key string) int {
 	return int(seconds) + 1
 }
 
+// AllowRequest reports whether r's source IP may proceed right now
+// (consuming one token if so) — the same check Middleware applies
+// inline, exposed for a caller (proxyhub.Server.gate) that needs to gate
+// a request without wrapping it in an http.Handler.
+func (l *Limiter) AllowRequest(r *http.Request) bool {
+	return l.Allow(sourceIP(r))
+}
+
+// RetryAfterSecondsForRequest is RetryAfterSeconds keyed by r's own
+// source IP — see AllowRequest's doc comment for why this exists
+// alongside Middleware.
+func (l *Limiter) RetryAfterSecondsForRequest(r *http.Request) int {
+	return l.RetryAfterSeconds(sourceIP(r))
+}
+
 // Middleware wraps next so that requests exceeding the per-source-IP rate
 // get a 429 Too Many Requests with a Retry-After header instead of
 // reaching next. Rejections log at Debug, not Warn: a client retrying
@@ -109,9 +167,8 @@ func (l *Limiter) RetryAfterSeconds(key string) int {
 // convention used elsewhere in this codebase for client-caused responses).
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := sourceIP(r)
-		if !l.Allow(key) {
-			w.Header().Set("Retry-After", strconv.Itoa(l.RetryAfterSeconds(key)))
+		if !l.AllowRequest(r) {
+			w.Header().Set("Retry-After", strconv.Itoa(l.RetryAfterSecondsForRequest(r)))
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}

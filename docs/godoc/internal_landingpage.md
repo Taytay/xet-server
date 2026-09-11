@@ -30,4 +30,21 @@ func HubHandler() http.HandlerFunc
     CAS port, documenting both), so this page doesn't link to it directly —
     hubAddr's own OtherPortNote-equivalent isn't needed since the CAS port's
     landing page already cross-links here.
+
+func ProxyCASHandler(addr, hubAddr string) http.HandlerFunc
+    ProxyCASHandler serves the landing page for cmd/xet-proxyd's CAS-facing port
+    — CASHandler's counterpart for the proxy binary rather than xetd: same route
+    table shape (it embeds a real casserver.Server — see internal/proxycas's
+    package doc comment on why the endpoint list is identical), but the
+    subtitle/quick-start explain the caching/relay behavior instead of xetd's
+    "this is the only copy" framing. hubAddr is the proxy's Hub-facing port,
+    or "" if -hub-addr wasn't set.
+
+func ProxyHubHandler() http.HandlerFunc
+    ProxyHubHandler serves the landing page for cmd/xet-proxyd's Hub-facing
+    port — HubHandler's counterpart for the proxy binary. Same route table
+    as HubHandler (internal/proxyhub embeds a real hubserver.Server too),
+    but every route here can fall back to a live relay-and-cache against the
+    real huggingface.co, and every read falls back to whatever's already cached
+    on any upstream failure.
 ```

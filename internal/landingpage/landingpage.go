@@ -191,3 +191,69 @@ hf download myuser/my-model model.safetensors --local-dir ./downloaded`,
 	}
 	return serveRootOnly(data)
 }
+
+// ProxyCASHandler serves the landing page for cmd/xet-proxyd's CAS-facing
+// port — CASHandler's counterpart for the proxy binary rather than xetd:
+// same route table shape (it embeds a real casserver.Server — see
+// internal/proxycas's package doc comment on why the endpoint list is
+// identical), but the subtitle/quick-start explain the caching/relay
+// behavior instead of xetd's "this is the only copy" framing. hubAddr is
+// the proxy's Hub-facing port, or "" if -hub-addr wasn't set.
+func ProxyCASHandler(addr, hubAddr string) http.HandlerFunc {
+	note := ""
+	if hubAddr != "" {
+		note = fmt.Sprintf("A Hub-facing proxy is also running on %s, relaying to the real huggingface.co — open it directly for its own quick-start guide.", hubAddr)
+	}
+	data := pageData{
+		Title:    "Xet Proxy Server",
+		Subtitle: "A caching pull-through proxy for the real Xet CAS: relays to huggingface.co on a miss, serves from cache (or falls back to it on any upstream failure) otherwise.",
+		Endpoints: []endpoint{
+			{casserver.XorbsPath, "POST", "Relay a xorb upload upstream, then cache it locally too"},
+			{casserver.XorbsPath, "GET", "Serve a cached xorb, or fetch-and-cache from upstream on a miss"},
+			{casserver.ShardsPath, "POST", "Relay a shard upload upstream, then cache it locally too"},
+			{casserver.ReconstructionsPath, "GET", "Serve a cached reconstruction, or fetch-and-cache the whole file's from upstream on a miss"},
+			{casserver.ReconstructionsPathV2, "GET", "Same as above, multi-range-optimized response shape"},
+			{casserver.ChunksPath, "GET", "Always relayed live (no stable local cache key)"},
+			{"/api-docs/", "GET", "Interactive Swagger UI (same protocol as xetd's — see openapi.yaml)"},
+		},
+		QuickStart: fmt.Sprintf(`xet-proxyd -addr %s -hub-addr <hub-port> -data ./xet-proxy-data
+
+# point HF_ENDPOINT at the Hub-facing port (not this one) for the real hf CLI —
+# see the Hub-facing port's own landing page for that quick-start.`, addr),
+		OtherPortNote:   note,
+		ShowAPIDocsLink: true,
+	}
+	return serveRootOnly(data)
+}
+
+// ProxyHubHandler serves the landing page for cmd/xet-proxyd's Hub-facing
+// port — HubHandler's counterpart for the proxy binary. Same route table
+// as HubHandler (internal/proxyhub embeds a real hubserver.Server too),
+// but every route here can fall back to a live relay-and-cache against
+// the real huggingface.co, and every read falls back to whatever's
+// already cached on any upstream failure.
+func ProxyHubHandler() http.HandlerFunc {
+	data := pageData{
+		Title:    "Xet Proxy Server — Hub API shim",
+		Subtitle: "A caching pull-through proxy for the real huggingface.co Hub API — point HF_ENDPOINT here and the real `hf` CLI works, offline-resilient once something's been fetched once.",
+		Endpoints: []endpoint{
+			{"/api/repos/create", "POST", "Relay repo creation upstream, then mirror it into the local cache"},
+			{"/api/{repo_type}s/{repo_id}/revision/{revision}", "GET", "Serve cached repo info, or fetch-and-cache from upstream"},
+			{"/api/{repo_type}s/{repo_id}/tree/{revision}", "GET", "Serve a cached file listing, or fetch-and-cache from upstream"},
+			{"/api/{repo_type}s/{repo_id}/branch/{branch}", "POST", "Relay branch creation upstream, then mirror it into the local cache"},
+			{"/api/{repo_type}s/{repo_id}/xet-read-token/{revision}", "GET", "Relay for the real CAS endpoint/token (never served from cache alone)"},
+			{"/api/{repo_type}s/{repo_id}/xet-write-token/{revision}", "GET", "Same as above, write-scoped"},
+			{"/api/{repo_type}s/{repo_id}/commit/{revision}", "POST", "Relay a commit upstream, then mirror it into the local cache"},
+			{"/api/{repo_type}s/{repo_id}/preupload/{revision}", "POST", "Always relayed live (upload-mode negotiation)"},
+			{"/{repo_id}/resolve/{revision}/{filename}", "HEAD", "Serve cached file metadata, or fetch-and-cache from upstream"},
+		},
+		QuickStart: `export HF_ENDPOINT="http://<this-host>:<this-port>"
+export HF_TOKEN="anything"   # forwarded upstream unchanged — see README's Authentication section
+
+hf download someuser/some-model --local-dir ./downloaded
+# every repo/file this proxy has served once stays servable even after
+# huggingface.co becomes unreachable — see the main README's
+# "Caching pull-through proxy" section for the full offline-handoff story.`,
+	}
+	return serveRootOnly(data)
+}

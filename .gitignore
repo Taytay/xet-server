@@ -1,8 +1,9 @@
 # Binaries
 /bin/
+/scripts
 /xetd
+/xet-proxyd
 /xet
-/scripts/scripts
 *.exe
 *.exe~
 *.dll
@@ -51,6 +52,7 @@ temp/
 
 # Local server data (chunks + manifests) generated at runtime
 /xet-data/
+/xet-proxy-data/
 /xet-test-data/
 /test-data/
 

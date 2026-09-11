@@ -85,3 +85,74 @@ func TestHubHandler_NonRootPath404s(t *testing.T) {
 		t.Errorf("status = %d, want 404 for a non-root path", w.Code)
 	}
 }
+
+func TestProxyCASHandler_RendersExpectedContent(t *testing.T) {
+	h := ProxyCASHandler(":8420", ":8421")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"/v1/xorbs/{prefix}/{hash}", "/api-docs/", ":8421", "caching pull-through proxy"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing expected content %q", want)
+		}
+	}
+}
+
+func TestProxyCASHandler_OmitsHubNoteWhenHubAddrEmpty(t *testing.T) {
+	h := ProxyCASHandler(":8420", "")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h(w, req)
+
+	if strings.Contains(w.Body.String(), "Hub-facing proxy is also running") {
+		t.Error("body mentions a Hub-facing proxy even though hubAddr was empty")
+	}
+}
+
+func TestProxyCASHandler_NonRootPath404s(t *testing.T) {
+	h := ProxyCASHandler(":8420", "")
+	req := httptest.NewRequest(http.MethodGet, "/something-else", nil)
+	w := httptest.NewRecorder()
+	h(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for a non-root path", w.Code)
+	}
+}
+
+func TestProxyHubHandler_RendersExpectedContent(t *testing.T) {
+	h := ProxyHubHandler()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"/api/repos/create", "revision/{revision}", "tree/{revision}", "xet-read-token/{revision}", "HF_ENDPOINT", "resolve/{revision}/{filename}", "offline-resilient"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing expected content %q", want)
+		}
+	}
+	// Swagger UI isn't mounted on the Hub-facing proxy's own port, same as HubHandler.
+	if strings.Contains(body, "/api-docs/") {
+		t.Error("proxy Hub landing page links to /api-docs/, which isn't mounted on this port")
+	}
+}
+
+func TestProxyHubHandler_NonRootPath404s(t *testing.T) {
+	h := ProxyHubHandler()
+	req := httptest.NewRequest(http.MethodGet, "/alice/model/resolve/main/f.bin", nil)
+	w := httptest.NewRecorder()
+	h(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for a non-root path", w.Code)
+	}
+}

@@ -54,6 +54,7 @@ import (
 	"xet-server/internal/eviction"
 	"xet-server/internal/merklehash"
 	"xet-server/internal/ratelimit"
+	"xet-server/internal/reconwire"
 	"xet-server/internal/routing"
 	"xet-server/internal/shardformat"
 	"xet-server/internal/storage"
@@ -360,70 +361,14 @@ type uploadShardResponse struct {
 	Result int `json:"result"` // 0 = already exists, 1 = SyncPerformed
 }
 
-type indexRange struct {
-	Start uint32 `json:"start"`
-	End   uint32 `json:"end"`
-}
-
-type byteRange struct {
-	Start int64 `json:"start"`
-	End   int64 `json:"end"` // inclusive
-}
-
-type reconstructionTerm struct {
-	Hash           string     `json:"hash"`
-	Range          indexRange `json:"range"`
-	UnpackedLength uint32     `json:"unpacked_length"`
-}
-
-type fetchInfoEntry struct {
-	URL      string     `json:"url"`
-	URLRange byteRange  `json:"url_range"`
-	Range    indexRange `json:"range"`
-}
-
-type reconstructionResponseV1 struct {
-	OffsetIntoFirstRange int64                       `json:"offset_into_first_range"`
-	Terms                []reconstructionTerm        `json:"terms"`
-	FetchInfo            map[string][]fetchInfoEntry `json:"fetch_info"`
-}
-
-// xorbRangeDescriptor is one chunk-range/byte-range pair within a
-// XorbMultiRangeFetch — xet-core's XorbRangeDescriptor
-// (xet_client::cas_types::XorbRangeDescriptor). Chunks uses exclusive end
-// (matching indexRange elsewhere); Bytes uses inclusive end (matching
-// byteRange elsewhere) — same conventions as V1, just regrouped.
-type xorbRangeDescriptor struct {
-	Chunks indexRange `json:"chunks"`
-	Bytes  byteRange  `json:"bytes"`
-}
-
-// xorbMultiRangeFetch is a single signed/fetch URL covering possibly
-// multiple disjoint chunk ranges for one xorb — xet-core's
-// XorbMultiRangeFetch. Real xet-core may split a xorb's ranges across
-// several of these if the signed URL would otherwise exceed ~8 KiB; this
-// server always emits exactly one entry per xorb (its own byte-serving
-// URLs, and MinIO/S3 presigned URLs, are far short of that limit), which
-// is spec-valid (the client's parsing handles any number of entries per
-// xorb, from one up).
-type xorbMultiRangeFetch struct {
-	URL    string                `json:"url"`
-	Ranges []xorbRangeDescriptor `json:"ranges"`
-}
-
-// reconstructionResponseV2 mirrors xet-core's
-// QueryReconstructionResponseV2 (xet_client::cas_types): same Terms/
-// OffsetIntoFirstRange as V1, but Xorbs groups every chunk/byte range
-// touched for a given xorb hash under that hash's key, each range paired
-// with a fetch URL — the "multi-range" optimization the V2 endpoint
-// exists for (fewer signed URLs than V1's one-entry-per-term shape when a
-// file's reconstruction touches the same xorb across multiple
-// non-contiguous terms).
-type reconstructionResponseV2 struct {
-	OffsetIntoFirstRange int64                            `json:"offset_into_first_range"`
-	Terms                []reconstructionTerm             `json:"terms"`
-	Xorbs                map[string][]xorbMultiRangeFetch `json:"xorbs"`
-}
+// reconstructionResponseV1/V2 alias internal/reconwire's exported wire
+// types — the response-building logic itself now lives there (shared
+// with internal/proxycas), but this package's own tests decode these
+// same shapes to assert on this server's responses, so the aliases stay
+// as this package's own names rather than every test importing reconwire
+// directly for a type it only ever uses for decoding.
+type reconstructionResponseV1 = reconwire.ResponseV1
+type reconstructionResponseV2 = reconwire.ResponseV2
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

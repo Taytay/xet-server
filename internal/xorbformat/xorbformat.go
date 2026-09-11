@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 
+	"xet-server/internal/bg4"
+	"xet-server/internal/lz4"
 	"xet-server/internal/merklehash"
 )
 
@@ -101,6 +103,46 @@ type ChunkEntry struct {
 	DataOffset   int64 // HeaderOffset + ChunkHeaderSize
 }
 
+// DecompressChunkPayload returns the uncompressed bytes of one chunk's
+// payload per its declared compression scheme. Real hf_xet clients upload
+// xorbs without a footer (chunk metadata is reconstructed by the server
+// from the raw chunk stream — see casserver.IngestXorb), so this is
+// the only way to obtain a chunk's true content and independently verify
+// its claimed hash. Exported (rather than kept package-internal to
+// casserver) since it's a pure codec-dispatch function with no
+// casserver-specific state — a natural fit for this package alongside
+// the rest of the wire-format logic it already owns.
+func DecompressChunkPayload(scheme CompressionScheme, payload []byte, uncompressedLen uint32) ([]byte, error) {
+	switch scheme {
+	case CompressionNone:
+		if uint32(len(payload)) != uncompressedLen {
+			return nil, fmt.Errorf("uncompressed chunk length %d does not match header's uncompressed_length %d", len(payload), uncompressedLen)
+		}
+		return payload, nil
+	case CompressionLZ4:
+		decoded, err := lz4.DecompressFrame(payload)
+		if err != nil {
+			return nil, err
+		}
+		if uint32(len(decoded)) != uncompressedLen {
+			return nil, fmt.Errorf("LZ4-decoded chunk length %d does not match header's uncompressed_length %d", len(decoded), uncompressedLen)
+		}
+		return decoded, nil
+	case CompressionByteGrouping4LZ4:
+		decoded, err := lz4.DecompressFrame(payload)
+		if err != nil {
+			return nil, err
+		}
+		ungrouped := bg4.Reverse(decoded)
+		if uint32(len(ungrouped)) != uncompressedLen {
+			return nil, fmt.Errorf("BG4+LZ4-decoded chunk length %d does not match header's uncompressed_length %d", len(ungrouped), uncompressedLen)
+		}
+		return ungrouped, nil
+	default:
+		return nil, fmt.Errorf("unsupported compression scheme %d", scheme)
+	}
+}
+
 // ScanChunks reads consecutive chunk headers from r (which must be
 // positioned at the start of the chunk section), skipping over each
 // chunk's compressed payload via Seek, until it encounters the xorb
@@ -147,6 +189,66 @@ func ScanChunks(r io.ReadSeeker) ([]ChunkEntry, error) {
 		offset = next
 	}
 	return entries, nil
+}
+
+// DeriveFooter independently reconstructs a xorb's V1 footer and content
+// hash by scanning r's chunk headers (via ScanChunks) and decompressing
+// each chunk's payload (via DecompressChunkPayload) — the same
+// reconstruction real hf_xet clients rely on the server side to perform,
+// since a real upload never includes a footer at all ("XORBs are sent
+// without footer - the server/client reconstructs it from chunk data",
+// per xet-core's file_upload_session.rs).
+//
+// Used by casserver.IngestXorb to independently verify a freshly
+// -uploaded xorb's claimed hash against its actual chunk contents.
+//
+// r must implement io.ReaderAt in addition to io.ReadSeeker, to read each
+// chunk's payload independently of ScanChunks' own sequential Seek
+// position.
+func DeriveFooter(r interface {
+	io.ReadSeeker
+	io.ReaderAt
+}) (footer FooterV1, computedHash merklehash.Hash, err error) {
+	entries, err := ScanChunks(r)
+	if err != nil {
+		return FooterV1{}, merklehash.Hash{}, err
+	}
+	if len(entries) == 0 {
+		return FooterV1{}, merklehash.Hash{}, fmt.Errorf("no chunks found")
+	}
+
+	var chunkHashes []merklehash.Hash
+	var chunkEntries []merklehash.ChunkEntry
+	var boundaryOffsets, unpackedOffsets []uint32
+	for i, e := range entries {
+		payload := make([]byte, e.Header.CompressedLength)
+		if _, err := r.ReadAt(payload, e.DataOffset); err != nil {
+			return FooterV1{}, merklehash.Hash{}, fmt.Errorf("chunk %d: read payload: %w", i, err)
+		}
+		decoded, err := DecompressChunkPayload(e.Header.CompressionScheme, payload, e.Header.UncompressedLength)
+		if err != nil {
+			return FooterV1{}, merklehash.Hash{}, fmt.Errorf("chunk %d: %w", i, err)
+		}
+		h := merklehash.ComputeDataHash(decoded)
+		chunkHashes = append(chunkHashes, h)
+		chunkEntries = append(chunkEntries, merklehash.ChunkEntry{Hash: h, Size: uint64(len(decoded))})
+		boundaryOffsets = append(boundaryOffsets, uint32(e.DataOffset+int64(e.Header.CompressedLength)))
+		var unpacked uint32
+		if len(unpackedOffsets) > 0 {
+			unpacked = unpackedOffsets[len(unpackedOffsets)-1]
+		}
+		unpackedOffsets = append(unpackedOffsets, unpacked+e.Header.UncompressedLength)
+	}
+
+	computedHash = merklehash.XorbHash(chunkEntries)
+	footer = FooterV1{
+		XorbHash:             computedHash,
+		ChunkHashes:          chunkHashes,
+		ChunkBoundaryOffsets: boundaryOffsets,
+		UnpackedChunkOffsets: unpackedOffsets,
+		NumChunks:            uint32(len(entries)),
+	}
+	return footer, computedHash, nil
 }
 
 var xorbIdent = [7]byte{'X', 'E', 'T', 'B', 'L', 'O', 'B'}

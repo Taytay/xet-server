@@ -130,6 +130,14 @@ func main() {
 	var snapshotTargets []snapshotTarget
 	snapshotTargets = append(snapshotTargets, snapshotTarget{"casserver", casSnapshotPath, casSrv})
 
+	// servers accumulates every http.Server this process starts, so
+	// shutdown (below) can gracefully drain all of them, not just the
+	// CAS-facing one — a prior version of this binary only ever
+	// Shutdown()'d the CAS-facing server, leaving the Hub shim (if
+	// -hub-addr was set) killed abruptly on exit with no connection
+	// draining at all.
+	var servers []*http.Server
+
 	var hubSrv *hubserver.Server
 	if *hubAddr != "" {
 		resolvedCASURL := *casURL
@@ -145,9 +153,16 @@ func main() {
 		}
 		snapshotTargets = append(snapshotTargets, snapshotTarget{"hubserver", hubSnapshotPath, hubSrv})
 
+		hubHTTPServer := &http.Server{
+			Addr:              *hubAddr,
+			Handler:           logRequests(withLandingPage(hubSrv, landingpage.HubHandler())),
+			ReadHeaderTimeout: 30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		servers = append(servers, hubHTTPServer)
 		go func() {
 			slog.Info("xetd Hub API shim listening", "addr", *hubAddr, "casBaseURL", resolvedCASURL)
-			if err := http.ListenAndServe(*hubAddr, logRequests(withLandingPage(hubSrv, landingpage.HubHandler()))); err != nil {
+			if err := hubHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Fatal(err)
 			}
 		}()
@@ -158,7 +173,19 @@ func main() {
 	}
 
 	slog.Info("xetd listening", "addr", *addr, "dataDir", *dataDir, "apiDocsPath", "/api-docs/")
-	server := &http.Server{Addr: *addr, Handler: logRequests(mux)}
+	server := &http.Server{
+		Addr:    *addr,
+		Handler: logRequests(mux),
+		// ReadHeaderTimeout/IdleTimeout bound how long a slow or hostile
+		// client can hold a connection open before sending a complete
+		// request (Slowloris-class resource exhaustion) — deliberately
+		// no blanket ReadTimeout/WriteTimeout, since a legitimate xorb
+		// upload/download body can take longer than either without
+		// being unhealthy.
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	servers = append(servers, server)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
@@ -167,9 +194,16 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("shutting down: taking a final snapshot before exit")
+	// 10s is sufficient here (unlike cmd/xet-proxyd's 60s): every handler
+	// in this binary only ever touches local storage, never a slow real
+	// upstream with no overall request Timeout of its own.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	server.Shutdown(shutdownCtx)
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("server did not shut down cleanly within the timeout", "addr", srv.Addr, "error", err)
+		}
+	}
 	for _, target := range snapshotTargets {
 		if err := target.snapshotter.Snapshot(target.path); err != nil {
 			slog.Error("final snapshot failed", "server", target.name, "error", err)

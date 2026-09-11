@@ -1,6 +1,7 @@
 package casserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,8 +11,6 @@ import (
 	"strconv"
 	"time"
 
-	"xet-server/internal/bg4"
-	"xet-server/internal/lz4"
 	"xet-server/internal/merklehash"
 	"xet-server/internal/storage"
 	"xet-server/internal/xorbformat"
@@ -32,42 +31,6 @@ func httpError(w http.ResponseWriter, msg string, code int) {
 	http.Error(w, msg, code)
 }
 
-// decompressChunkPayload returns the uncompressed bytes of one chunk's
-// payload per its declared compression scheme. Real hf_xet clients upload
-// xorbs without a footer (chunk metadata is reconstructed by the server —
-// see the comment on handleUploadXorb), so this is the only way to obtain
-// a chunk's true content and independently verify its claimed hash.
-func decompressChunkPayload(scheme xorbformat.CompressionScheme, payload []byte, uncompressedLen uint32) ([]byte, error) {
-	switch scheme {
-	case xorbformat.CompressionNone:
-		if uint32(len(payload)) != uncompressedLen {
-			return nil, fmt.Errorf("uncompressed chunk length %d does not match header's uncompressed_length %d", len(payload), uncompressedLen)
-		}
-		return payload, nil
-	case xorbformat.CompressionLZ4:
-		decoded, err := lz4.DecompressFrame(payload)
-		if err != nil {
-			return nil, err
-		}
-		if uint32(len(decoded)) != uncompressedLen {
-			return nil, fmt.Errorf("LZ4-decoded chunk length %d does not match header's uncompressed_length %d", len(decoded), uncompressedLen)
-		}
-		return decoded, nil
-	case xorbformat.CompressionByteGrouping4LZ4:
-		decoded, err := lz4.DecompressFrame(payload)
-		if err != nil {
-			return nil, err
-		}
-		ungrouped := bg4.Reverse(decoded)
-		if uint32(len(ungrouped)) != uncompressedLen {
-			return nil, fmt.Errorf("BG4+LZ4-decoded chunk length %d does not match header's uncompressed_length %d", len(ungrouped), uncompressedLen)
-		}
-		return ungrouped, nil
-	default:
-		return nil, fmt.Errorf("unsupported compression scheme %d", scheme)
-	}
-}
-
 // maxXorbBytes caps a single xorb upload's body size. Real xet-core targets
 // ~64 MiB per xorb before cutting a new one (MAX_XORB_BYTES in
 // xet-core's constants), so this is generous headroom above what a
@@ -78,16 +41,10 @@ const maxXorbBytes = 128 * 1024 * 1024
 
 // handleUploadXorb implements POST /v1/xorbs/{prefix}/{hash}: stream the
 // serialized xorb body to a temp file (xorbformat.ScanChunks needs seek,
-// which an HTTP request body doesn't support), then independently
-// reconstruct the xorb's chunk hash list and footer by scanning chunk
-// headers and decompressing each payload — real hf_xet clients upload
-// xorbs *without* a footer ("XORBs are sent without footer - the
-// server/client reconstructs it from chunk data", per xet-core's
-// file_upload_session.rs) — and verify the claimed hash against the
-// resulting Merkle aggregation. The temp file is only handed to the
-// storage backend (which streams it onward) once the whole body has been
-// received and validated, so a client that disconnects mid-upload never
-// leaves a partial xorb stored.
+// which an HTTP request body doesn't support), then delegate to
+// IngestXorb for validation/storage/indexing — see its doc comment for
+// why real hf_xet clients upload xorbs without a footer, and why the
+// hash is independently re-derived and verified rather than trusted.
 func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 	if r.PathValue("prefix") != xorbPrefix {
 		httpError(w, "unsupported xorb prefix", http.StatusBadRequest)
@@ -101,99 +58,120 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxXorbBytes)
 
+	written, err := s.IngestXorb(r.Context(), claimedHash, r.Body)
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		switch {
+		case errors.As(err, &maxBytesErr):
+			httpError(w, "exceeds max xorb size or connection error: "+err.Error(), http.StatusRequestEntityTooLarge)
+		case errors.Is(err, ErrMalformedXorb), errors.Is(err, ErrXorbHashMismatch):
+			httpError(w, err.Error(), http.StatusBadRequest)
+		default:
+			if errors.Is(err, storage.ErrContentMismatch) {
+				// A hash collision or storage-layer corruption — the two
+				// possible causes of "same content hash, different actual
+				// bytes" — is always worth an operator's attention,
+				// distinct from the routine client-caused 5xx paths
+				// httpError's normal Warn level covers. Only reachable
+				// when -verify-dedup is enabled (see cmd/xetd);
+				// storage.VerifyingStore never overwrites the existing
+				// stored blob when this happens.
+				slog.Error("casserver: dedup verification detected a content mismatch",
+					"claimedHash", claimedHash.Hex(), "error", err)
+			}
+			httpError(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	writeJSON(w, uploadXorbResponse{WasInserted: written})
+}
+
+// ErrMalformedXorb is returned (wrapped) by IngestXorb when r's bytes
+// don't parse as a valid chunk stream (see xorbformat.DeriveFooter) —
+// maps to a 400 at handleUploadXorb's HTTP boundary.
+var ErrMalformedXorb = errors.New("casserver: malformed xorb")
+
+// ErrXorbHashMismatch is returned (wrapped) by IngestXorb when
+// claimedHash doesn't match the hash independently computed from r's
+// chunk contents — maps to a 400 at handleUploadXorb's HTTP boundary.
+var ErrXorbHashMismatch = errors.New("casserver: xorb hash in URL does not match hash computed from chunk contents")
+
+// IngestXorb validates, stores, and indexes a xorb's raw chunk-stream
+// bytes (read from r, with no footer — see handleUploadXorb's doc
+// comment on why: real hf_xet clients never send one) under
+// claimedHash, exactly as a real client's upload would. Returns
+// written=true if this was a new xorb (false if claimedHash was already
+// present — Put's normal dedup semantics).
+//
+// Exported so a caller embedding this Server as a caching layer (e.g.
+// internal/proxycas, wrapping this server instead of reimplementing its
+// upload-validation/indexing logic independently) can feed it xorb bytes
+// fetched from elsewhere — an upstream CAS response, not an HTTP
+// request body — through the identical validation and storage path a
+// real upload goes through, so anything this method accepts is
+// guaranteed servable afterward the same way a directly-uploaded xorb
+// is.
+func (s *Server) IngestXorb(ctx context.Context, claimedHash merklehash.Hash, r io.Reader) (written bool, err error) {
 	tmp, err := os.CreateTemp("", "xet-xorb-upload-*")
 	if err != nil {
-		httpError(w, "stage upload: "+err.Error(), http.StatusInternalServerError)
-		return
+		return false, fmt.Errorf("stage upload: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
-	size, err := io.Copy(tmp, r.Body)
+	size, err := io.Copy(tmp, r)
 	if err != nil {
-		httpError(w, "read body (exceeds max xorb size or connection error): "+err.Error(), http.StatusRequestEntityTooLarge)
-		return
+		return false, fmt.Errorf("read xorb body: %w", err)
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		httpError(w, "malformed xorb: "+err.Error(), http.StatusInternalServerError)
-		return
+		return false, fmt.Errorf("%w: %v", ErrMalformedXorb, err)
 	}
 
-	entries, err := xorbformat.ScanChunks(tmp)
+	footer, computedHash, err := xorbformat.DeriveFooter(tmp)
 	if err != nil {
-		httpError(w, "malformed xorb: "+err.Error(), http.StatusBadRequest)
-		return
+		return false, fmt.Errorf("%w: %v", ErrMalformedXorb, err)
 	}
-	if len(entries) == 0 {
-		httpError(w, "malformed xorb: no chunks found", http.StatusBadRequest)
-		return
-	}
-
-	var chunkHashes []merklehash.Hash
-	var chunkEntries []merklehash.ChunkEntry
-	var boundaryOffsets, unpackedOffsets []uint32
-	for i, e := range entries {
-		payload := make([]byte, e.Header.CompressedLength)
-		if _, err := tmp.ReadAt(payload, e.DataOffset); err != nil {
-			httpError(w, fmt.Sprintf("chunk %d: read payload: %s", i, err), http.StatusBadRequest)
-			return
-		}
-		decoded, err := decompressChunkPayload(e.Header.CompressionScheme, payload, e.Header.UncompressedLength)
-		if err != nil {
-			httpError(w, fmt.Sprintf("chunk %d: %s", i, err), http.StatusBadRequest)
-			return
-		}
-		h := merklehash.ComputeDataHash(decoded)
-		chunkHashes = append(chunkHashes, h)
-		chunkEntries = append(chunkEntries, merklehash.ChunkEntry{Hash: h, Size: uint64(len(decoded))})
-		boundaryOffsets = append(boundaryOffsets, uint32(e.DataOffset+int64(e.Header.CompressedLength)))
-		var unpacked uint32
-		if len(unpackedOffsets) > 0 {
-			unpacked = unpackedOffsets[len(unpackedOffsets)-1]
-		}
-		unpackedOffsets = append(unpackedOffsets, unpacked+e.Header.UncompressedLength)
-	}
-
-	computedHash := merklehash.XorbHash(chunkEntries)
 	if computedHash != claimedHash {
-		httpError(w, "xorb hash in URL does not match hash computed from chunk contents", http.StatusBadRequest)
-		return
+		return false, ErrXorbHashMismatch
 	}
 
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		httpError(w, "store xorb: "+err.Error(), http.StatusInternalServerError)
-		return
+		return false, fmt.Errorf("store xorb: %w", err)
 	}
-	written, err := s.xorbs.Put(r.Context(), claimedHash.Hex(), tmp, size)
+	written, err = s.xorbs.Put(ctx, claimedHash.Hex(), tmp, size)
 	if err != nil {
-		if errors.Is(err, storage.ErrContentMismatch) {
-			// A hash collision or storage-layer corruption — the two
-			// possible causes of "same content hash, different actual
-			// bytes" — is always worth an operator's attention, distinct
-			// from the routine client-caused 5xx paths httpError's normal
-			// Warn level covers. Only reachable when -verify-dedup is
-			// enabled (see cmd/xetd); storage.VerifyingStore never
-			// overwrites the existing stored blob when this happens.
-			slog.Error("casserver: dedup verification detected a content mismatch",
-				"claimedHash", claimedHash.Hex(), "error", err)
-		}
-		httpError(w, "store xorb: "+err.Error(), http.StatusInternalServerError)
-		return
+		return false, fmt.Errorf("store xorb: %w", err)
 	}
 
 	s.xorbMu.Lock()
-	s.xorbFooters[claimedHash] = xorbformat.FooterV1{
-		XorbHash:             computedHash,
-		ChunkHashes:          chunkHashes,
-		ChunkBoundaryOffsets: boundaryOffsets,
-		UnpackedChunkOffsets: unpackedOffsets,
-		NumChunks:            uint32(len(entries)),
-	}
+	s.xorbFooters[claimedHash] = footer
 	s.xorbRawLength[claimedHash] = size
 	s.xorbLastAccess[claimedHash] = time.Now()
 	s.xorbMu.Unlock()
 
-	writeJSON(w, uploadXorbResponse{WasInserted: written})
+	return written, nil
+}
+
+// HasXorbFooter reports whether this server has a footer indexed for
+// hash — a caller embedding this Server (see IngestXorb's doc comment)
+// uses this to decide whether a reconstruction it's about to serve can
+// be built entirely from local state, or needs to fetch/ingest the xorb
+// first.
+func (s *Server) HasXorbFooter(hash merklehash.Hash) bool {
+	s.xorbMu.RLock()
+	defer s.xorbMu.RUnlock()
+	_, ok := s.xorbFooters[hash]
+	return ok
+}
+
+// HasXorbBytes reports whether hash's raw bytes are present in this
+// server's storage backend — distinct from HasXorbFooter (footer/size
+// indexing and blob storage are updated together by IngestXorb/
+// handleUploadXorb, but a caller embedding this Server may want to
+// confirm both independently, e.g. after a restart with a stale index).
+func (s *Server) HasXorbBytes(ctx context.Context, hash merklehash.Hash) (bool, error) {
+	return s.xorbs.Has(ctx, hash.Hex())
 }
 
 // handleFetchXorb implements the byte-serving side of a fetch_info URL:
@@ -247,16 +225,24 @@ func (s *Server) handleFetchXorb(w http.ResponseWriter, r *http.Request) {
 	}
 	defer data.Close()
 
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
 	if hasRange {
+		// Content-Type/Content-Length above must be set before this
+		// WriteHeader call — Go snapshots headers at WriteHeader time, so
+		// setting them afterward would silently drop Content-Length from
+		// every ranged (206) response.
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 		w.WriteHeader(http.StatusPartialContent)
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
 	io.Copy(w, data)
 }
 
 func (s *Server) handleHeadXorb(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("prefix") != xorbPrefix {
+		httpError(w, "unsupported xorb prefix", http.StatusBadRequest)
+		return
+	}
 	hash, err := hexParam(r, "hash")
 	if err != nil {
 		httpError(w, "invalid hash", http.StatusBadRequest)
