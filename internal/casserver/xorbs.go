@@ -11,14 +11,14 @@ import (
 	"strconv"
 	"time"
 
-	"xet-server/internal/merklehash"
-	"xet-server/internal/storage"
-	"xet-server/internal/xorbformat"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/xorbformat"
 )
 
 // httpError writes an HTTP error response and logs it at a level matching
 // its cause: a 5xx reflects a server-side fault worth surfacing at Warn by
-// default, while a 4xx is a client protocol/input error — expected to
+// default, while a 4xx is a client protocol/input error - expected to
 // happen under normal operation (a bad hash, a truncated upload) and only
 // useful for debugging, so it logs at Debug to avoid every malformed
 // request from a client spamming the default log level.
@@ -34,7 +34,7 @@ func httpError(w http.ResponseWriter, msg string, code int) {
 // maxXorbBytes caps a single xorb upload's body size. Real xet-core targets
 // ~64 MiB per xorb before cutting a new one (MAX_XORB_BYTES in
 // xet-core's constants), so this is generous headroom above what a
-// well-behaved client ever sends in one xorb — its purpose here is purely
+// well-behaved client ever sends in one xorb - its purpose here is purely
 // to bound how large a temp file a single hostile/misbehaving request can
 // force the server to stage, not to constrain normal traffic.
 const maxXorbBytes = 128 * 1024 * 1024
@@ -42,7 +42,7 @@ const maxXorbBytes = 128 * 1024 * 1024
 // handleUploadXorb implements POST /v1/xorbs/{prefix}/{hash}: stream the
 // serialized xorb body to a temp file (xorbformat.ScanChunks needs seek,
 // which an HTTP request body doesn't support), then delegate to
-// IngestXorb for validation/storage/indexing — see its doc comment for
+// IngestXorb for validation/storage/indexing - see its doc comment for
 // why real hf_xet clients upload xorbs without a footer, and why the
 // hash is independently re-derived and verified rather than trusted.
 func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
@@ -68,9 +68,9 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusBadRequest)
 		default:
 			if errors.Is(err, storage.ErrContentMismatch) {
-				// A hash collision or storage-layer corruption — the two
+				// A hash collision or storage-layer corruption - the two
 				// possible causes of "same content hash, different actual
-				// bytes" — is always worth an operator's attention,
+				// bytes" - is always worth an operator's attention,
 				// distinct from the routine client-caused 5xx paths
 				// httpError's normal Warn level covers. Only reachable
 				// when -verify-dedup is enabled (see cmd/xetd);
@@ -88,27 +88,27 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 }
 
 // ErrMalformedXorb is returned (wrapped) by IngestXorb when r's bytes
-// don't parse as a valid chunk stream (see xorbformat.DeriveFooter) —
+// don't parse as a valid chunk stream (see xorbformat.DeriveFooter) -
 // maps to a 400 at handleUploadXorb's HTTP boundary.
 var ErrMalformedXorb = errors.New("casserver: malformed xorb")
 
 // ErrXorbHashMismatch is returned (wrapped) by IngestXorb when
 // claimedHash doesn't match the hash independently computed from r's
-// chunk contents — maps to a 400 at handleUploadXorb's HTTP boundary.
+// chunk contents - maps to a 400 at handleUploadXorb's HTTP boundary.
 var ErrXorbHashMismatch = errors.New("casserver: xorb hash in URL does not match hash computed from chunk contents")
 
 // IngestXorb validates, stores, and indexes a xorb's raw chunk-stream
-// bytes (read from r, with no footer — see handleUploadXorb's doc
+// bytes (read from r, with no footer - see handleUploadXorb's doc
 // comment on why: real hf_xet clients never send one) under
 // claimedHash, exactly as a real client's upload would. Returns
 // written=true if this was a new xorb (false if claimedHash was already
-// present — Put's normal dedup semantics).
+// present - Put's normal dedup semantics).
 //
 // Exported so a caller embedding this Server as a caching layer (e.g.
 // internal/proxycas, wrapping this server instead of reimplementing its
 // upload-validation/indexing logic independently) can feed it xorb bytes
-// fetched from elsewhere — an upstream CAS response, not an HTTP
-// request body — through the identical validation and storage path a
+// fetched from elsewhere - an upstream CAS response, not an HTTP
+// request body - through the identical validation and storage path a
 // real upload goes through, so anything this method accepts is
 // guaranteed servable afterward the same way a directly-uploaded xorb
 // is.
@@ -154,7 +154,7 @@ func (s *Server) IngestXorb(ctx context.Context, claimedHash merklehash.Hash, r 
 }
 
 // HasXorbFooter reports whether this server has a footer indexed for
-// hash — a caller embedding this Server (see IngestXorb's doc comment)
+// hash - a caller embedding this Server (see IngestXorb's doc comment)
 // uses this to decide whether a reconstruction it's about to serve can
 // be built entirely from local state, or needs to fetch/ingest the xorb
 // first.
@@ -166,7 +166,7 @@ func (s *Server) HasXorbFooter(hash merklehash.Hash) bool {
 }
 
 // HasXorbBytes reports whether hash's raw bytes are present in this
-// server's storage backend — distinct from HasXorbFooter (footer/size
+// server's storage backend - distinct from HasXorbFooter (footer/size
 // indexing and blob storage are updated together by IngestXorb/
 // handleUploadXorb, but a caller embedding this Server may want to
 // confirm both independently, e.g. after a restart with a stale index).
@@ -229,7 +229,7 @@ func (s *Server) handleFetchXorb(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
 	if hasRange {
 		// Content-Type/Content-Length above must be set before this
-		// WriteHeader call — Go snapshots headers at WriteHeader time, so
+		// WriteHeader call - Go snapshots headers at WriteHeader time, so
 		// setting them afterward would silently drop Content-Length from
 		// every ranged (206) response.
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))

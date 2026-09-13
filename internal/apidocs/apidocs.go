@@ -1,5 +1,5 @@
 // Package apidocs serves this project's OpenAPI spec (openapi.yaml, this
-// directory) through a fully offline Swagger UI — no CDN dependency at
+// directory) through a fully offline Swagger UI - no CDN dependency at
 // runtime, since both the spec and the UI's static assets
 // (third_party/swagger-ui-dist) are embedded into the xetd binary via
 // go:embed. Mounted at /api-docs by cmd/xetd.
@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	swaggerui "xet-server/third_party/swagger-ui-dist"
+	swaggerui "github.com/guilt/xet-server/third_party/swagger-ui-dist"
 )
 
 //go:embed openapi.yaml index.html
@@ -22,14 +22,14 @@ var local embed.FS
 
 // Handler returns an http.Handler serving index.html and openapi.yaml
 // (this package) plus every vendored Swagger UI asset
-// (swaggerui.Dist), merged into one flat file tree — Swagger UI's
+// (swaggerui.Dist), merged into one flat file tree - Swagger UI's
 // index.html references its JS/CSS/spec by plain relative filename, so
 // all three sources need to appear as siblings under the same URL prefix.
 func Handler() http.Handler {
 	merged, err := newMergedFS(local, swaggerui.Dist)
 	if err != nil {
 		// Both embedded filesystems are compiled into the binary and
-		// verified by TestHandler_ServesEveryExpectedFile — a failure
+		// verified by TestHandler_ServesEveryExpectedFile - a failure
 		// here means the binary itself is broken, not a runtime
 		// condition any caller can recover from.
 		panic("apidocs: " + err.Error())
@@ -37,7 +37,7 @@ func Handler() http.Handler {
 	fileServer := http.FileServer(http.FS(merged))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// net/http's built-in MIME table has no entry for .yaml, so
-		// http.FileServer would otherwise sniff/serve it as text/plain —
+		// http.FileServer would otherwise sniff/serve it as text/plain -
 		// harmless to Swagger UI's own fetch+parse, but wrong.
 		if strings.HasSuffix(r.URL.Path, ".yaml") {
 			w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
@@ -49,7 +49,7 @@ func Handler() http.Handler {
 // newMergedFS presents local and dist's files as one flat fs.FS, as if
 // every entry from both lived in the same directory. Errors if any
 // filename collides between the two (which would silently shadow one
-// asset) — this package's own files (openapi.yaml, index.html) are
+// asset) - this package's own files (openapi.yaml, index.html) are
 // expected never to collide with vendored Swagger UI asset names.
 func newMergedFS(local, dist fs.FS) (fs.FS, error) {
 	files := make(map[string][]byte)
@@ -77,7 +77,7 @@ func newMergedFS(local, dist fs.FS) (fs.FS, error) {
 }
 
 // mergedFS is a minimal read-only fs.FS backed by an in-memory filename ->
-// contents map, flat (no subdirectories) — everything this package needs
+// contents map, flat (no subdirectories) - everything this package needs
 // to embed to serve Swagger UI lives at a single directory depth.
 type mergedFS struct {
 	files map[string][]byte
@@ -87,7 +87,7 @@ func (m *mergedFS) Open(name string) (fs.File, error) {
 	if name == "." {
 		// http.FileServer always opens "." first to Stat() whether the
 		// requested path is a directory (e.g. it redirects "/index.html"
-		// to "./" then opens "." before opening "index.html" within it) —
+		// to "./" then opens "." before opening "index.html" within it) -
 		// this flat filesystem's one implicit directory is the root
 		// itself.
 		return &dirFile{}, nil
@@ -101,7 +101,7 @@ func (m *mergedFS) Open(name string) (fs.File, error) {
 
 // dirFile is the root "." directory http.FileServer expects to be able to
 // Stat() (to confirm the request path is a directory) before opening
-// index.html within it. Never Read from — only Stat/Close are called on
+// index.html within it. Never Read from - only Stat/Close are called on
 // it in that code path.
 type dirFile struct{}
 
@@ -119,7 +119,7 @@ func (dirFileInfo) ModTime() time.Time { return time.Time{} }
 func (dirFileInfo) IsDir() bool        { return true }
 func (dirFileInfo) Sys() any           { return nil }
 
-// memFile is a read-only, seekable in-memory fs.File — http.FileServer
+// memFile is a read-only, seekable in-memory fs.File - http.FileServer
 // needs Seek (for HTTP Range support) on top of plain io.Reader, which
 // bytes.Reader already provides; this just adds the fs.File/fs.FileInfo
 // methods http.FileServer also requires.

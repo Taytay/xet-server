@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 func TestSnapshot_RestoresMultiRepoMultiRevisionState(t *testing.T) {

@@ -3,7 +3,7 @@ package main
 // Regression test for withLandingPage: it must intercept ONLY an exact
 // "GET /" request and forward every other method/path unchanged.
 // http.ServeMux's own behavior of routing an unmatched HEAD to a
-// registered GET handler is exactly the trap this avoids — a mux-based
+// registered GET handler is exactly the trap this avoids - a mux-based
 // version of this wiring was tried and reverted after this test caught it
 // swallowing "HEAD /{repo}/resolve/{revision}/{filename}", hubserver's own
 // real traffic, into the landing page instead.

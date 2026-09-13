@@ -44,7 +44,7 @@ func WriteFileLookupTable(w io.Writer, entries []FileLookupEntry) error {
 // ReadXorbLookupTable / ReadChunkLookupTable will pre-allocate capacity
 // for upfront, regardless of what numEntries (an attacker-controlled wire
 // field) claims. Reading still proceeds via append past this cap for a
-// genuinely large, honest table — this only prevents a tiny malicious
+// genuinely large, honest table - this only prevents a tiny malicious
 // shard from claiming numEntries near uint64's max and forcing a
 // multi-gigabyte allocation before a single byte of actual entry data has
 // been validated to exist.

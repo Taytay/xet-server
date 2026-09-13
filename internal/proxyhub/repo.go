@@ -10,11 +10,12 @@ import (
 	"log/slog"
 	"net/http"
 
-	"xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // createRepoRequest is proxyhub's own copy of hubserver.
-// createRepoRequest — duplicated (not imported) for the same reason as
+// createRepoRequest - duplicated (not imported) for the same reason as
 // splitRepoPath (see its note in proxyhub.go): decodes the real Hub's
 // wire request shape, which this package relays through unmodified
 // rather than delegating to Embedded (only the real Hub can accept a
@@ -27,7 +28,7 @@ type createRepoRequest struct {
 
 // handleCreateRepo relays POST /api/repos/create to the real Hub
 // unconditionally, then mirrors the effect into Embedded (non-fatal on
-// failure — the caller's actual request already succeeded upstream).
+// failure - the caller's actual request already succeeded upstream).
 func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	var req createRepoRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -52,7 +53,7 @@ func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"url": repoID})
 }
 
-// writeJSON is proxyhub's own copy of hubserver.writeJSON — duplicated
+// writeJSON is proxyhub's own copy of hubserver.writeJSON - duplicated
 // (not imported) for the same reason as splitRepoPath (see its note in
 // proxyhub.go).
 func writeJSON(w http.ResponseWriter, v any) {
@@ -69,12 +70,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 // hfclient.RepoInfo directly rather than a shape matching hubserver's
 // own repoInfoResponse ({id, sha} vs {id, sha, private}): hfclient.
 // RepoInfo never parses a "private" field off the real Hub's response
-// in the first place, so there is no real value to round-trip here —
+// in the first place, so there is no real value to round-trip here -
 // inventing one would fabricate data this project explicitly avoids
 // (see hubserver.resolve.go's anti-fabrication rationale). A caller
 // relying on "private" from this endpoint only gets it via the cached
 // path (served from Embedded, whose repoInfoResponse always includes
-// it, currently always false — see hubserver.getOrCreateRepo).
+// it, currently always false - see hubserver.getOrCreateRepo).
 func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request, repoType, repoID, revision string) {
 	key := cacheKey(repoType, repoID, revision)
 
@@ -99,7 +100,7 @@ func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request, repoType
 	if err != nil {
 		if s.Embedded.HasRevision(repoType, repoID, revision) {
 			// Stale-fallback: upstream failed, but Embedded already has
-			// this revision from a previous successful fetch — serve it
+			// this revision from a previous successful fetch - serve it
 			// regardless of age, per the package doc comment's whole
 			// reason to exist.
 			s.Embedded.ServeHTTP(w, r)
@@ -111,13 +112,23 @@ func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request, repoType
 
 	s.Embedded.IngestRepoInfo(repoType, repoID, info.SHA)
 	// info.SHA is also the revision name in this shim's model (see
-	// internal/hubserver's repoInfoResponse doc comment) — but the
+	// internal/hubserver's repoInfoResponse doc comment) - but the
 	// CALLER asked about `revision`, which might be a name upstream
-	// resolved differently; ingest under both to be safe, then serve
-	// from Embedded so the response shape is byte-identical to what
-	// hubserver's own handleRepoInfo would produce for a real commit.
+	// resolved differently; ingest under both to be safe.
 	if revision != info.SHA {
 		s.Embedded.IngestRepoInfo(repoType, repoID, revision)
+	}
+	// Also ingest each sibling as an empty fileRef so a subsequent
+	// Embedded.ServeHTTP on this same repo-info request returns a
+	// populated siblings list (snapshot_download reads it to skip the
+	// list_repo_tree fallback - see RepoInfo's doc comment on why).
+	// Size/oid are 0/"" until the tree fetch fills them in; snapshot_download
+	// only reads rfilename off siblings so that's enough for the fast path.
+	for _, sib := range info.Siblings {
+		s.Embedded.IngestFile(repoType, repoID, revision, sib.RFilename, "", 0, merklehash.Hash{})
+		if revision != info.SHA {
+			s.Embedded.IngestFile(repoType, repoID, info.SHA, sib.RFilename, "", 0, merklehash.Hash{})
+		}
 	}
 	s.repoInfoFreshness.MarkFresh(key)
 	s.Embedded.ServeHTTP(w, r)

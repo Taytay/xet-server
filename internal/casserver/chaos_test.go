@@ -2,7 +2,7 @@ package casserver
 
 // Chaos/reliability tests: sustained concurrent load mixing valid and
 // invalid traffic, interrupted uploads followed by clean retries, and
-// upload/fetch/eviction interleaving — checked against actual data
+// upload/fetch/eviction interleaving - checked against actual data
 // integrity (byte-identical round-trips), not just "the server didn't
 // crash." These run against a real httptest.Server wrapping the genuine
 // casserver.Server + fsstore.Store, so timing-sensitive races have a
@@ -21,14 +21,14 @@ import (
 	"testing"
 	"time"
 
-	"xet-server/internal/eviction"
-	"xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/eviction"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
 )
 
 // TestChaos_InterruptedUploadThenCleanRetry simulates a client whose
 // connection drops mid-upload (server sees a short/canceled body read),
 // then confirms a subsequent clean upload of the identical xorb succeeds
-// and produces byte-correct stored content — proving fsstore.Put's
+// and produces byte-correct stored content - proving fsstore.Put's
 // atomic-rename staging (see internal/storage/fsstore/fsstore.go) leaves
 // no corruption behind for a retry to inherit.
 func TestChaos_InterruptedUploadThenCleanRetry(t *testing.T) {
@@ -54,7 +54,7 @@ func TestChaos_InterruptedUploadThenCleanRetry(t *testing.T) {
 		defer resp.Body.Close()
 		io.Copy(io.Discard, resp.Body)
 		if resp.StatusCode == http.StatusOK {
-			t.Fatal("interrupted upload reported 200 OK, want a failure — the body was deliberately truncated")
+			t.Fatal("interrupted upload reported 200 OK, want a failure - the body was deliberately truncated")
 		}
 	}
 
@@ -76,7 +76,7 @@ func TestChaos_InterruptedUploadThenCleanRetry(t *testing.T) {
 		t.Fatalf("decode retry response error = %v", err)
 	}
 	if !uploadResp.WasInserted {
-		t.Error("retry WasInserted = false, want true — the interrupted attempt should not have left a blob in place")
+		t.Error("retry WasInserted = false, want true - the interrupted attempt should not have left a blob in place")
 	}
 
 	// Fetch it back and confirm byte-for-byte correctness.
@@ -87,7 +87,7 @@ func TestChaos_InterruptedUploadThenCleanRetry(t *testing.T) {
 	defer getResp.Body.Close()
 	got, _ := io.ReadAll(getResp.Body)
 	if !bytes.Equal(got, blob) {
-		t.Errorf("fetched xorb differs from the clean retry's upload (%d bytes vs %d) — possible corruption from the interrupted attempt", len(got), len(blob))
+		t.Errorf("fetched xorb differs from the clean retry's upload (%d bytes vs %d) - possible corruption from the interrupted attempt", len(got), len(blob))
 	}
 }
 
@@ -116,7 +116,7 @@ func (r *interruptingReader) Read(p []byte) (int, error) {
 // TestChaos_SustainedMixedTraffic fires a sustained burst of concurrent
 // requests where roughly half are valid xorb uploads (each distinct, so
 // no dedup short-circuit hides a bug) and half are deliberately malformed
-// — mirroring a noisy real-world environment where some clients retry
+// - mirroring a noisy real-world environment where some clients retry
 // broken requests while others succeed normally. Every valid upload's
 // hash must be independently fetchable and byte-correct afterward,
 // proving the malformed traffic never corrupts or drops unrelated valid
@@ -255,10 +255,10 @@ func TestChaos_UploadFetchEvictInterleaved(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		t.Fatal("upload/fetch/evict interleaving did not complete within 30s — possible deadlock")
+		t.Fatal("upload/fetch/evict interleaving did not complete within 30s - possible deadlock")
 	}
 
-	// Whatever survived eviction must still be byte-correct — eviction
+	// Whatever survived eviction must still be byte-correct - eviction
 	// removing a blob is fine, but a *present* blob must never be
 	// corrupted by the concurrent sweep.
 	for i, hash := range hashes {
@@ -274,7 +274,7 @@ func TestChaos_UploadFetchEvictInterleaved(t *testing.T) {
 		got, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusOK && !bytes.Equal(got, blobs[i]) {
-			t.Errorf("xorb %d: present but content differs from upload — corruption under concurrent eviction", i)
+			t.Errorf("xorb %d: present but content differs from upload - corruption under concurrent eviction", i)
 		}
 	}
 

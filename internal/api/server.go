@@ -1,6 +1,6 @@
 // Package api implements the Xet Data API (mounted at /v1 by cmd/xetd,
-// sharing that namespace with — but never overlapping the specific
-// literal paths of — internal/casserver's own /v1,/v2 CAS
+// sharing that namespace with - but never overlapping the specific
+// literal paths of - internal/casserver's own /v1,/v2 CAS
 // reimplementation; see xetDataV1 below for the exact paths this package
 // owns): a local stand-in for Xet's CAS/reconstruction service, not
 // wire-compatible with the real protocol (see internal/casserver for
@@ -11,8 +11,8 @@
 // Every route except /v1/stats (this project's own operator endpoint, not
 // part of any real protocol) is gated by auth.Authenticator per the scope
 // real Xet/HF convention implies: write for upload, read for
-// download/manifest. Defaults to auth.NoAuth{} — this server's pre-v0.8.0
-// behavior, unconditionally allowing every request — until
+// download/manifest. Defaults to auth.NoAuth{} - this server's pre-v0.8.0
+// behavior, unconditionally allowing every request - until
 // SetAuthenticator is called with something else. See
 // internal/casserver's identical pattern, which this mirrors.
 package api
@@ -32,12 +32,12 @@ import (
 	"strings"
 	"sync"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/chunk"
-	"xet-server/internal/manifest"
-	"xet-server/internal/routing"
-	"xet-server/internal/storage"
-	"xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/chunk"
+	"github.com/guilt/xet-server/internal/manifest"
+	"github.com/guilt/xet-server/internal/routing"
+	"github.com/guilt/xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
 )
 
 type Server struct {
@@ -90,7 +90,7 @@ func NewWithStore(dataRoot string, chunks storage.Store) (*Server, error) {
 }
 
 // SetAuthenticator replaces this server's Authenticator (default
-// auth.NoAuth{}, i.e. no enforcement — this server's pre-v0.8.0 behavior)
+// auth.NoAuth{}, i.e. no enforcement - this server's pre-v0.8.0 behavior)
 // and rebuilds the route table so the new scope checks take effect
 // immediately, matching internal/casserver.Server.SetAuthenticator.
 func (s *Server) SetAuthenticator(a auth.Authenticator) {
@@ -100,7 +100,7 @@ func (s *Server) SetAuthenticator(a auth.Authenticator) {
 }
 
 // requireScope wraps next so it only runs once r authenticates against
-// s.authenticator and the resulting Principal has scope — writing a 401
+// s.authenticator and the resulting Principal has scope - writing a 401
 // (no/invalid credential) or 403 (valid credential, insufficient scope)
 // otherwise. Mirrors casserver.Server.requireScope's semantics exactly.
 func (s *Server) requireScope(scope auth.Scope, next http.HandlerFunc) http.HandlerFunc {
@@ -128,14 +128,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 // it directly when wiring routes onto its own top-level mux, instead of
 // re-typing "/v1" as a raw literal at the call site. It shares the /v1
 // namespace with internal/casserver's own CAS protocol rather than living
-// under a separate top-level path — grouped there because cmd/xetd mounts
+// under a separate top-level path - grouped there because cmd/xetd mounts
 // both on the same server, and this project's own "Xet Data" surface is
 // versioned exactly like casserver's /v1,/v2 rather than left bare.
 //
 // UploadPath, FilesPrefix, and StatsPath are the specific literal
 // sub-paths (relative to V1) this package registers, also exported so
 // cmd/xetd's own mux.Handle calls reference the same constants this
-// package's own routes() uses — one definition per path, not duplicated
+// package's own routes() uses - one definition per path, not duplicated
 // as a string literal at each call site. They never collide with
 // casserver's own /v1 paths (xorbs, shards, reconstructions, chunks,
 // telemetry, storage-stats): cmd/xetd registers these literal patterns on
@@ -158,7 +158,7 @@ func (s *Server) routes() {
 		routing.Mount("GET", FilesPrefix+"{id}", s.requireScope(auth.ScopeRead, s.handleDownload)),
 		routing.Mount("GET", FilesPrefix+"{id}/manifest", s.requireScope(auth.ScopeRead, s.handleManifest)),
 		// stats is this project's own operator endpoint, not part of any
-		// real protocol, so — like casserver's storage-stats — it is
+		// real protocol, so - like casserver's storage-stats - it is
 		// never gated.
 		routing.Mount("GET", StatsPath, http.HandlerFunc(s.handleStats)),
 	})

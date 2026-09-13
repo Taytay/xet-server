@@ -5,7 +5,7 @@
 //
 // Currently library-only: neither cmd/xetd nor cmd/xet-proxyd exposes a
 // flag to select this backend over internal/storage/fsstore (both
-// binaries construct an fsstore.Store directly) — a caller wanting S3
+// binaries construct an fsstore.Store directly) - a caller wanting S3
 // storage today has to build their own main package around this
 // package. See its own tests (this package's live-MinIO test) for a
 // working usage example.
@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"xet-server/internal/sigv4"
-	"xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/sigv4"
+	"github.com/guilt/xet-server/internal/storage"
 )
 
 var (
@@ -34,7 +34,7 @@ var (
 )
 
 // defaultHTTPClient bounds connect/TLS-handshake/response-header latency
-// (10s each) without a blanket request Timeout — a large xorb GET/PUT
+// (10s each) without a blanket request Timeout - a large xorb GET/PUT
 // can legitimately take longer than any single one of these phases
 // without being unhealthy. Mirrors internal/hfclient's own
 // defaultHTTPClient (see its doc comment for the full rationale): a
@@ -104,7 +104,7 @@ func (s *Store) Has(ctx context.Context, key string) (bool, error) {
 // native "create if absent" semantic, so this does a HEAD-then-PUT; a
 // benign race (two callers uploading the identical bytes for the same
 // content-addressed key concurrently) just means both write the same
-// content and both report "written" — the CAS dedup logic that matters
+// content and both report "written" - the CAS dedup logic that matters
 // for cost/perf still works because the vast majority of calls hit an
 // existing key on Has and skip the PUT entirely.
 //
@@ -115,7 +115,7 @@ func (s *Store) Has(ctx context.Context, key string) (bool, error) {
 // verification on the read side (this project's own chunk/xorb hashing)
 // still catches corruption in transit.
 //
-// A failed or canceled PUT is not retried or cleaned up here — S3 has no
+// A failed or canceled PUT is not retried or cleaned up here - S3 has no
 // partial-object visibility (a PUT either lands in full or the object
 // doesn't exist), so unlike fsstore there is no staging file to remove; the
 // caller can simply retry Put with a fresh reader.
@@ -221,7 +221,7 @@ func (s *Store) EnsureBucket(ctx context.Context) error {
 }
 
 // Delete removes the object stored under key. Deleting an already-absent
-// key is not an error — S3's DELETE already behaves this way natively
+// key is not an error - S3's DELETE already behaves this way natively
 // (204 whether or not the key existed), matching the interface's
 // idempotent-delete contract.
 func (s *Store) Delete(ctx context.Context, key string) error {
@@ -249,7 +249,7 @@ type listBucketResult struct {
 
 // TotalBytes sums the size of every object under this store's prefix via
 // paginated ListObjectsV2 calls. Like fsstore's TotalBytes, this is meant
-// for a slow poll (an eviction sweep), not a request hot path — each call
+// for a slow poll (an eviction sweep), not a request hot path - each call
 // is O(number of objects / 1000) round trips to the S3-compatible
 // endpoint.
 func (s *Store) TotalBytes(ctx context.Context) (int64, error) {

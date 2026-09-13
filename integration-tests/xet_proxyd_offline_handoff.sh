@@ -1,25 +1,25 @@
 #!/bin/bash
 # End-to-end proof of xet-proxyd's whole reason to exist: a caching proxy
 # in front of a Hub, whose cache directory a PLAIN xetd can later read
-# directly — the "move away from huggingface.co when it shuts down" path.
+# directly - the "move away from huggingface.co when it shuts down" path.
 #
 # 1. Start a plain xetd (its own data dir) as the "real Hub/CAS" for this
-#    test — a wire-compatible stand-in for the actual huggingface.co, so
+#    test - a wire-compatible stand-in for the actual huggingface.co, so
 #    this test needs no network access.
 # 2. Start xet-proxyd (a SEPARATE data dir), with -upstream-hub-url
 #    pointed at that xetd's Hub port.
-# 3. Drive the real `hf` CLI (via pipenv — not this repo's own client)
+# 3. Drive the real `hf` CLI (via pipenv - not this repo's own client)
 #    through the proxy: `hf upload` then `hf download`, proving the
 #    proxy's write-through + fetch-and-cache paths both work against a
 #    real, unmodified Hub client.
 # 4. Shut the proxy down (a final snapshot is taken on graceful
-#    shutdown — see cmd/xet-proxyd/main.go's <-ctx.Done() block).
+#    shutdown - see cmd/xet-proxyd/main.go's <-ctx.Done() block).
 # 5. Start a FRESH plain xetd pointed at the PROXY's data dir (not the
-#    upstream xetd's) — no upstream at all, no network, nothing but what
+#    upstream xetd's) - no upstream at all, no network, nothing but what
 #    the proxy cached.
 # 6. `hf download` the same file again through this second xetd: it must
 #    succeed with no extra setup, and the content must be byte-identical
-#    — proving the proxy's on-disk state is a real, self-sufficient xetd
+#    - proving the proxy's on-disk state is a real, self-sufficient xetd
 #    data directory, not merely usable while the proxy process is alive.
 #
 # Needs `pipenv` with huggingface_hub + hf_xet installed (see Pipfile). Set
@@ -28,7 +28,15 @@
 set -euo pipefail
 
 PYTHON_VERSION="${PYTHON_VERSION:-3}"
-CMD_TIMEOUT="${XET_PROXYD_IT_CMD_TIMEOUT:-4}"
+
+# See hf_cli_roundtrip.sh's identical note: `pipenv run` + cold Python start
+# costs seconds on Windows before hf does any work, so a 4s per-command
+# budget that suits Linux/macOS trips spuriously there.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) DEFAULT_CMD_TIMEOUT=20 ;;
+    *)                    DEFAULT_CMD_TIMEOUT=4  ;;
+esac
+CMD_TIMEOUT="${XET_PROXYD_IT_CMD_TIMEOUT:-$DEFAULT_CMD_TIMEOUT}"
 
 if ! command -v pipenv >/dev/null 2>&1; then
     echo "pipenv not found. Set up with: make install"
@@ -88,16 +96,41 @@ PROXY_DATA="$WORKDIR/proxy-data"
 PROXY_LOG="$WORKDIR/xet-proxyd.log"
 mkdir -p "$PROXY_DATA"
 
+# How this test gets the proxy's in-memory indices onto disk differs by
+# platform, because how we can ASK it to stop differs by platform:
+#
+#   POSIX  - `kill` delivers SIGTERM, cmd/xet-proxyd's signal.NotifyContext
+#            catches it and takes a final snapshot on the way out. Periodic
+#            snapshotting is disabled (-snapshot-interval 0) so that this
+#            test proves the graceful-shutdown snapshot specifically.
+#
+#   Windows- xet-proxyd.exe is a NATIVE Windows binary; MSYS `kill` cannot
+#            deliver a POSIX signal to it and falls back to TerminateProcess,
+#            which kills it outright with no chance to run the shutdown path.
+#            (An interactive Ctrl-C in its own console DOES arrive as
+#            os.Interrupt and snapshots correctly - this is purely a
+#            limitation of signalling a native process from MSYS bash.)
+#            So there we use a short periodic snapshot interval and wait for
+#            the checkpoint to land before killing.
+#
+# Either way the assertion below is the same, and it's the one that actually
+# matters: once the proxy is gone, its -data directory must stand on its own
+# as a plain xetd data directory.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) PROXY_SNAPSHOT_INTERVAL="1s"; GRACEFUL_SHUTDOWN=false ;;
+    *)                    PROXY_SNAPSHOT_INTERVAL="0";  GRACEFUL_SHUTDOWN=true  ;;
+esac
+
 "$XET_PROXYD" -addr ":${PROXY_CAS_PORT}" -hub-addr ":${PROXY_HUB_PORT}" \
     -data "$PROXY_DATA" -upstream-hub-url "$UPSTREAM_HUB_URL" \
-    -snapshot-interval 0 >"$PROXY_LOG" 2>&1 &
+    -snapshot-interval "$PROXY_SNAPSHOT_INTERVAL" >"$PROXY_LOG" 2>&1 &
 PROXY_PID=$!
 
 cleanup() {
     for pid in "${PROXY_PID:-}" "${SECOND_XETD_PID:-}" "${UPSTREAM_PID:-}"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null
-            wait "$pid" 2>/dev/null
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
         fi
     done
 }
@@ -116,7 +149,7 @@ waitReady() {
 
 waitReady "http://127.0.0.1:${UPSTREAM_CAS_PORT}/v1/stats" "upstream xetd" || { cat "$UPSTREAM_LOG" >&2; exit 1; }
 # proxycas has no /v1/stats route of its own (that's cmd/xetd's demo API,
-# not part of the wire-compatible CAS protocol) — probe a real proxycas
+# not part of the wire-compatible CAS protocol) - probe a real proxycas
 # route instead, so "ready" means the CAS-facing proxy is actually
 # listening and routing, not just that some TCP listener exists. Any HTTP
 # response at all (even a 400/404) proves that; waitReady only checks the
@@ -132,7 +165,7 @@ export HF_HOME="$WORKDIR/hf-home"
 export HF_XET_CACHE="$WORKDIR/hf-xet-cache"
 export HF_ENDPOINT="$PROXY_HUB_URL"
 export HF_TOKEN="local-test-token"
-export HF_XET_LOG_PATH=/dev/null
+export HF_XET_LOG_PATH="${HF_XET_LOG_PATH:-/dev/null}"  # runner sets NUL on Windows
 export NO_PROXY="localhost,127.0.0.1,${NO_PROXY:-}"
 export no_proxy="localhost,127.0.0.1,${no_proxy:-}"
 mkdir -p "$HF_HOME" "$HF_XET_CACHE"
@@ -144,8 +177,9 @@ pipenv run python3 -c \
 REPO_ID="localtest/xet-proxyd-offline-handoff-it-$$"
 
 echo "hf upload $REPO_ID model.bin, through xet-proxyd (timeout: ${CMD_TIMEOUT}s)"
-if ! runHf upload "$REPO_ID" "$TEST_FILE" model.bin; then
-    status=$?
+status=0
+runHf upload "$REPO_ID" "$TEST_FILE" model.bin || status=$?
+if [[ $status -ne 0 ]]; then
     [[ $status -eq 124 ]] && echo "TIMEOUT: 'hf upload' through the proxy exceeded ${CMD_TIMEOUT}s"
     exit 1
 fi
@@ -153,8 +187,9 @@ fi
 echo "hf download $REPO_ID model.bin, through xet-proxyd (timeout: ${CMD_TIMEOUT}s)"
 DOWNLOAD_DIR="$WORKDIR/downloaded-via-proxy"
 mkdir -p "$DOWNLOAD_DIR"
-if ! runHf download "$REPO_ID" model.bin --local-dir "$DOWNLOAD_DIR"; then
-    status=$?
+status=0
+runHf download "$REPO_ID" model.bin --local-dir "$DOWNLOAD_DIR" || status=$?
+if [[ $status -ne 0 ]]; then
     [[ $status -eq 124 ]] && echo "TIMEOUT: 'hf download' through the proxy exceeded ${CMD_TIMEOUT}s"
     exit 1
 fi
@@ -163,9 +198,28 @@ echo "upload + download through xet-proxyd byte-identical"
 
 # ---- shut the proxy down (final snapshot on graceful shutdown) ------------
 
-echo "stopping xet-proxyd (final snapshot on graceful shutdown)"
-kill "$PROXY_PID"
-wait "$PROXY_PID" 2>/dev/null
+if [[ "$GRACEFUL_SHUTDOWN" == true ]]; then
+    echo "stopping xet-proxyd (final snapshot on graceful shutdown)"
+else
+    # Periodic snapshotting is on; wait for the checkpoint to actually land
+    # before killing, so the assertion below tests the data directory rather
+    # than racing the snapshot loop.
+    echo "waiting for xet-proxyd's periodic snapshot, then stopping it"
+    for _ in $(seq 1 50); do
+        if [[ -f "$PROXY_DATA/casserver-snapshot.json" && -f "$PROXY_DATA/hubserver-snapshot.json" ]]; then
+            break
+        fi
+        sleep 0.2
+    done
+fi
+# `|| true` on both: under `set -e`, wait's exit status is the *stopped
+# process's* status, and a force-terminated process reports non-zero. On
+# POSIX a graceful SIGTERM lets xet-proxyd exit 0 so this is moot, but on
+# Windows MSYS `kill` uses TerminateProcess and the non-zero status would
+# abort this script here - before any of the assertions below get to run,
+# and with no output explaining why.
+kill "$PROXY_PID" 2>/dev/null || true
+wait "$PROXY_PID" 2>/dev/null || true
 PROXY_PID=""
 
 if [[ ! -f "$PROXY_DATA/casserver-snapshot.json" ]]; then
@@ -178,7 +232,7 @@ if [[ ! -f "$PROXY_DATA/hubserver-snapshot.json" ]]; then
     cat "$PROXY_LOG" >&2
     exit 1
 fi
-echo "both snapshot files present after shutdown, using the SAME filenames cmd/xetd itself writes/reads — proving this data dir is a real, drop-in xetd data dir"
+echo "both snapshot files present after shutdown, using the SAME filenames cmd/xetd itself writes/reads - proving this data dir is a real, drop-in xetd data dir"
 
 # ---- start a FRESH plain xetd pointed at the PROXY's data dir -------------
 #
@@ -191,10 +245,10 @@ SECOND_HUB_URL="http://127.0.0.1:${SECOND_HUB_PORT}"
 SECOND_LOG="$WORKDIR/second-xetd.log"
 
 # Deliberately unset HF_TOKEN (still exported into this script's own
-# environment from the earlier `hf` CLI run — see below) for THIS
+# environment from the earlier `hf` CLI run - see below) for THIS
 # server process specifically: cmd/xetd.resolveAuthToken falls back to
 # $HF_TOKEN for its own required local-access token (unlike
-# xet-proxyd, which deliberately excludes that fallback — see its own
+# xet-proxyd, which deliberately excludes that fallback - see its own
 # resolveAuthToken's doc comment, since $HF_TOKEN there means something
 # else: the caller's upstream credential, forwarded through unchanged).
 # Leaving it set here would make this xetd wrongly require auth against
@@ -211,9 +265,9 @@ echo "second xetd is serving the proxy's own data dir directly, with no proxy pr
 # Tear down the upstream too, so a bug that silently falls back to it
 # instead of truly serving from the handed-off data dir would be caught by
 # a connection failure rather than quietly "working" for the wrong reason.
-echo "stopping the upstream xetd — the second xetd must serve entirely from the handed-off data dir now"
-kill "$UPSTREAM_PID"
-wait "$UPSTREAM_PID" 2>/dev/null
+echo "stopping the upstream xetd - the second xetd must serve entirely from the handed-off data dir now"
+kill "$UPSTREAM_PID" 2>/dev/null || true
+wait "$UPSTREAM_PID" 2>/dev/null || true
 UPSTREAM_PID=""
 
 export HF_ENDPOINT="$SECOND_HUB_URL"
@@ -221,12 +275,13 @@ DOWNLOAD_DIR_2="$WORKDIR/downloaded-via-second-xetd"
 mkdir -p "$DOWNLOAD_DIR_2"
 
 echo "hf download $REPO_ID model.bin, via the second (upstream-less) xetd (timeout: ${CMD_TIMEOUT}s)"
-if ! runHf download "$REPO_ID" model.bin --local-dir "$DOWNLOAD_DIR_2"; then
-    status=$?
+status=0
+runHf download "$REPO_ID" model.bin --local-dir "$DOWNLOAD_DIR_2" || status=$?
+if [[ $status -ne 0 ]]; then
     [[ $status -eq 124 ]] && echo "TIMEOUT: 'hf download' via the handed-off data dir exceeded ${CMD_TIMEOUT}s"
     cat "$SECOND_LOG" >&2
     exit 1
 fi
 
 cmp "$TEST_FILE" "$DOWNLOAD_DIR_2/model.bin"
-echo "download via the proxy's handed-off data dir (served by a plain xetd, no upstream, no proxy running) byte-identical — this is the whole point of xet-proxyd"
+echo "download via the proxy's handed-off data dir (served by a plain xetd, no upstream, no proxy running) byte-identical - this is the whole point of xet-proxyd"

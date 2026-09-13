@@ -3,7 +3,7 @@
 // its repoState/revisionState model independently) uses to record a
 // repo/revision/file it learned about from an upstream Hub response,
 // exactly as if a real client had committed it through the normal write
-// path (handleCommit/handleCreateBranch) — so a caching proxy sitting in
+// path (handleCommit/handleCreateBranch) - so a caching proxy sitting in
 // front of the real huggingface.co and this Server end up with identical
 // state for anything the proxy has touched, and a plain xetd pointed at
 // the same -data directory afterward serves it with zero migration step.
@@ -11,15 +11,15 @@
 // counterpart to this pattern.
 package hubserver
 
-import "xet-server/internal/merklehash"
+import "github.com/guilt/xet-server/internal/merklehash"
 
-// IngestRepoInfo ensures repoType/repoID/revision exist locally — the
+// IngestRepoInfo ensures repoType/repoID/revision exist locally - the
 // same side effect handleRepoInfo's own repo/revision lookups already
 // have (getOrCreateRepo always creates on first touch; a revision is
 // only created here, not looked up, so this always leaves it present
 // afterward, unlike handleRepoInfo's read-only getRevision check). A
 // caller that only learned "this repo/revision exists" from an upstream
-// repo-info response — with no actual file contents yet — uses this
+// repo-info response - with no actual file contents yet - uses this
 // alone; IngestFile (below) is for when file contents are also known.
 func (s *Server) IngestRepoInfo(repoType, repoID, revision string) {
 	rs := s.getOrCreateRepo(repoType, repoID)
@@ -27,11 +27,11 @@ func (s *Server) IngestRepoInfo(repoType, repoID, revision string) {
 }
 
 // IngestFile records path's existence and metadata within
-// repoType/repoID/revision as if it had been committed — for a caller
+// repoType/repoID/revision as if it had been committed - for a caller
 // that learned about it from an upstream tree-listing or resolve
 // response rather than a real commit ndjson payload. xetHash may be the
 // zero Hash if not yet known (matching a freshly-committed file before
-// resolve.go's lazy CAS backfill runs — see fileRef's own doc comment);
+// resolve.go's lazy CAS backfill runs - see fileRef's own doc comment);
 // callers that do already know it (e.g. a tree-listing response's
 // xetHash field, or a resolve response's X-Xet-Hash header) should pass
 // it so a subsequent local resolve doesn't need its own CAS lookup.
@@ -44,7 +44,7 @@ func (s *Server) IngestFile(repoType, repoID, revision, path, sha256Hex string, 
 }
 
 // IngestCommit records commitOID as repoType/repoID/revision's current
-// commit — for a caller that relayed a real commit write-through to the
+// commit - for a caller that relayed a real commit write-through to the
 // real Hub (which mints the actual commitOID) rather than generating one
 // itself. Using the REAL upstream commit OID here, instead of this
 // server's own randomCommitOID generator (see commit.go's
@@ -63,7 +63,7 @@ func (s *Server) IngestCommit(repoType, repoID, revision, commitOID string) {
 // HasRepo reports whether repoType/repoID has been touched locally
 // (created, even with no revisions committed to beyond the implicit
 // default). Unlike HasRevision/HasFile, no caller embedding this Server
-// currently branches on this in production — proxyhub decides whether a
+// currently branches on this in production - proxyhub decides whether a
 // request can be served locally via HasRevision/HasFile directly, since
 // those already imply the repo exists. Exported for test/diagnostic
 // observability (see ingest_test.go and proxyhub_test.go).

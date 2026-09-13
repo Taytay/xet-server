@@ -57,7 +57,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // repoInfoResponse is GET /api/{repo_type}s/{repo_id}/revision/{revision}'s
-// body — a small subset of the real Hub's ModelInfo/DatasetInfo/SpaceInfo
+// body - a small subset of the real Hub's ModelInfo/DatasetInfo/SpaceInfo
 // JSON shape. huggingface_hub's snapshot_download only ever reads `sha`
 // off the deserialized object (asserting it's non-nil before using it as
 // the resolved commit hash for every subsequent per-file download), so
@@ -67,28 +67,47 @@ func writeJSON(w http.ResponseWriter, v any) {
 // the response for debugging should see something recognizable.
 //
 // sha is set to the revision name itself (e.g. "main"), not a real git
-// commit hash — this shim has no separate git-commit-hash identity for a
+// commit hash - this shim has no separate git-commit-hash identity for a
 // revision distinct from its name, and nothing in huggingface_hub
 // validates sha's format; every downstream call (list_repo_tree, resolve)
 // already accepts a revision name directly, so round-tripping the name
 // back as "sha" keeps the whole flow internally consistent.
+//
+// Siblings mirrors the real Hub's per-file `siblings` array
+// (huggingface_hub's ModelInfo.siblings, DatasetInfo.siblings): each entry
+// is one file's path in the repo, as `{"rfilename": "<path>"}`. A
+// non-empty siblings list is what lets huggingface_hub's snapshot_download
+// (used by `hf download` with multiple filenames or `--include`) skip the
+// separate list_repo_tree call it otherwise falls back to; that fallback
+// path then feeds a generator (unknown length) into tqdm.contrib.thread_map,
+// whose _min_map_len raises "min() arg is an empty sequence" when every
+// iterable it's given has -1 length_hint. Populating siblings sidesteps
+// that failure by turning the fallback off - snapshot_download reads
+// siblings, builds a real list, and downloads happily.
 type repoInfoResponse struct {
-	ID      string `json:"id"`
-	SHA     string `json:"sha"`
-	Private bool   `json:"private"`
+	ID       string        `json:"id"`
+	SHA      string        `json:"sha"`
+	Private  bool          `json:"private"`
+	Siblings []repoSibling `json:"siblings"`
+}
+
+// repoSibling mirrors one element of huggingface_hub's siblings list -
+// only `rfilename` is required for snapshot_download's fast path.
+type repoSibling struct {
+	RFilename string `json:"rfilename"`
 }
 
 // handleRepoInfo implements GET /api/{repo_type}s/{repo_id}/revision/{revision}:
 // the request huggingface_hub's snapshot_download (used by `hf download`
 // for a whole-repo download, as opposed to a single named file) issues
 // first, to resolve revision to a commit hash before listing/downloading
-// files — and the request `hf upload`'s CLI command issues first, to
+// files - and the request `hf upload`'s CLI command issues first, to
 // check whether the target branch already exists before creating it.
 // Matches resolve.go's existing read-path convention: the repo itself is
 // implicitly created on first touch (matching how a real Hub repo always
 // exists once anything references it), but a nonexistent revision 404s
 // with X-Error-Code: RevisionNotFound rather than being silently created
-// — a repo-info lookup is a read, not a push, so it must not have the
+// - a repo-info lookup is a read, not a push, so it must not have the
 // side effect of creating a branch nobody has committed to yet. The
 // X-Error-Code header is required, not cosmetic: huggingface_hub's
 // hf_raise_for_status only raises the specific RevisionNotFoundError
@@ -97,12 +116,19 @@ type repoInfoResponse struct {
 // generic, uncaught HfHubHTTPError instead.
 func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request, repoType, repoID, revision string) {
 	rs := s.getOrCreateRepo(repoType, repoID)
-	if _, ok := rs.getRevision(revision); !ok {
+	vs, ok := rs.getRevision(revision)
+	if !ok {
 		w.Header().Set("X-Error-Code", "RevisionNotFound")
 		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, repoInfoResponse{ID: repoID, SHA: revision})
+	vs.mu.RLock()
+	siblings := make([]repoSibling, 0, len(vs.files))
+	for path := range vs.files {
+		siblings = append(siblings, repoSibling{RFilename: path})
+	}
+	vs.mu.RUnlock()
+	writeJSON(w, repoInfoResponse{ID: repoID, SHA: revision, Siblings: siblings})
 }
 
 // handleCreateBranch implements POST /api/{repo_type}s/{repo_id}/branch/{branch}:
@@ -110,7 +136,7 @@ func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request, repoType
 // no-ops on) the named revision. Called by `hf upload`'s CLI command
 // after a handleRepoInfo lookup reports the branch doesn't exist yet.
 // This shim's revisions already spring into existence implicitly on
-// first commit (see getOrCreateRevision) — this handler just does the
+// first commit (see getOrCreateRevision) - this handler just does the
 // same thing eagerly, in response to an explicit request instead of
 // waiting for the first commit, so a caller that checks "does this
 // branch exist" immediately afterward (e.g. via handleRepoInfo) sees it.
@@ -123,7 +149,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request, repo
 // xetTokenResponse is the JSON body real HF Hub returns from
 // xet-{read,write}-token, per xet-core's CasJWTInfo (xet_client/src/hub_client/types.rs):
 // hf_xet's Rust client decodes this response as JSON (DirectRefreshRouteTokenRefresher::get_cas_jwt),
-// not from headers — a header-only response with an empty body fails
+// not from headers - a header-only response with an empty body fails
 // hf_xet's resp.json() decode, which it treats as a transient error and
 // retries indefinitely instead of failing fast.
 type xetTokenResponse struct {
@@ -138,7 +164,7 @@ type xetTokenResponse struct {
 // (huggingface_hub's parse_xet_connection_info_from_headers, used on the
 // resolve/download path). Read vs write reach here via distinct routes
 // (see hubserver.go's dispatch) but get identical, unrestricted
-// treatment — auth is not modeled here at all; any request succeeds and
+// treatment - auth is not modeled here at all; any request succeeds and
 // gets a fresh random token with a generous expiry.
 func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType, repoID string) {
 	s.getOrCreateRepo(repoType, repoID)

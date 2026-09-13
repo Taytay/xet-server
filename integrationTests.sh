@@ -14,7 +14,7 @@
 #                       shared no-auth instance at $XETD_URL/$HUB_URL)
 #   $XET_PROXYD      - path to the built xet-proxyd binary (for tests that
 #                       start their own xet-proxyd instance, e.g. the
-#                       offline-handoff test — proves a plain xetd can
+#                       offline-handoff test - proves a plain xetd can
 #                       read a proxy's cache directory directly)
 #   $XETD_URL        - base URL of the running xetd CAS server
 #   $HUB_URL         - base URL of the running xetd Hub API shim
@@ -28,8 +28,8 @@
 # || { echo "mismatch"; exit 1; }`) or `cmp`/`diff` for file comparisons.
 #
 # Each test runs under a timeout (default 10s, override with
-# XET_IT_TEST_TIMEOUT) so a single hanging test — e.g. a network client that
-# doesn't respect NO_PROXY for localhost in a proxied environment — fails
+# XET_IT_TEST_TIMEOUT) so a single hanging test - e.g. a network client that
+# doesn't respect NO_PROXY for localhost in a proxied environment - fails
 # that one test instead of blocking the whole suite indefinitely.
 # =============================================================================
 
@@ -78,7 +78,7 @@ logTest()  { echo -e "${BLUE}TEST:${NC} $1"; }
 
 # ---- timeout helper ----------------------------------------------------------
 #
-# Every test must complete in a handful of seconds — this is a local
+# Every test must complete in a handful of seconds - this is a local
 # integration suite, not an end-to-end network test bed. 10s is generous for
 # any of these tests under normal conditions; a test that needs longer than
 # that is either hung (see hf_cli_roundtrip.sh's proxy-hang note) or doing
@@ -95,12 +95,63 @@ if command -v timeout >/dev/null 2>&1; then
 elif command -v gtimeout >/dev/null 2>&1; then
     TIMEOUT_CMD="gtimeout ${TEST_TIMEOUT}s"
 else
-    echo -e "${YELLOW}WARN:${NC} no 'timeout' or 'gtimeout' found — tests cannot self-terminate if one hangs."
+    echo -e "${YELLOW}WARN:${NC} no 'timeout' or 'gtimeout' found - tests cannot self-terminate if one hangs."
+fi
+
+# ---- auth environment isolation ---------------------------------------------
+#
+# Every server this suite starts (the shared xetd below, plus the per-test
+# xetd/xet-proxyd instances) resolves its own shared secret via
+# auth.ResolveToken, which falls back to the environment:
+#   xetd       -> $XETD_AUTH_TOKEN, then $HF_TOKEN
+#   xet-proxyd -> $XET_PROXYD_AUTH_TOKEN
+#
+# A developer with $HF_TOKEN exported for the real `hf` CLI (very common)
+# would therefore start an xetd that DEMANDS that token on every route,
+# while the tests issue unauthenticated requests - so the suite fails with
+# `401 unauthenticated: auth: request is not authenticated` purely because
+# of ambient environment, not because of any code change. Worse, it passes
+# on a machine without $HF_TOKEN and fails on one with it.
+#
+# Clear all three here so the suite is hermetic and reproducible. Tests that
+# specifically exercise auth (auth_gated_access) pass -auth-token explicitly
+# to their own server instance, so they are unaffected.
+unset HF_TOKEN XETD_AUTH_TOKEN XET_PROXYD_AUTH_TOKEN
+
+# HF_ENDPOINT likewise: if the developer has it pointed at some other local
+# server, the `hf` CLI tests would silently talk to THAT instead of the
+# instance this suite just started. Each test exports its own value.
+unset HF_ENDPOINT
+
+# hf_xet writes a debug log to $HF_XET_LOG_PATH. The tests don't want it, but
+# the discard path is platform-specific: the `hf` CLI is a NATIVE Windows
+# program here, so handing it the literal string "/dev/null" makes it create
+# a stray file at <drive>:\dev\null rather than discarding. Windows' null
+# device is "NUL". Exported centrally (tests defer to an already-set value)
+# so there's one place to get this right.
+if command -v cygpath >/dev/null 2>&1; then
+    export HF_XET_LOG_PATH="NUL"
+else
+    export HF_XET_LOG_PATH=/dev/null
 fi
 
 # ---- server lifecycle -------------------------------------------------------
 
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xet-server-it.XXXXXX")"
+
+# On Windows (MSYS2/Git Bash/Cygwin), mktemp hands back a POSIX path such as
+# /tmp/xet-server-it.AbC123. Bash understands it, but the tests hand these
+# paths to NATIVE Windows programs - the `hf` CLI and its bundled Python, via
+# pipenv - which cannot resolve a POSIX path and fail with
+# `FileNotFoundError: '/tmp/xet-server-it.AbC123/work/<test>/model.bin'`.
+# `cygpath -m` rewrites it to mixed form (D:/tmp/...), which BOTH MSYS bash
+# and native Windows programs accept, so every derived path below (WORKDIR,
+# SERVER_DATA, HF_HOME, --local-dir, ...) is usable from either side without
+# per-test conversion. No-op on Linux/macOS, where cygpath doesn't exist.
+if command -v cygpath >/dev/null 2>&1; then
+    RUN_ROOT="$(cygpath -m "$RUN_ROOT")"
+fi
+
 SERVER_DATA="$RUN_ROOT/server-data"
 SERVER_LOG="$RUN_ROOT/xetd.log"
 SERVER_PORT="${XETD_PORT:-18420}"
@@ -112,8 +163,12 @@ mkdir -p "$SERVER_DATA"
 
 cleanup() {
     if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill "$SERVER_PID" 2>/dev/null
-        wait "$SERVER_PID" 2>/dev/null
+        # `|| true` so a non-zero status from a force-terminated server (the
+        # normal case on Windows, where MSYS kill uses TerminateProcess
+        # rather than delivering a signal) never becomes this script's own
+        # exit status via the EXIT trap, masking the real test results.
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
     fi
     rm -rf "$RUN_ROOT"
 }
@@ -188,7 +243,7 @@ for testFile in "${testFiles[@]}"; do
     durationMs=$(( (endTime - startTime) / 1000000 ))
 
     # Exit code 77 is this suite's "SKIP" convention (a test that can't run
-    # in the current environment, e.g. a missing optional dependency) —
+    # in the current environment, e.g. a missing optional dependency) -
     # counted separately from pass/fail so an environment gap doesn't look
     # like a regression.
     if [[ $exitCode -eq 77 ]]; then

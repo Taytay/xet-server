@@ -11,7 +11,7 @@ const frameMagic = 0x184D2204
 // DecompressFrame decompresses a complete LZ4 frame (magic number, frame
 // descriptor, one or more blocks, end mark, optional checksums) per the
 // public frame format spec. Checksums (header/block/content) are present
-// on the wire but not verified here — this server only needs the decoded
+// on the wire but not verified here - this server only needs the decoded
 // bytes to re-hash and compare against a client-claimed chunk hash, and a
 // checksum mismatch would just mean the re-hash comparison fails anyway.
 func DecompressFrame(src []byte) ([]byte, error) {
@@ -101,7 +101,7 @@ func DecompressFrame(src []byte) ([]byte, error) {
 // reserved). This is not merely a sizing hint: per the frame format spec, a
 // compliant encoder never produces a block whose *decompressed* size
 // exceeds this value, so decompressBlockUnknownSize treats it as a hard
-// ceiling — see its doc comment for why that matters.
+// ceiling - see its doc comment for why that matters.
 func maxBlockSizeForCode(code byte) int {
 	switch code {
 	case 4:
@@ -120,23 +120,23 @@ func maxBlockSizeForCode(code byte) int {
 // decompressBlockUnknownSize decompresses one LZ4 block without knowing its
 // exact decoded size in advance (the frame format, unlike some other LZ4
 // containers, does not store per-block uncompressed size). Starts from a
-// capacity hint and regrows if the block decodes larger — but only up to
+// capacity hint and regrows if the block decodes larger - but only up to
 // maxBlockSize, which is the frame descriptor's declared block-size-code
 // ceiling, not just a starting guess.
 //
 // This ceiling is a real, exploitable amplification vector without it: LZ4
 // block format allows a single ~4-byte match-length extension sequence to
 // expand to hundreds of times its compressed size (a run of 0xFF extension
-// bytes, each worth +255 to the match length — see readExtendedLength).
+// bytes, each worth +255 to the match length - see readExtendedLength).
 // Empirically, a ~16 MiB compressed chunk (comfortably inside a single
 // chunk's 24-bit CompressedLength field, and far under casserver's 128 MiB
 // whole-upload cap) decompressed to 3.8 GB and took ~8 seconds on ordinary
-// hardware before this fix — and that cost is paid on every upload attempt
+// hardware before this fix - and that cost is paid on every upload attempt
 // of the same malicious xorb, since a chunk's hash can't be verified (and
 // therefore deduplicated) without first decompressing it. A real,
 // spec-compliant LZ4 encoder never produces a block exceeding the frame
 // descriptor's declared max block size, so rejecting a block that grows
-// past it is not a compatibility risk — it can only ever reject a
+// past it is not a compatibility risk - it can only ever reject a
 // malformed or hostile frame.
 func decompressBlockUnknownSize(src []byte, maxBlockSize int) ([]byte, error) {
 	dst := make([]byte, min(maxBlockSize, initialBlockSizeGuess))
@@ -147,7 +147,7 @@ func decompressBlockUnknownSize(src []byte, maxBlockSize int) ([]byte, error) {
 		}
 		if errors.Is(err, ErrOutputTooSmall) {
 			if len(dst) >= maxBlockSize {
-				return nil, fmt.Errorf("lz4: block decompresses beyond the frame's declared max block size (%d bytes) — malformed or hostile frame", maxBlockSize)
+				return nil, fmt.Errorf("lz4: block decompresses beyond the frame's declared max block size (%d bytes) - malformed or hostile frame", maxBlockSize)
 			}
 			dst = make([]byte, min(len(dst)*2, maxBlockSize))
 			continue
@@ -157,7 +157,7 @@ func decompressBlockUnknownSize(src []byte, maxBlockSize int) ([]byte, error) {
 }
 
 // initialBlockSizeGuess is the starting buffer size decompressBlockUnknownSize
-// grows from, independent of maxBlockSize's ceiling — most real chunk
+// grows from, independent of maxBlockSize's ceiling - most real chunk
 // payloads are far smaller than the frame's declared max block size, so
 // starting small avoids a large upfront allocation for the (extremely
 // common) case of a small chunk under a frame descriptor that declares a

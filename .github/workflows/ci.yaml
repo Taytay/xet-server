@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Tidy dependencies
+        run: go mod tidy
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: |
+          go build ./cmd/xetd
+          go build ./cmd/xet-proxyd
+          go build ./cmd/xet
+
+      - name: Test
+        run: go test -race ./...
+
+      # Replays every committed fuzz corpus, including the inputs that
+      # previously crashed a target (Go writes those to
+      # testdata/fuzz/<Target>/ on failure, and they are committed). Fast
+      # and deterministic - this is the regression gate. Run under -race
+      # too, since a corpus entry is just as capable of tripping a data
+      # race as a hand-written test.
+      - name: Fuzz corpus (regression)
+        run: go test -race -run '^Fuzz' ./...
+
+      # Time-boxed hunt for NEW inputs, on top of the corpus replay above.
+      # Short per target so CI stays quick; the soak case is
+      # `make test-fuzz FUZZTIME=5m` run locally or on a schedule. Not
+      # under -race: it slows execution ~10x, which for a fixed time
+      # budget means far fewer inputs explored.
+      - name: Fuzz (new inputs)
+        run: make test-fuzz FUZZTIME=20s
+
+  integration:
+    # Separate job: this builds the binaries and drives the real `hf` CLI
+    # against them over HTTP, which is a different failure surface from the
+    # unit tests and shouldn't block/contend with them.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # Without pipenv + huggingface_hub/hf_xet, the two tests that drive
+      # the real `hf` CLI (hf_cli_roundtrip, xet_proxyd_offline_handoff)
+      # skip with exit 77 rather than fail - so CI would look green while
+      # silently covering none of the actual client-compatibility surface
+      # this project exists to guarantee. Installing them is what makes
+      # those two tests real.
+      - name: Install pipenv
+        run: pipx install pipenv
+
+      - name: Install Python test dependencies
+        run: make install
+
+      - name: Integration tests
+        run: make integration-test

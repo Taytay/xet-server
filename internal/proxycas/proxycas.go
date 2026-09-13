@@ -2,25 +2,25 @@
 // pull-through proxy for the real Xet CAS backend, by EMBEDDING a real
 // internal/casserver.Server as its serving engine rather than
 // reimplementing byte-range serving, reconstruction-response building,
-// footer/shard indexing, or snapshotting independently — every one of
+// footer/shard indexing, or snapshotting independently - every one of
 // those already exists, is already tested, and this package's whole
 // job is to keep it filled with data fetched from upstream, not to grow
 // a second copy of the same logic that has to be kept in sync by hand.
 //
 // For each request, this package's job is: check whether the embedded
-// Server already has what's needed (via its Has*/Ingest* API — see
+// Server already has what's needed (via its Has*/Ingest* API - see
 // casserver.Server's own doc comments on IngestXorb/IngestShard/
 // IngestFileRecon/HasXorbFooter/HasXorbBytes/HasFileRecon); if so,
-// delegate straight to embedded.ServeHTTP with no upstream call at all —
+// delegate straight to embedded.ServeHTTP with no upstream call at all -
 // this is what makes anything already cached fully offline-capable. On
 // a miss, fetch the missing piece from upstream (via internal/hfclient's
 // CASClient, discovered per-repo through internal/proxyhub's own
-// xet-token handling — see WithCASClient), feed it into the embedded
+// xet-token handling - see WithCASClient), feed it into the embedded
 // Server through Ingest*, then delegate.
 //
 // Reconstruction is the one place this needs real care: real production
 // Xet's fetch_info/xorbs URLs are presigned URLs pointing directly at
-// blob storage, not at the CAS server itself — casserver's own
+// blob storage, not at the CAS server itself - casserver's own
 // xorbFetchURL always returns its own byte-serving endpoint (it has no
 // notion of a presigned upstream URL), so simply feeding an upstream
 // reconstruction's raw xorb hashes into IngestFileRecon and then
@@ -31,7 +31,7 @@
 // ensureFileReconCached's doc comment): a ranged upstream response only
 // contains that window's terms, so the FIRST fetch for a file must
 // always be for the whole thing, regardless of what the downstream
-// caller actually asked for — IngestFileRecon assumes a complete list.
+// caller actually asked for - IngestFileRecon assumes a complete list.
 //
 // -no-cache disables all of the above: every request is relayed live to
 // upstream via internal/hfclient directly, embedded is never touched.
@@ -46,19 +46,20 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/casserver"
-	"xet-server/internal/hfclient"
-	"xet-server/internal/merklehash"
-	"xet-server/internal/ratelimit"
-	"xet-server/internal/reconwire"
-	"xet-server/internal/shardformat"
-	"xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/casserver"
+	"github.com/guilt/xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/ratelimit"
+	"github.com/guilt/xet-server/internal/reconwire"
+	"github.com/guilt/xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/storage"
 )
 
 // xorbPrefix/chunkDedupPrefix match casserver's own (unexported)
-// constants of the same name/value — duplicated here only because this
+// constants of the same name/value - duplicated here only because this
 // package needs them to validate a path segment before delegating,
 // same as casserver's own handlers do.
 const (
@@ -69,7 +70,7 @@ const (
 // Server wraps an embedded *casserver.Server, filling it from upstream
 // on demand. See the package doc comment for the overall design.
 type Server struct {
-	// Embedded is the real serving engine — exported so a caller (e.g.
+	// Embedded is the real serving engine - exported so a caller (e.g.
 	// cmd/xet-proxyd) can call its own Snapshot/LoadSnapshot directly;
 	// this package never needs its own snapshot format, since it has no
 	// state of its own beyond what Embedded already tracks.
@@ -86,18 +87,18 @@ type Server struct {
 	// (which also forwards it to Embedded, so casserver's own handlers
 	// stay correctly gated once this package delegates to them). This
 	// package's OWN handlers need their own copy checked up front,
-	// before doing any upstream fetch/ingest — an unauthenticated
+	// before doing any upstream fetch/ingest - an unauthenticated
 	// request must never trigger an upstream call or write to Embedded's
 	// storage as a side effect of getting all the way to Embedded's own
 	// (equally strict) check at the point of delegation.
 	authenticator auth.Authenticator
 
 	// rateLimiter, if set via SetRateLimiter, gates every route in this
-	// package by source IP — nil (the default) means unlimited. Unlike
+	// package by source IP - nil (the default) means unlimited. Unlike
 	// casserver's own upload-only rate limiter (uploads are the
 	// expensive local operation there: chunk decompression + hashing),
 	// EVERY route here can trigger a real outbound call to upstream on
-	// a cache miss, not just writes — a read-heavy client hammering
+	// a cache miss, not just writes - a read-heavy client hammering
 	// this proxy costs it (and the real huggingface.co behind it) just
 	// as much as a write-heavy one. See SetRateLimiter's doc comment.
 	rateLimiter *ratelimit.Limiter
@@ -118,8 +119,8 @@ func New(xorbs storage.Store) *Server {
 // SetAuthenticator gates this package's own handlers (see
 // authenticator's doc comment on why this package needs its own copy)
 // AND forwards to the embedded casserver.Server, so casserver's own
-// scope checks — the ones that actually run once a request is
-// delegated — stay in sync.
+// scope checks - the ones that actually run once a request is
+// delegated - stay in sync.
 func (s *Server) SetAuthenticator(a auth.Authenticator) {
 	s.authenticator = a
 	s.Embedded.SetAuthenticator(a)
@@ -129,7 +130,7 @@ func (s *Server) SetAuthenticator(a auth.Authenticator) {
 // EVERY route this package serves (see rateLimiter's doc comment on why
 // that's broader than casserver.Server.SetUploadRateLimiter's
 // upload-only scope). Unlike casserver's own SetUploadRateLimiter, this
-// never rebuilds the mux — gate reads s.rateLimiter fresh on every
+// never rebuilds the mux - gate reads s.rateLimiter fresh on every
 // request, so a later call takes effect immediately, matching this
 // package's own SetAuthenticator/requireScope contract exactly. Does
 // NOT forward to Embedded: casserver's own upload rate limiter is a
@@ -143,7 +144,7 @@ func (s *Server) SetRateLimiter(l *ratelimit.Limiter) {
 // requireScope authenticates r against s.authenticator and checks for
 // scope, writing a 401/403 and returning false if the request should
 // not proceed to any upstream fetch/ingest. Every handler in this
-// package calls this before doing anything else — see authenticator's
+// package calls this before doing anything else - see authenticator's
 // doc comment for why the check has to happen here too, not only once
 // (and later) at the point of delegating to Embedded.
 func (s *Server) requireScope(w http.ResponseWriter, r *http.Request, scope auth.Scope) bool {
@@ -166,7 +167,7 @@ func (s *Server) requireScope(w http.ResponseWriter, r *http.Request, scope auth
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 // xorbsPath/etc. are proxycas's own copies of casserver's path
-// constants, used only to build this package's own route table below —
+// constants, used only to build this package's own route table below -
 // unexported since no caller outside this package references them.
 const (
 	xorbsPath             = casserver.XorbsPath
@@ -189,7 +190,7 @@ func (s *Server) routes() {
 }
 
 // gate wraps next so it only runs once requireScope passes and (if a
-// rate limiter is configured) the per-source-IP rate limit allows it —
+// rate limiter is configured) the per-source-IP rate limit allows it -
 // same order as casserver.Server.routes' own upload-limiter wrapping
 // (auth first, then rate limiting), so an unauthenticated flood never
 // gets to consume another client's rate-limit budget by sharing its
@@ -211,7 +212,7 @@ func (s *Server) gate(scope auth.Scope, next http.HandlerFunc) http.HandlerFunc 
 }
 
 // casClientContextKey is how internal/proxyhub hands this request's
-// per-repo upstream CASClient down to this package's handlers — set via
+// per-repo upstream CASClient down to this package's handlers - set via
 // WithCASClient before the request reaches this server's mux.
 type casClientContextKey struct{}
 
@@ -232,7 +233,7 @@ func casClientFromContext(r *http.Request) (*hfclient.CASClient, error) {
 }
 
 // httpError writes a plain-text HTTP error, logging it at a level
-// matching its cause — same convention as casserver's own httpError: a
+// matching its cause - same convention as casserver's own httpError: a
 // 5xx (this proxy's own fault, or an upstream failure it's relaying) is
 // worth surfacing at Warn by default, while a 4xx (a client protocol/
 // input error, expected under normal operation) logs at Debug only, so
@@ -262,7 +263,7 @@ func (e *upstreamStatusError) Error() string {
 // writeFetchError classifies err from an upstream CAS fetch: a
 // *upstreamStatusError carries the real upstream status, relayed as-is
 // (a 404 means "upstream doesn't have it either"; a 401/403 means the
-// caller's own credential was rejected upstream — either way, the real
+// caller's own credential was rejected upstream - either way, the real
 // status is more useful downstream than a blanket 502, and matches
 // proxyhub.writeUpstreamError's identical relay-4xx-as-is policy for the
 // same class of failure). Anything else (a network/dial/timeout failure,
@@ -282,7 +283,7 @@ func writeFetchError(w http.ResponseWriter, r *http.Request, action string, err 
 	httpError(w, action+": "+err.Error(), http.StatusBadGateway)
 }
 
-// relayResponse copies resp's status, headers, and body verbatim to w —
+// relayResponse copies resp's status, headers, and body verbatim to w -
 // used by every -no-cache code path, and by any handler relaying a
 // non-2xx upstream response unchanged.
 func relayResponse(w http.ResponseWriter, resp *http.Response) {
@@ -399,7 +400,7 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 		// A failed ingest is non-fatal here: the upload to upstream
 		// already succeeded (the caller's actual request), and a future
 		// fetch of this xorb falls back to fetching it from upstream
-		// again — the same as any other as-yet-uncached xorb. Still
+		// again - the same as any other as-yet-uncached xorb. Still
 		// logged at Warn: a silently failing write-through would leave
 		// this proxy quietly serving every subsequent read for this xorb
 		// from upstream instead of cache, indistinguishable from working
@@ -415,7 +416,7 @@ func (s *Server) handleUploadXorb(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleChunkDedup implements GET /v1/chunks/{prefix}/{hash}: always
-// relayed live — shard bytes have no stable reusable cache key this
+// relayed live - shard bytes have no stable reusable cache key this
 // package computes, and casserver's own chunk-dedup index is populated
 // only as a side effect of a real shard upload/ingest, which this
 // package never receives one of independent from a real client's own
@@ -442,7 +443,7 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 }
 
 // relayXorbLive fetches hash directly from upstream and streams the
-// response straight to w — the -no-cache code path for GET.
+// response straight to w - the -no-cache code path for GET.
 func (s *Server) relayXorbLive(w http.ResponseWriter, r *http.Request, prefix, hexHash string) {
 	cas, err := casClientFromContext(r)
 	if err != nil {
@@ -458,7 +459,7 @@ func (s *Server) relayXorbLive(w http.ResponseWriter, r *http.Request, prefix, h
 	relayResponse(w, resp)
 }
 
-// relayHeadXorbLive is relayXorbLive's HEAD counterpart — see
+// relayHeadXorbLive is relayXorbLive's HEAD counterpart - see
 // hfclient.CASClient.HeadXorb's doc comment for why this issues a real
 // upstream HEAD instead of a GET.
 func (s *Server) relayHeadXorbLive(w http.ResponseWriter, r *http.Request, prefix, hexHash string) {
@@ -507,10 +508,117 @@ func (s *Server) fetchAndIngestXorb(ctx context.Context, cas *hfclient.CASClient
 	return nil
 }
 
+// errPartialXorbCoverage reports that a reconstruction's fetch_info
+// covers only PART of the xorb it references, so the whole xorb can never
+// be assembled (let alone hash-verified) from it.
+//
+// This is a normal, expected condition, not a failure: a xorb packs chunks
+// from many files, and a given file's reconstruction only ever cites the
+// chunk ranges THAT file needs. A file using chunks 15-21 of a 1000-chunk
+// xorb gets exactly one fetch_info entry covering those bytes. The
+// presigned URL in that entry is scoped by signature to precisely that
+// byte range - requesting the full object returns 403 - so there is no way
+// to widen it into the complete xorb the content-addressed store requires.
+// Callers treat this as "this xorb isn't cacheable from this particular
+// reconstruction" and fall back to relaying upstream's response, letting
+// the client fetch those bytes straight from the CDN.
+var errPartialXorbCoverage = errors.New("proxycas: reconstruction fetch_info covers only part of the xorb")
+
+// cacheXorbFromFetchInfo ensures hash's bytes and footer are present in
+// the embedded server, fetching the xorb's bytes via the presigned URLs an
+// upstream reconstruction's fetch_info provides (concatenating the covered
+// byte ranges in order) and ingesting on a miss. The real Xet CAS server
+// does not serve xorb bodies over GET /v1/xorbs/ (its allow list is
+// HEAD,POST) - the presigned URLs are the only way to get the bytes - so
+// a fetch_info-bearing reconstruction must be cached this way. An upstream
+// without presigned URLs (this project's own casserver, or a test
+// stand-in) falls back to the direct xorb-fetch path via ensureXorbCached.
+//
+// Returns errPartialXorbCoverage when fetch_info doesn't span the xorb from
+// chunk 0 - see that error's doc comment for why that's expected rather
+// than exceptional. That case is detected BEFORE any network transfer,
+// so a partially-cited xorb costs no bandwidth here at all (the previous
+// version downloaded the cited ranges, concatenated them, then failed
+// IngestXorb's hash check with a misleading "xorb hash in URL does not
+// match hash computed from chunk contents", re-paying that transfer on
+// every subsequent request for the same file).
+func (s *Server) cacheXorbFromFetchInfo(r *http.Request, hash merklehash.Hash, infos []reconwire.FetchInfoEntry) error {
+	if s.Embedded.HasXorbFooter(hash) {
+		if has, err := s.Embedded.HasXorbBytes(r.Context(), hash); err == nil && has {
+			return nil
+		}
+	}
+	if len(infos) == 0 {
+		return s.ensureXorbCached(r, hash)
+	}
+	// A complete xorb must be cited from its very first chunk. Anything
+	// else is a mid-xorb slice that can't be completed (see
+	// errPartialXorbCoverage). Cheap structural check, no I/O.
+	if !citesXorbFromStart(infos) {
+		return errPartialXorbCoverage
+	}
+
+	cas, err := casClientFromContext(r)
+	if err != nil {
+		return err
+	}
+
+	// Concatenate the covered byte ranges in ascending offset order to
+	// recover the full (compressed) xorb before ingesting.
+	ordered := append([]reconwire.FetchInfoEntry(nil), infos...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].URLRange.Start < ordered[j].URLRange.Start })
+
+	var buf bytes.Buffer
+	for _, info := range ordered {
+		rangeHeader := fmt.Sprintf("bytes=%d-%d", info.URLRange.Start, info.URLRange.End) // both ends inclusive
+		resp, err := cas.FetchPresigned(r.Context(), info.URL, rangeHeader)
+		if err != nil {
+			return fmt.Errorf("fetch xorb %s presigned range %s: %w", hash.Hex(), rangeHeader, err)
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			return &upstreamStatusError{Status: resp.StatusCode, Body: string(body)}
+		}
+		if _, err := io.Copy(&buf, resp.Body); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("read xorb %s presigned range %s: %w", hash.Hex(), rangeHeader, err)
+		}
+		resp.Body.Close()
+	}
+
+	if _, err := s.Embedded.IngestXorb(r.Context(), hash, bytes.NewReader(buf.Bytes())); err != nil {
+		// A hash mismatch here means the cited ranges started at chunk 0
+		// but still stopped short of the xorb's end - a partial slice
+		// that merely looked complete to the structural check above.
+		// Same expected condition as errPartialXorbCoverage, just only
+		// detectable after hashing, so report it as such rather than as
+		// a hard ingest failure.
+		if errors.Is(err, casserver.ErrXorbHashMismatch) {
+			return errPartialXorbCoverage
+		}
+		return fmt.Errorf("ingest xorb %s: %w", hash.Hex(), err)
+	}
+	return nil
+}
+
+// citesXorbFromStart reports whether infos covers the xorb beginning at
+// its first chunk (index 0). A xorb is content-addressed over ALL its
+// chunks, so a citation that starts anywhere else can never be assembled
+// into the verifiable whole - see errPartialXorbCoverage.
+func citesXorbFromStart(infos []reconwire.FetchInfoEntry) bool {
+	for _, info := range infos {
+		if info.Range.Start == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // --- shard upload --------------------------------------------------------
 
 // maxShardBytes matches casserver's own cap.
-const maxShardBytes = 16 * 1024 * 1024
+const maxShardBytes = 512 * 1024 * 1024
 
 // handleUploadShard implements POST /v1/shards: relay write-through to
 // upstream, then (unless NoCache) also ingest the same bytes into the
@@ -569,7 +677,7 @@ func (s *Server) handleReconstructionV2(w http.ResponseWriter, r *http.Request) 
 // whatever byte range the caller's Range header requests, either
 // entirely from the embedded server (once this file's complete
 // reconstruction and every xorb it references are known) or by
-// fetching the WHOLE file's reconstruction from upstream on a miss —
+// fetching the WHOLE file's reconstruction from upstream on a miss -
 // see the package doc comment for why this is a whole-file fetch, not a
 // relay of the caller's own range: a Range-limited upstream response
 // only contains that window's terms, and IngestFileRecon assumes a
@@ -591,7 +699,23 @@ func (s *Server) handleReconstructionCommon(w http.ResponseWriter, r *http.Reque
 
 	found, err := s.ensureFileReconCached(r, fileID)
 	if err != nil {
-		writeFetchError(w, r, "fetch reconstruction", err)
+		// The client only needs upstream's reconstruction response and the
+		// presigned URLs inside it - it fetches xorb bodies straight from
+		// the CDN, not through this proxy's CAS - so a caching failure must
+		// never fail the download. Relay live and let the client proceed;
+		// the local cache simply doesn't advance for this file.
+		if errors.Is(err, errPartialXorbCoverage) {
+			// Expected and unavoidable: this file uses only part of a
+			// shared xorb, whose presigned URL is signature-scoped to
+			// that slice. Debug, not Warn - it would otherwise fire for
+			// a large fraction of files in any densely-packed repo.
+			slog.Debug("proxycas: file not cacheable (partial xorb citation), relaying live",
+				"file_id", fileIDHex)
+		} else {
+			slog.Warn("proxycas: reconstruction cache-ingest failed, falling back to live relay (client still downloads via presigned URLs)",
+				"file_id", fileIDHex, "error", err)
+		}
+		s.relayReconstructionLive(w, r, fileIDHex, v2)
 		return
 	}
 	if !found {
@@ -619,14 +743,14 @@ func (s *Server) relayReconstructionLive(w http.ResponseWriter, r *http.Request,
 // ensureFileReconCached returns found=true if fileID's complete
 // reconstruction is now known to the embedded server (already was, or
 // was just fetched+ingested), found=false for an upstream 404 (unknown
-// file — the one non-error "not found" outcome, distinct from every
+// file - the one non-error "not found" outcome, distinct from every
 // other failure, which is returned as an error).
 //
 // Deliberately prefetches EVERY xorb the file's reconstruction
 // references, not just the ones the caller's own Range header touches:
 // once HasFileRecon(fileID) is true, a later request for a DIFFERENT
 // range of the same file takes the fast path above with no further
-// upstream calls — that only stays correct if every term's footer (and
+// upstream calls - that only stays correct if every term's footer (and
 // bytes) is already cached, since casserver's own reconstruction
 // handler has no fallback for a term whose footer isn't found (it
 // httpErrors). Fetching only the requested window's xorbs on the first
@@ -634,7 +758,7 @@ func (s *Server) relayReconstructionLive(w http.ResponseWriter, r *http.Request,
 // subsequent different-range request would need its own extra
 // bookkeeping to detect and backfill the gap. The cost is fetching more
 // than one request strictly needs; the benefit is that any file ever
-// requested — at any range — becomes wholly and safely offline-capable
+// requested - at any range - becomes wholly and safely offline-capable
 // after that first request.
 func (s *Server) ensureFileReconCached(r *http.Request, fileID merklehash.Hash) (found bool, err error) {
 	if s.Embedded.HasFileRecon(fileID) {
@@ -677,7 +801,20 @@ func (s *Server) ensureFileReconCached(r *http.Request, fileID merklehash.Hash) 
 		if err != nil {
 			return false, fmt.Errorf("reconstruction for %s: invalid xorb hash %q: %w", fileIDHex, term.Hash, err)
 		}
-		if err := s.ensureXorbCached(r, xorbHash); err != nil {
+		if err := s.cacheXorbFromFetchInfo(r, xorbHash, wire.FetchInfo[term.Hash]); err != nil {
+			if errors.Is(err, errPartialXorbCoverage) {
+				// Expected for any file that uses only part of a shared
+				// xorb (see errPartialXorbCoverage). This file can't be
+				// served from cache, so don't record a file_recon that
+				// would later point at xorb bytes we don't have -
+				// casserver's reconstruction handler has no fallback for
+				// a term whose xorb is missing and would hard-error.
+				// Reporting notFound=false with no error makes the
+				// caller relay upstream live instead.
+				slog.Debug("proxycas: file not cacheable, some xorbs only partially cited by its reconstruction",
+					"file_id", fileIDHex, "xorb", term.Hash)
+				return false, errPartialXorbCoverage
+			}
 			return false, fmt.Errorf("cache xorb %s referenced by %s: %w", term.Hash, fileIDHex, err)
 		}
 		entries = append(entries, shardformat.FileDataSequenceEntry{

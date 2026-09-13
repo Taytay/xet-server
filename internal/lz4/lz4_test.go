@@ -80,7 +80,7 @@ func TestDecompressFrame_RejectsBadMagic(t *testing.T) {
 // session at internal/lz4/testdata/real_xorb_chunk.bin: an 8-byte xorb
 // chunk header followed by the LZ4-compressed payload of highly repetitive
 // text ("The quick brown fox jumps over the lazy dog. " repeated). This is
-// the strongest test in this package — it proves the decoder works against
+// the strongest test in this package - it proves the decoder works against
 // genuine third-party-produced frames, not just self-authored fixtures.
 func TestDecompressFrame_RealHFXetCapture(t *testing.T) {
 	raw, err := os.ReadFile("testdata/real_xorb_chunk.bin")

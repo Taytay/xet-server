@@ -6,7 +6,7 @@ release `v5.17.14`, licensed
 
 Only the five files `cmd/xetd`'s embedded API-docs UI actually needs are
 vendored here (not the full swagger-ui repo, which bundles docs sites and
-multiple UI variants unrelated to this use) — fetched directly from the
+multiple UI variants unrelated to this use) - fetched directly from the
 tagged release's `dist/` directory:
 
 ```bash
@@ -16,7 +16,7 @@ for f in swagger-ui.css swagger-ui-bundle.js swagger-ui-standalone-preset.js fav
 done
 ```
 
-`index.html` alongside these files is this project's own (not vendored) —
+`index.html` alongside these files is this project's own (not vendored) -
 see `cmd/xetd/apidocs.go` for how all six files are embedded into the
 `xetd` binary via `go:embed` and served at `/api-docs`.
 

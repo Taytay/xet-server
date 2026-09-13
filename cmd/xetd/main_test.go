@@ -9,7 +9,7 @@ package main
 //
 // "test-fixture-token-not-a-real-secret" and "hf-fixture-token-not-a-real-secret"
 // below are hardcoded test fixtures with no relation to any real
-// credential — flagged explicitly so static-analysis secret scanners
+// credential - flagged explicitly so static-analysis secret scanners
 // don't need to guess.
 
 import "testing"

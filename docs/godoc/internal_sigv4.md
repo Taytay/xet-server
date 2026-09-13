@@ -1,7 +1,7 @@
-# `xet-server/internal/sigv4`
+# `github.com/guilt/xet-server/internal/sigv4`
 
 ```
-package sigv4 // import "xet-server/internal/sigv4"
+package sigv4 // import "github.com/guilt/xet-server/internal/sigv4"
 
 Package sigv4 implements AWS Signature Version 4 request signing using only
 the Go standard library, so xet-server's S3-compatible storage backend needs

@@ -9,7 +9,7 @@
 // cross-checked against its own published test vector (github.com/
 // jedisct1/zig-xet, src/compression.zig: applyByteGrouping /
 // reverseByteGrouping), since xet-core's own Rust source was not read for
-// this transform — only its existence and name (compression_scheme.rs) were
+// this transform - only its existence and name (compression_scheme.rs) were
 // confirmed there.
 package bg4
 

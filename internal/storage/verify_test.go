@@ -95,7 +95,7 @@ func (s *spyStore) rawBlob(key string) []byte {
 
 // --- capability test doubles -------------------------------------------
 
-// minimalStore implements only the core Store interface — none of
+// minimalStore implements only the core Store interface - none of
 // Deleter, Sizer, URLPresigner.
 type minimalStore struct{ *spyStore }
 
@@ -126,7 +126,7 @@ func (f *fullCapabilityStore) PresignGet(_ context.Context, key string, _ int) (
 }
 
 // deleterAndSizerOnlyStore implements Deleter and Sizer but not
-// URLPresigner — the case that must NOT be mistaken for full capability.
+// URLPresigner - the case that must NOT be mistaken for full capability.
 type deleterAndSizerOnlyStore struct{ *spyStore }
 
 func (d *deleterAndSizerOnlyStore) Delete(_ context.Context, key string) error { return nil }
@@ -149,7 +149,7 @@ func TestVerifyingStore_NewKey_PassesThroughWithNoExtraReads(t *testing.T) {
 
 	getCalls, putCalls := spy.counts()
 	if getCalls != 0 {
-		t.Errorf("Get calls = %d, want 0 — a new key must not trigger any read for comparison", getCalls)
+		t.Errorf("Get calls = %d, want 0 - a new key must not trigger any read for comparison", getCalls)
 	}
 	if putCalls != 1 {
 		t.Errorf("Put calls = %d, want exactly 1", putCalls)
@@ -189,7 +189,7 @@ func TestVerifyingStore_DedupHit_MismatchedContent_LeavesOriginalUntouched(t *te
 		t.Fatalf("first Put() error = %v", err)
 	}
 
-	// Same length, different bytes — simulates a hash collision or
+	// Same length, different bytes - simulates a hash collision or
 	// corrupted-on-disk scenario, not a truncation.
 	different := []byte("the WRONG but same-length content!")
 	if len(different) != len(original) {
@@ -255,7 +255,7 @@ func TestVerifyingStore_CapabilityPassthrough_FullCapabilityStore(t *testing.T) 
 		t.Errorf("Delete() error = %v", err)
 	}
 	if len(inner.deleted) != 1 || inner.deleted[0] != "some-key" {
-		t.Errorf("inner.deleted = %v, want [\"some-key\"] — Delete must forward to inner", inner.deleted)
+		t.Errorf("inner.deleted = %v, want [\"some-key\"] - Delete must forward to inner", inner.deleted)
 	}
 
 	sizer, ok := vs.(Sizer)
@@ -279,7 +279,7 @@ func TestVerifyingStore_CapabilityPassthrough_FullCapabilityStore(t *testing.T) 
 }
 
 func TestVerifyingStore_CapabilityPassthrough_PartialCapabilityNotOverclaimed(t *testing.T) {
-	// Implements Deleter+Sizer but NOT URLPresigner — the exact shape a
+	// Implements Deleter+Sizer but NOT URLPresigner - the exact shape a
 	// bug would most easily miss (three capabilities means 8 combinations
 	// to get right, not just "all or nothing").
 	inner := &deleterAndSizerOnlyStore{newSpyStore()}
@@ -292,7 +292,7 @@ func TestVerifyingStore_CapabilityPassthrough_PartialCapabilityNotOverclaimed(t 
 		t.Error("wrapped store does not satisfy Sizer, want true")
 	}
 	if _, ok := vs.(URLPresigner); ok {
-		t.Error("wrapped store satisfies URLPresigner, want false — inner does not implement it")
+		t.Error("wrapped store satisfies URLPresigner, want false - inner does not implement it")
 	}
 }
 
@@ -327,5 +327,5 @@ func TestVerifyingStore_ConcurrentPuts_NoRaceNoGoroutineLeak(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("goroutine count settled at %d, started at %d — possible leak from compareStreams", runtime.NumGoroutine(), before)
+	t.Errorf("goroutine count settled at %d, started at %d - possible leak from compareStreams", runtime.NumGoroutine(), before)
 }

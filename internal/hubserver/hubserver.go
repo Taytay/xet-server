@@ -3,26 +3,26 @@
 // `hf upload` / `hf download` CLI commands (via huggingface_hub) work
 // end-to-end against a local server, with HF_ENDPOINT pointed at it:
 //
-//   - POST /api/repos/create                                  — repo creation (idempotent)
+//   - POST /api/repos/create                                  - repo creation (idempotent)
 //   - GET  /api/{repo_type}s/{repo_id}/xet-{read,write}-token/{revision}
-//     — issues a CAS endpoint + bearer token via response headers
-//   - POST /api/{repo_type}s/{repo_id}/commit/{revision}       — ndjson commit payload
-//   - HEAD/GET /{repo_id}/resolve/{revision}/{filename}        — file metadata + content
+//   - issues a CAS endpoint + bearer token via response headers
+//   - POST /api/{repo_type}s/{repo_id}/commit/{revision}       - ndjson commit payload
+//   - HEAD/GET /{repo_id}/resolve/{revision}/{filename}        - file metadata + content
 //
 // Each repo supports real, independent revisions (a "main" branch is
 // created implicitly on first touch, matching how a real repo always has
 // a default branch; any other revision name is created on first commit to
-// it) — commit/resolve/preupload all operate against the named revision's
+// it) - commit/resolve/preupload all operate against the named revision's
 // own file set and commit history, not a single shared implicit state.
 // No git refs/PRs are modeled. Every route except telemetry-equivalents
 // (there are none in this shim) requires the scope real xet-core/Hub
 // convention implies (write for token/commit/preupload/repo-create,
-// read for resolve), enforced via auth.Authenticator — see
+// read for resolve), enforced via auth.Authenticator - see
 // SetAuthenticator. The default (auth.NoAuth{}) enforces nothing, this
 // server's behavior prior to v0.8.0: any bearer token (or none) is
 // accepted. State is held in memory alongside the paired
 // casserver.Server, since a commit's file entries need to reference the
-// Xet file hash the CAS layer already knows how to reconstruct — and
+// Xet file hash the CAS layer already knows how to reconstruct - and
 // periodically checkpointed to disk (see Server.Snapshot/LoadSnapshot in
 // snapshot.go) so it survives a restart.
 package hubserver
@@ -35,9 +35,9 @@ import (
 	"strings"
 	"sync"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/merklehash"
-	"xet-server/internal/routing"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/routing"
 )
 
 // casInfo is the subset of casserver.Server's read-side API this package
@@ -60,7 +60,7 @@ type Server struct {
 
 	// mu guards only the repos map itself (adding a new repoKey); each
 	// repoState has its own mutex for its revisions map, and each
-	// revisionState has its own mutex for its files — a commit/resolve on
+	// revisionState has its own mutex for its files - a commit/resolve on
 	// one repo, or one revision within a repo, never blocks on unrelated
 	// activity elsewhere.
 	mu    sync.RWMutex
@@ -68,8 +68,8 @@ type Server struct {
 
 	// authenticator gates every route per its required scope (see
 	// requireScope and each dispatch handler below). Defaults to
-	// auth.NoAuth{} — this server's pre-v0.8.0 behavior, unconditionally
-	// allowing every request — until SetAuthenticator is called with
+	// auth.NoAuth{} - this server's pre-v0.8.0 behavior, unconditionally
+	// allowing every request - until SetAuthenticator is called with
 	// something else.
 	authenticator auth.Authenticator
 }
@@ -91,7 +91,7 @@ type fileRef struct {
 
 // defaultRevision is created implicitly for every repo on first touch,
 // matching how a real repo always has a default branch even before any
-// commit — the same way real HF Hub's repo creation immediately gives you
+// commit - the same way real HF Hub's repo creation immediately gives you
 // a "main" you can push to.
 const defaultRevision = "main"
 
@@ -104,7 +104,7 @@ type repoState struct {
 }
 
 // revisionState is one revision's (branch's) committed file set and
-// commit history within a repo — what used to be repoState's fields
+// commit history within a repo - what used to be repoState's fields
 // directly, before repos gained more than one revision.
 type revisionState struct {
 	mu         sync.RWMutex
@@ -126,8 +126,8 @@ func New(casBaseURL string, cas casInfo) *Server {
 }
 
 // SetAuthenticator replaces this server's Authenticator (default
-// auth.NoAuth{}, i.e. no enforcement — this server's pre-v0.8.0
-// behavior). Safe to call at any time — unlike casserver's
+// auth.NoAuth{}, i.e. no enforcement - this server's pre-v0.8.0
+// behavior). Safe to call at any time - unlike casserver's
 // SetAuthenticator, hubserver's routes dispatch by parsing the path
 // inside each handler rather than registering one mux pattern per
 // logical endpoint, so there's no route table to rebuild.
@@ -139,7 +139,7 @@ func (s *Server) SetAuthenticator(a auth.Authenticator) {
 // scope, writing a 401 (no/invalid credential) or 403 (valid credential,
 // insufficient scope) and returning false if the request should not
 // proceed. Mirrors casserver.Server.requireScope's semantics exactly
-// (see its doc comment) — kept as a plain bool-returning helper instead
+// (see its doc comment) - kept as a plain bool-returning helper instead
 // of a http.HandlerFunc-wrapping middleware here, since hubserver's
 // dispatch handlers (handleAPIGet/handleAPIPost/handleResolveDispatch)
 // need to parse the path before they know which scope applies, unlike
@@ -166,7 +166,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 func (s *Server) routes() {
 	// repos/create is dispatched through handleAPIPost (which checks
 	// rest == "repos/create"), NOT registered as its own literal mux
-	// pattern here — Go's ServeMux prefers a more specific literal pattern
+	// pattern here - Go's ServeMux prefers a more specific literal pattern
 	// over a wildcard one, so a direct "POST /api/repos/create" route
 	// would take priority over "POST /api/{rest...}" below and bypass
 	// handleAPIPost's requireScope check on this endpoint entirely.
@@ -175,7 +175,7 @@ func (s *Server) routes() {
 	// these routes take the whole remainder as one wildcard and parse the
 	// repo type / repo ID / trailing segment out of it manually.
 	//
-	// No routing.MountWithVersion here — huggingface_hub's real REST API
+	// No routing.MountWithVersion here - huggingface_hub's real REST API
 	// is unversioned (no "/v1" segment exists in the actual protocol this
 	// mirrors), so routing.Mount (no version prefix) is used instead,
 	// still getting the same declarative-route-table shape as
@@ -237,7 +237,7 @@ func (s *Server) handleAPIGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// tail[2:] is the optional path-in-repo, itself a single
-		// (percent-decoded-by-net/http) path segment — see
+		// (percent-decoded-by-net/http) path segment - see
 		// list_repo_tree's encoded_path_in_repo, which quotes it with
 		// safe="" so a "/" inside it is percent-encoded rather than
 		// splitting into more segments.
@@ -252,7 +252,7 @@ func (s *Server) handleAPIGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAPIPost dispatches POST /api/... requests: repo creation, preupload
-// mode negotiation, and commit — keyed the same way as handleAPIGet.
+// mode negotiation, and commit - keyed the same way as handleAPIGet.
 func (s *Server) handleAPIPost(w http.ResponseWriter, r *http.Request) {
 	rest := r.PathValue("rest")
 	if rest == "repos/create" {
@@ -284,7 +284,7 @@ func (s *Server) handleAPIPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// tail[1] here is the branch name being created, not a revision to
-		// operate against — handleCreateBranch's own signature names it
+		// operate against - handleCreateBranch's own signature names it
 		// accordingly.
 		s.handleCreateBranch(w, r, repoType, repoID, revision)
 	default:
@@ -292,22 +292,125 @@ func (s *Server) handleAPIPost(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleResolveDispatch dispatches GET/HEAD /{repoID}/resolve/{revision}/{filename}
-// requests. Unlike the /api/ routes, resolve URLs have no repoType prefix
-// segment: the path is "{namespace}/{name}/resolve/{revision}/{filename...}".
+// lfsBatchPathSuffix is the git-lfs batch API route suffix that appears at
+// the end of every upload-negotiation URL this server serves: the path is
+// "{namespace}/{name}.git/info/lfs/objects/batch", matched inside the
+// catch-all "/{rest...}" route below (the same one that dispatches
+// resolve), since the ".git" segment makes the repo ID part of the path.
+const lfsBatchPathSuffix = "/info/lfs/objects/batch"
+
+// handleResolveDispatch dispatches GET/HEAD resolve requests and the
+// git-lfs batch endpoint. Unlike the /api/ routes, resolve URLs have no
+// leading /api/ segment. Three on-wire shapes are known:
+//   - models:              "{namespace}/{name}/resolve/{revision}/{filename...}"
+//   - datasets / spaces:   "{repo_type}s/{namespace}/{name}/resolve/{revision}/{filename...}"
+//   - future repo types:   any leading segment(s) before "{namespace}/{name}"
+//
+// The git-lfs batch path parallels this: "{repo_id}.git/info/lfs/objects/batch"
+// with the same optional leading repo-type prefix. Rather than
+// hard-coding today's prefix set (datasets/spaces/buckets/...), parse
+// from the RIGHT: find "/resolve/" (or the ".git/info/lfs/objects/batch"
+// suffix) and take the two segments IMMEDIATELY before it as
+// namespace/name. That way any current or future repo-type prefix a real
+// Hub URL might carry is transparently accepted without a code change
+// per type.
 func (s *Server) handleResolveDispatch(w http.ResponseWriter, r *http.Request) {
-	parts := strings.SplitN(r.PathValue("rest"), "/", 5)
-	if len(parts) < 5 || parts[2] != "resolve" {
+	rest := r.PathValue("rest")
+	if strings.HasSuffix(rest, lfsBatchPathSuffix) {
+		repoID := extractRepoIDBefore(rest, lfsBatchPathSuffix)
+		repoID = strings.TrimSuffix(repoID, ".git")
+		s.handleLFSBatch(w, r, repoID)
+		return
+	}
+	repoType, repoID, revision, filename, ok := parseResolvePath(rest)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 	if !s.requireScope(w, r, auth.ScopeRead) {
 		return
 	}
-	repoID := parts[0] + "/" + parts[1]
-	revision := parts[3]
-	filename := parts[4]
-	s.handleResolve(w, r, repoID, revision, filename)
+	s.handleResolve(w, r, repoType, repoID, revision, filename)
+}
+
+// parseResolvePath finds the "/resolve/" marker in rest and returns the
+// two path segments IMMEDIATELY before it as repoID (namespace/name),
+// with the revision and filename taken from AFTER the marker, and
+// repoType derived from whatever segment precedes the namespace
+// ("datasets" -> "dataset", "spaces" -> "space", nothing -> "model").
+// Parsing from the right means any future repo-type prefix a real Hub URL
+// adds is accepted without a code change here.
+func parseResolvePath(rest string) (repoType, repoID, revision, filename string, ok bool) {
+	const marker = "/resolve/"
+	idx := strings.Index(rest, marker)
+	if idx < 0 {
+		return "", "", "", "", false
+	}
+	// Head: everything before "/resolve/", i.e. "[type/...]owner/name".
+	// Take the last two segments as the repo ID, and whatever precedes
+	// them as the repo-type prefix.
+	headParts := strings.Split(rest[:idx], "/")
+	if len(headParts) < 2 {
+		return "", "", "", "", false
+	}
+	// Both repo-ID segments must be non-empty. Without this, a path like
+	// "//resolve//0" parses as repoID "/" with an empty namespace AND an
+	// empty name - a repo identity no real request can address, which
+	// would then be created as live state and could be collided with by
+	// any other equally-malformed path. (Found by FuzzParseResolvePath.)
+	namespace, name := headParts[len(headParts)-2], headParts[len(headParts)-1]
+	if namespace == "" || name == "" {
+		return "", "", "", "", false
+	}
+	repoID = namespace + "/" + name
+	repoType = repoTypeFromPrefix(headParts[:len(headParts)-2])
+	// Tail: "{revision}/{filename...}"
+	tail := rest[idx+len(marker):]
+	slash := strings.Index(tail, "/")
+	if slash < 0 {
+		return "", "", "", "", false
+	}
+	revision = tail[:slash]
+	filename = tail[slash+1:]
+	// An empty revision is as meaningless as an empty repo segment, and
+	// would otherwise be looked up as a revision literally named "".
+	if revision == "" || filename == "" {
+		return "", "", "", "", false
+	}
+	return repoType, repoID, revision, filename, true
+}
+
+// repoTypeFromPrefix maps a resolve URL's leading segments (everything
+// before {namespace}/{name}) to a singular repo type. Models carry no
+// prefix at all; datasets and spaces carry exactly one pluralized
+// segment. Anything else (empty, or an unrecognised future prefix) falls
+// back to "model", matching huggingface_hub's own default repo_type.
+func repoTypeFromPrefix(prefix []string) string {
+	if len(prefix) == 0 {
+		return "model"
+	}
+	switch prefix[len(prefix)-1] {
+	case "datasets":
+		return "dataset"
+	case "spaces":
+		return "space"
+	default:
+		return "model"
+	}
+}
+
+// extractRepoIDBefore returns the two segments IMMEDIATELY before suffix
+// (matching parseResolvePath's owner/name extraction). Any leading
+// repo-type segment(s) are dropped, mirroring parseResolvePath's rules.
+// Used by the LFS-batch dispatch to accept dataset/space/etc.-prefixed
+// batch URLs the same way it accepts model-shaped ones.
+func extractRepoIDBefore(rest, suffix string) string {
+	head := strings.TrimSuffix(rest, suffix)
+	parts := strings.Split(head, "/")
+	if len(parts) < 2 {
+		return head
+	}
+	return parts[len(parts)-2] + "/" + parts[len(parts)-1]
 }
 
 // getOrCreateRepo returns the repoState for repoType/repoID, creating it
@@ -331,7 +434,7 @@ func newRevisionState() *revisionState {
 }
 
 // getOrCreateRevision returns rs's revisionState for the named revision,
-// creating an empty one on first touch — matching how pushing to a new
+// creating an empty one on first touch - matching how pushing to a new
 // branch name on a real repo implicitly creates that branch. An empty
 // revision string is treated as defaultRevision, since some call sites
 // (e.g. a resolve URL with no revision segment) may not always supply one
@@ -351,7 +454,7 @@ func (rs *repoState) getOrCreateRevision(revision string) *revisionState {
 }
 
 // getRevision returns rs's revisionState for the named revision without
-// creating it, or false if that revision doesn't exist yet — used by
+// creating it, or false if that revision doesn't exist yet - used by
 // read paths (resolve) where a nonexistent revision should 404, not
 // silently spring into existence.
 func (rs *repoState) getRevision(revision string) (*revisionState, bool) {
@@ -365,7 +468,7 @@ func (rs *repoState) getRevision(revision string) (*revisionState, bool) {
 }
 
 // httpErrorJSON writes a JSON error response and logs it at a level
-// matching its cause — see casserver.httpError's comment for why 5xx and
+// matching its cause - see casserver.httpError's comment for why 5xx and
 // 4xx are split between Warn and Debug.
 func httpErrorJSON(w http.ResponseWriter, msg string, code int) {
 	if code >= 500 {

@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // handleResolve implements HEAD and GET /{repoID}/resolve/{revision}/{filename}:
@@ -16,10 +16,10 @@ import (
 // huggingface_hub's HEAD call is what triggers the Xet download path: it
 // looks for X-Xet-Hash plus either a `Link: <url>; rel="xet-auth"` header
 // or X-Xet-Refresh-Route, and if present, downloads via hf_xet instead of
-// this resolve URL directly — so the GET path below only matters as a
+// this resolve URL directly - so the GET path below only matters as a
 // fallback and is not exercised by a normal `hf download`.
-func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, revision, filename string) {
-	rs := s.getOrCreateRepo("model", repoID) // repo type is not encoded in the resolve URL; default assumption
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoType, repoID, revision, filename string) {
+	rs := s.getOrCreateRepo(repoType, repoID)
 	vs, ok := rs.getRevision(revision)
 	if !ok {
 		slog.Debug("resolve revision lookup", "repoID", repoID, "revision", revision, "found", false)
@@ -37,16 +37,16 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 	}
 
 	// ref.XetHash, when already known (e.g. this file was learned from an
-	// upstream response that already carried it — see IngestFile — or
+	// upstream response that already carried it - see IngestFile - or
 	// restored from a snapshot), replaces the CAS.XetHashForSHA256
 	// bridge lookup as the identifier to check. It is still only ever
 	// used as a LOOKUP KEY, never as proof of anything by itself: the
 	// size returned below always comes from CAS.FileSize(xetHash), which
 	// sums fileRecon entries that were only ever populated from actually
 	// -verified reconstruction data (a real ingested xorb's claimed hash
-	// checked against its recomputed content hash — see
+	// checked against its recomputed content hash - see
 	// casserver.IngestXorb). If FileSize can't find it, that's a clean
-	// 404 — "the reconstruction isn't actually available" — never
+	// 404 - "the reconstruction isn't actually available" - never
 	// papered over with ref's own (client-declared, unverified) Size.
 	var xetHash merklehash.Hash
 	if !ref.XetHash.IsZero() {
@@ -58,7 +58,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 		if !known {
 			// The shard carrying this file's metadata_ext hasn't been
 			// uploaded yet (or ever will be, e.g. an interrupted upload)
-			// — nothing to serve.
+			// - nothing to serve.
 			http.NotFound(w, r)
 			return
 		}
@@ -70,7 +70,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 		return
 	}
 
-	refreshRoute := refreshRouteURL(r, repoID, revision)
+	refreshRoute := refreshRouteURL(r, repoType, repoID, revision)
 
 	w.Header().Set("X-Repo-Commit", commitOIDOrPlaceholder(vs))
 	w.Header().Set("ETag", `"`+ref.SHA256Hex+`"`)
@@ -92,12 +92,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 	http.Error(w, "direct GET not supported; use the Xet download path via X-Xet-Hash", http.StatusNotImplemented)
 }
 
-func refreshRouteURL(r *http.Request, repoID, revision string) string {
+// refreshRouteURL builds the X-Xet-Refresh-Route header's URL - where the
+// client re-mints a xet access token when its current one expires
+// mid-download. The /api/ namespace always carries a pluralized repo
+// type, so a dataset's refresh route must be /api/datasets/...;
+// hardcoding "models" would point a dataset's token refresh at a
+// nonexistent model of the same name.
+func refreshRouteURL(r *http.Request, repoType, repoID, revision string) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	return scheme + "://" + r.Host + "/api/models/" + repoID + "/xet-read-token/" + revision
+	return scheme + "://" + r.Host + "/api/" + repoType + "s/" + repoID + "/xet-read-token/" + revision
 }
 
 func commitOIDOrPlaceholder(vs *revisionState) string {

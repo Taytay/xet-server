@@ -1,11 +1,11 @@
 package hubserver
 
 // Tests for the exported ingestion methods (IngestRepoInfo, IngestFile)
-// and their read-accessor counterparts (HasRepo, HasRevision, HasFile) —
+// and their read-accessor counterparts (HasRepo, HasRevision, HasFile) -
 // the API surface a caller embedding this Server as a caching layer
 // (internal/proxyhub) uses instead of rebuilding a repoState/
 // revisionState model independently. Driven directly against the
-// exported methods and Server's own read methods, not through HTTP —
+// exported methods and Server's own read methods, not through HTTP -
 // hubserver_test.go's existing handler-level tests already cover the
 // HTTP boundary these methods sit behind.
 
@@ -14,7 +14,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 func newIngestTestServer(t *testing.T) *Server {
@@ -36,7 +36,7 @@ func TestIngestRepoInfo_CreatesRepoAndRevision(t *testing.T) {
 	if !s.HasRevision("model", "alice/my-model", "experiment-1") {
 		t.Error("HasRevision() = false for the ingested revision")
 	}
-	// The implicit default revision ("main") must still exist too — the
+	// The implicit default revision ("main") must still exist too - the
 	// same guarantee getOrCreateRepo already provides for a real commit.
 	if !s.HasRevision("model", "alice/my-model", "main") {
 		t.Error("HasRevision() = false for the implicit default revision")
@@ -60,7 +60,7 @@ func TestIngestFile_RecordsFileMetadata(t *testing.T) {
 
 func TestIngestFile_WithZeroXetHashStillRecordsFile(t *testing.T) {
 	// A caller that only knows a file exists (e.g. from a tree listing
-	// entry with no xetHash field yet) must still be able to record it —
+	// entry with no xetHash field yet) must still be able to record it -
 	// mirrors a freshly-committed file before resolve.go's lazy CAS
 	// backfill runs.
 	s := newIngestTestServer(t)

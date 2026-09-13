@@ -1,10 +1,10 @@
 // Command xetd runs local HTTP servers that speak the real Xet CAS
-// protocol (internal/casserver, mounted at /v1, /v2 — wire-compatible with
+// protocol (internal/casserver, mounted at /v1, /v2 - wire-compatible with
 // hf_xet/xet-core) alongside a simpler demo chunk/dedup API
 // (internal/api, mounted at /upload, /files) for quick manual testing, and
 // optionally a Hub API shim (internal/hubserver) on a separate port so the
 // real `hf upload`/`hf download` CLI commands work end-to-end via
-// HF_ENDPOINT — mirroring how huggingface.co's Hub and CAS are actually
+// HF_ENDPOINT - mirroring how huggingface.co's Hub and CAS are actually
 // separate services. An interactive Swagger UI documenting every endpoint
 // above is served at /api-docs, fully offline (see internal/apidocs).
 package main
@@ -22,17 +22,17 @@ import (
 	"syscall"
 	"time"
 
-	"xet-server/internal/api"
-	"xet-server/internal/apidocs"
-	"xet-server/internal/auth"
-	"xet-server/internal/casserver"
-	"xet-server/internal/eviction"
-	"xet-server/internal/hubserver"
-	"xet-server/internal/landingpage"
-	"xet-server/internal/ratelimit"
-	"xet-server/internal/routing"
-	"xet-server/internal/storage"
-	"xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/api"
+	"github.com/guilt/xet-server/internal/apidocs"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/casserver"
+	"github.com/guilt/xet-server/internal/eviction"
+	"github.com/guilt/xet-server/internal/hubserver"
+	"github.com/guilt/xet-server/internal/landingpage"
+	"github.com/guilt/xet-server/internal/ratelimit"
+	"github.com/guilt/xet-server/internal/routing"
+	"github.com/guilt/xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
 )
 
 func main() {
@@ -43,10 +43,10 @@ func main() {
 	maxStorageBytes := flag.Int64("max-storage-bytes", 0, "if > 0, periodically evict least-recently-accessed xorbs once total xorb storage exceeds this many bytes")
 	evictionInterval := flag.Duration("eviction-interval", 5*time.Minute, "how often to check storage usage against -max-storage-bytes")
 	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "if > 0, cap sustained xorb/shard uploads per source IP to this many requests/second (burst allowance via -rate-limit-burst)")
-	rateLimitBurst := flag.Float64("rate-limit-burst", 20, "burst allowance for -rate-limit-rps — how many upload requests a source IP can make immediately before the per-second rate applies")
+	rateLimitBurst := flag.Float64("rate-limit-burst", 20, "burst allowance for -rate-limit-rps - how many upload requests a source IP can make immediately before the per-second rate applies")
 	verifyDedup := flag.Bool("verify-dedup", false, "on every dedup hit, byte-compare the incoming upload against the stored blob instead of trusting the content hash alone (doubles I/O per dedup hit; off by default)")
 	snapshotInterval := flag.Duration("snapshot-interval", time.Minute, "how often to persist in-memory reconstruction/repo indices to -data as a durable checkpoint (0 disables periodic snapshotting; a final snapshot is still taken on graceful shutdown)")
-	authToken := flag.String("auth-token", "None", "shared bearer token required on every request (CAS: read/write scope per endpoint; Hub: same). \"None\" (the default) disables auth enforcement entirely, matching this server's behavior prior to v0.8.0 — implement auth.Authenticator for anything beyond a single shared secret. Falls back to $XETD_AUTH_TOKEN, then $HF_TOKEN, if not passed; prefer an environment variable over this flag on any shared/multi-user machine, since flags are visible to other local users via `ps` and end up in shell history")
+	authToken := flag.String("auth-token", "None", "shared bearer token required on every request (CAS: read/write scope per endpoint; Hub: same). \"None\" (the default) disables auth enforcement entirely, matching this server's behavior prior to v0.8.0 - implement auth.Authenticator for anything beyond a single shared secret. Falls back to $XETD_AUTH_TOKEN, then $HF_TOKEN, if not passed; prefer an environment variable over this flag on any shared/multi-user machine, since flags are visible to other local users via `ps` and end up in shell history")
 	flag.Parse()
 
 	if os.Getenv("DEBUG") != "" {
@@ -106,7 +106,7 @@ func main() {
 		routing.Mount("", "/api-docs/", http.StripPrefix("/api-docs/", apidocs.Handler())),
 		// demoSrv's own literal /v1 sub-paths (api.UploadPath,
 		// api.FilesPrefix, api.StatsPath) are registered on this shared
-		// mux ahead of casSrv's api.V1+"/" wildcard — Go's http.ServeMux
+		// mux ahead of casSrv's api.V1+"/" wildcard - Go's http.ServeMux
 		// always prefers the more specific pattern regardless of
 		// registration order, so these never collide with casSrv's own
 		// /v1 paths (xorbs, shards, reconstructions, chunks, telemetry,
@@ -132,7 +132,7 @@ func main() {
 
 	// servers accumulates every http.Server this process starts, so
 	// shutdown (below) can gracefully drain all of them, not just the
-	// CAS-facing one — a prior version of this binary only ever
+	// CAS-facing one - a prior version of this binary only ever
 	// Shutdown()'d the CAS-facing server, leaving the Hub shim (if
 	// -hub-addr was set) killed abruptly on exit with no connection
 	// draining at all.
@@ -153,9 +153,24 @@ func main() {
 		}
 		snapshotTargets = append(snapshotTargets, snapshotTarget{"hubserver", hubSnapshotPath, hubSrv})
 
+		// Serve the API docs on the Hub port as well as the CAS port. The
+		// spec's default server entry is a RELATIVE url ("/"), so it
+		// resolves against whichever origin the docs were loaded from -
+		// which means opening /api-docs/ here makes Swagger UI's "Try it
+		// out" target this Hub listener, and Hub endpoints become
+		// same-origin and actually callable. Served only from the CAS
+		// port, they never could be: a cross-port call is cross-origin,
+		// and this server deliberately sends no CORS headers (a
+		// permissive policy would let any site the operator visits drive
+		// their local server). Same embedded spec either way - it
+		// documents both APIs.
+		hubMux := http.NewServeMux()
+		hubMux.Handle("/api-docs/", http.StripPrefix("/api-docs/", apidocs.Handler()))
+		hubMux.Handle("/", withLandingPage(hubSrv, landingpage.HubHandler()))
+
 		hubHTTPServer := &http.Server{
 			Addr:              *hubAddr,
-			Handler:           logRequests(withLandingPage(hubSrv, landingpage.HubHandler())),
+			Handler:           logRequests(hubMux),
 			ReadHeaderTimeout: 30 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
@@ -178,7 +193,7 @@ func main() {
 		Handler: logRequests(mux),
 		// ReadHeaderTimeout/IdleTimeout bound how long a slow or hostile
 		// client can hold a connection open before sending a complete
-		// request (Slowloris-class resource exhaustion) — deliberately
+		// request (Slowloris-class resource exhaustion) - deliberately
 		// no blanket ReadTimeout/WriteTimeout, since a legitimate xorb
 		// upload/download body can take longer than either without
 		// being unhealthy.
@@ -212,7 +227,7 @@ func main() {
 }
 
 // withLandingPage wraps next so an exact "GET /" request is answered by
-// landing instead of being forwarded — every other method and every
+// landing instead of being forwarded - every other method and every
 // non-root path (including a bare "HEAD /", which http.ServeMux would
 // otherwise silently route to a registered "GET /" handler) still goes to
 // next unchanged. Used instead of a second http.ServeMux specifically to
@@ -231,11 +246,11 @@ func withLandingPage(next http.Handler, landing http.HandlerFunc) http.Handler {
 
 // resolveAuthToken resolves this server's shared bearer token from the
 // -auth-token flag, falling back to $XETD_AUTH_TOKEN, then $HF_TOKEN (the
-// same variable the real `hf` CLI reads) — see auth.ResolveToken for the
+// same variable the real `hf` CLI reads) - see auth.ResolveToken for the
 // precedence rule. The $HF_TOKEN fallback lets a local xetd act as a
 // drop-in replacement for the real huggingface.co Xet backend using a
 // token a user already has exported for the real `hf` CLI, with no
-// separate secret to configure — and, in a future relay/proxy in front of
+// separate secret to configure - and, in a future relay/proxy in front of
 // the real backend, is the same primitive that would resolve the upstream
 // credential to forward a caller's token with.
 func resolveAuthToken(flagValue string) string {
@@ -258,7 +273,7 @@ type snapshotTarget struct {
 
 // runSnapshotLoop periodically snapshots every target until ctx is
 // canceled (at which point main takes one last snapshot itself before
-// exiting — see the <-ctx.Done() block above). Each target's Snapshot
+// exiting - see the <-ctx.Done() block above). Each target's Snapshot
 // error is logged but never aborts the loop or the process: a failed
 // periodic snapshot just means this checkpoint didn't advance, not that
 // the server is unhealthy.
@@ -289,7 +304,7 @@ func runSnapshotLoop(ctx context.Context, interval time.Duration, targets []snap
 // request line as soon as it's received (before any handler code runs, so
 // a hung/slow handler still shows up as "received" in the log), and the
 // response status/duration once it completes. Only active when DEBUG is
-// set (see slog.SetLogLoggerLevel above) — slog.Debug is a no-op call
+// set (see slog.SetLogLoggerLevel above) - slog.Debug is a no-op call
 // otherwise, so this has no cost in normal operation.
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

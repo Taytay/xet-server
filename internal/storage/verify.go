@@ -19,14 +19,14 @@ const verifyChunkSize = 256 * 1024
 
 // VerifyingStore wraps a Store to add an opt-in verification pass on
 // every dedup hit: when Put finds key already exists, instead of trusting
-// the content hash alone (the default, and by far the cheaper, behavior —
+// the content hash alone (the default, and by far the cheaper, behavior -
 // see Store's own doc comment), it reads the existing stored blob and the
 // incoming reader concurrently and compares them chunk-by-chunk, bailing
 // at the first mismatch rather than reading either side in full once a
 // difference is found.
 //
 // This exists purely as defense-in-depth against a hash collision or
-// undetected storage-layer corruption — both exceedingly unlikely with
+// undetected storage-layer corruption - both exceedingly unlikely with
 // BLAKE3, but "exceedingly unlikely" is a probability, not a guarantee,
 // and this project would rather refuse a write it can't vouch for than
 // silently trust a hash match that turns out to be wrong. It is
@@ -37,13 +37,13 @@ const verifyChunkSize = 256 * 1024
 //
 // If the incoming content doesn't match on a dedup hit, Put returns an
 // error satisfying errors.Is(err, ErrContentMismatch) and does NOT
-// overwrite the existing stored blob — a mismatch means something is
+// overwrite the existing stored blob - a mismatch means something is
 // already wrong (a collision or corruption), and blindly overwriting
 // would destroy the only evidence of which side is actually correct
 // without fixing anything.
 //
 // A key that does not yet exist passes straight through to Inner.Put with
-// no extra reads of any kind — the non-dedup-hit path costs nothing
+// no extra reads of any kind - the non-dedup-hit path costs nothing
 // beyond what Inner.Put itself costs, whether or not verification is
 // enabled.
 type VerifyingStore struct {
@@ -51,7 +51,7 @@ type VerifyingStore struct {
 }
 
 // NewVerifyingStore wraps inner. The returned *VerifyingStore implements
-// whichever of Deleter, Sizer, and URLPresigner inner itself implements —
+// whichever of Deleter, Sizer, and URLPresigner inner itself implements -
 // wrapping a backend that lacks one of these (e.g. fsstore has no
 // URLPresigner) must not make it appear to gain that capability, or
 // callers that type-assert for it (casserver's presigned-URL fallback,
@@ -122,7 +122,7 @@ func (v *VerifyingStore) Put(ctx context.Context, key string, r io.Reader, size 
 // compareStreams reads existing and incoming concurrently in
 // verifyChunkSize rounds, comparing each round's bytes, and returns
 // ErrContentMismatch (wrapped with which byte offset differed) at the
-// first difference — without waiting to finish reading either stream in
+// first difference - without waiting to finish reading either stream in
 // full. Returns nil if both streams are byte-identical for all n bytes.
 //
 // A stream ending before n bytes have been read (io.EOF or
@@ -131,7 +131,7 @@ func (v *VerifyingStore) Put(ctx context.Context, key string, r io.Reader, size 
 // the incoming reader is shorter than the declared size n, which is just
 // as much "this isn't actually the same content" as a byte difference
 // would be. Any other read error (a real I/O failure) is propagated as-is
-// — it means comparison couldn't be completed at all, so no correctness
+// - it means comparison couldn't be completed at all, so no correctness
 // claim (match or mismatch) can be made either way, distinct from either
 // verified outcome.
 func compareStreams(ctx context.Context, existing io.Reader, incoming io.Reader, n int64) error {
@@ -171,7 +171,7 @@ func compareStreams(ctx context.Context, existing io.Reader, incoming io.Reader,
 			return incomingRes.err
 		}
 		if existingRes.err != nil || incomingRes.err != nil {
-			// One or both streams ended short of the declared n bytes —
+			// One or both streams ended short of the declared n bytes -
 			// treat as a mismatch rather than propagating EOF/
 			// ErrUnexpectedEOF as if comparison itself had failed.
 			return errContentMismatchAt(n - remaining)
@@ -222,7 +222,7 @@ func (e *contentMismatchError) Offset() int64 {
 //
 // NewVerifyingStore must return a value whose type implements exactly the
 // optional capability interfaces (Deleter, Sizer, URLPresigner) that
-// inner itself implements — no more, no less. A single *VerifyingStore
+// inner itself implements - no more, no less. A single *VerifyingStore
 // type with all three methods defined unconditionally would make every
 // wrapped store appear to support all three regardless of what inner
 // actually supports, which is exactly the false-capability bug this

@@ -1,12 +1,12 @@
-// Package xorbformat implements the on-wire binary layout of a xorb — the
+// Package xorbformat implements the on-wire binary layout of a xorb - the
 // aggregated-chunk storage unit real Xet clients (hf_xet/xet-core) upload
-// via POST /v1/xorbs/{prefix}/{hash} — ported from
+// via POST /v1/xorbs/{prefix}/{hash} - ported from
 // xet_core_structures/src/xorb_object/{xorb_chunk_format,xorb_object_format}.rs.
 //
 // A CAS server's job is to store a xorb's serialized bytes as an opaque
 // blob and later hand back raw byte ranges for reconstruction; the
 // (possibly compressed) chunk payloads are never decompressed
-// server-side — only the client does that after fetching. Accordingly,
+// server-side - only the client does that after fetching. Accordingly,
 // this package parses chunk headers and the V1 footer (hashes, boundary
 // offsets) without needing to implement any compression codec.
 package xorbformat
@@ -16,14 +16,14 @@ import (
 	"fmt"
 	"io"
 
-	"xet-server/internal/bg4"
-	"xet-server/internal/lz4"
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/bg4"
+	"github.com/guilt/xet-server/internal/lz4"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // CompressionScheme mirrors xet_core_structures::CompressionScheme's wire
 // discriminants (compression_scheme.rs). Never decoded/encoded here beyond
-// recording which scheme a chunk claims — the server treats chunk payload
+// recording which scheme a chunk claims - the server treats chunk payload
 // bytes as opaque regardless of scheme.
 type CompressionScheme uint8
 
@@ -106,11 +106,11 @@ type ChunkEntry struct {
 // DecompressChunkPayload returns the uncompressed bytes of one chunk's
 // payload per its declared compression scheme. Real hf_xet clients upload
 // xorbs without a footer (chunk metadata is reconstructed by the server
-// from the raw chunk stream — see casserver.IngestXorb), so this is
+// from the raw chunk stream - see casserver.IngestXorb), so this is
 // the only way to obtain a chunk's true content and independently verify
 // its claimed hash. Exported (rather than kept package-internal to
 // casserver) since it's a pure codec-dispatch function with no
-// casserver-specific state — a natural fit for this package alongside
+// casserver-specific state - a natural fit for this package alongside
 // the rest of the wire-format logic it already owns.
 func DecompressChunkPayload(scheme CompressionScheme, payload []byte, uncompressedLen uint32) ([]byte, error) {
 	switch scheme {
@@ -193,7 +193,7 @@ func ScanChunks(r io.ReadSeeker) ([]ChunkEntry, error) {
 
 // DeriveFooter independently reconstructs a xorb's V1 footer and content
 // hash by scanning r's chunk headers (via ScanChunks) and decompressing
-// each chunk's payload (via DecompressChunkPayload) — the same
+// each chunk's payload (via DecompressChunkPayload) - the same
 // reconstruction real hf_xet clients rely on the server side to perform,
 // since a real upload never includes a footer at all ("XORBs are sent
 // without footer - the server/client reconstructs it from chunk data",
@@ -265,7 +265,7 @@ const (
 	// footer's per-chunk slices: numChunks is an attacker-controlled
 	// uint32 wire field, and even though ParseFooterV1 isn't reachable
 	// from any current HTTP request path (real clients upload xorbs
-	// without a footer — see PROTOCOL.md §2), it still parses
+	// without a footer - see PROTOCOL.md #2), it still parses
 	// untrusted-shaped data and should not let a tiny malicious footer
 	// force a multi-gigabyte allocation before validating any of the
 	// claimed entries actually exist on the wire.

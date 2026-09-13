@@ -2,14 +2,14 @@
 // how many bytes a storage.Store backend actually holds, and if over a
 // configured budget, delete the least-recently-accessed blobs until back
 // under budget. This exists so a server left running against unbounded
-// client uploads doesn't grow its storage without limit — a deliberate,
+// client uploads doesn't grow its storage without limit - a deliberate,
 // bounded, observable policy rather than no eviction at all.
 //
 // This package knows nothing about xorbs, shards, or the CAS protocol; it
 // operates purely on opaque storage keys. The metadata needed to pick
 // eviction victims (last-access time, size, and whether a key is
 // currently unsafe to evict because a download is in flight) is owned by
-// whatever registers keys with the store — see casserver.Server's
+// whatever registers keys with the store - see casserver.Server's
 // EvictionCandidates/ForgetKey methods for the CAS server's
 // implementation of the Registry interface this package consumes.
 package eviction
@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/storage"
 )
 
 // Candidate is one blob a Registry reports as eligible for eviction.
@@ -49,7 +49,7 @@ type Registry interface {
 // Sweeper needs: a way to measure total bytes used, and a way to remove a
 // blob. A backend that implements storage.Store but not both of these
 // (e.g. it has no efficient way to enumerate/size its contents) simply
-// can't be swept — see NewSweeper.
+// can't be swept - see NewSweeper.
 type Store interface {
 	storage.Sizer
 	storage.Deleter
@@ -66,7 +66,7 @@ type Stats struct {
 
 // Sweeper periodically deletes least-recently-accessed blobs once total
 // storage use exceeds Budget bytes. A zero-value Budget disables eviction
-// (Run still ticks, but sweepOnce is a no-op) — callers that want to
+// (Run still ticks, but sweepOnce is a no-op) - callers that want to
 // avoid even the periodic TotalBytes() call when eviction is disabled
 // should simply not start a Sweeper at all.
 type Sweeper struct {

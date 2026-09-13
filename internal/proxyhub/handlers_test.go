@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/hfclient"
 )
 
 const testFixtureToken = "test-fixture-token-not-a-real-secret"
@@ -120,6 +120,36 @@ func TestListTree_NoCacheRelaysLiveAndFiltersByPath(t *testing.T) {
 	}
 }
 
+func TestListTree_NoCacheFiltersOutDirectoryEntries(t *testing.T) {
+	fetches := 0
+	hubTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches++
+		json.NewEncoder(w).Encode([]hfclient.TreeEntry{
+			{Type: "file", Path: "README.md", Size: 10, OID: "aaa"},
+			{Type: "directory", Path: "data", Size: 0, OID: "d1"},
+			{Type: "file", Path: "data/train.bin", Size: 20, OID: "bbb"},
+			{Type: "directory", Path: "data/nested", Size: 0, OID: "d2"},
+		})
+	}))
+	defer hubTS.Close()
+
+	s := newTestServer(hubTS, "http://localhost:8420")
+	s.NoCache = true
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/models/alice/my-model/tree/main")
+	if err != nil {
+		t.Fatalf("GET error = %v", err)
+	}
+	defer resp.Body.Close()
+	var entries []hfclient.TreeEntry
+	json.NewDecoder(resp.Body).Decode(&entries)
+	if len(entries) != 2 || entries[0].Path != "README.md" || entries[1].Path != "data/train.bin" {
+		t.Errorf("entries = %+v, want just README.md and data/train.bin (directory entries filtered)", entries)
+	}
+}
+
 func TestResolve_NoCacheRelaysLiveHeaders(t *testing.T) {
 	hubTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Xet-Hash", "deadbeef")
@@ -147,6 +177,38 @@ func TestResolve_NoCacheRelaysLiveHeaders(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Xet-Refresh-Route"); got == "" {
 		t.Error("X-Xet-Refresh-Route header missing")
+	}
+}
+
+func TestResolve_NoCachePlainFileRelayedLive(t *testing.T) {
+	hubTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("ETag", `"etag-plain"`)
+			w.Header().Set("X-Repo-Commit", "commitoid")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("PLAIN-BYTES"))
+	}))
+	defer hubTS.Close()
+
+	s := newTestServer(hubTS, "http://localhost:8420")
+	s.NoCache = true
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodHead, ts.URL+"/alice/my-model/resolve/main/config.json", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("HEAD error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("ETag"); got != `"etag-plain"` {
+		t.Errorf("ETag = %q, want %q (relayed live from upstream under -no-cache)", got, `"etag-plain"`)
 	}
 }
 

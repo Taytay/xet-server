@@ -141,7 +141,7 @@ func TestSweepOnce_ZeroBudgetDisablesEviction(t *testing.T) {
 
 func TestSweepOnce_InFlightCandidatesAreNeverOffered(t *testing.T) {
 	// EvictionCandidates itself is responsible for excluding in-flight
-	// keys (see casserver.Server.EvictionCandidates) — this test just
+	// keys (see casserver.Server.EvictionCandidates) - this test just
 	// confirms the Sweeper only ever acts on what the Registry offers it,
 	// never reaching into storage independently.
 	store := newFakeStore(map[string]int64{"safe": 40, "in-flight-not-offered": 200})

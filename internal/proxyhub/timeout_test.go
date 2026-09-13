@@ -7,7 +7,7 @@ package proxyhub
 // rather than blocking for as long as the downstream client is willing
 // to wait? This class of failure was never exercised by this package's
 // other tests (all driven against an httptest.Server that responds
-// instantly) — see internal/hfclient/timeout_test.go for the
+// instantly) - see internal/hfclient/timeout_test.go for the
 // equivalent coverage at the Transport-header-timeout layer.
 
 import (
@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/hfclient"
 )
 
 // slowDripHandler writes the response headers immediately (so
 // ResponseHeaderTimeout never fires) but then sleeps before writing any
-// body — simulating a connected-but-stalled upstream, distinct from
+// body - simulating a connected-but-stalled upstream, distinct from
 // the fully-hung-before-headers case internal/hfclient/timeout_test.go
 // already covers.
 func slowDripHandler(delay time.Duration, body []byte) http.HandlerFunc {

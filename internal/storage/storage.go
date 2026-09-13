@@ -26,7 +26,7 @@ var ErrSizeMismatch = errors.New("storage: reader did not match declared size")
 
 // ErrContentMismatch is returned (via errors.Is) by VerifyingStore.Put
 // when a dedup hit's incoming content differs from what's already stored
-// under the same key — a hash collision or storage corruption, since two
+// under the same key - a hash collision or storage corruption, since two
 // different byte sequences should never produce the same content hash.
 // Unlike ErrSizeMismatch, this is never a normal client protocol error;
 // it always indicates something worth an operator's attention. See
@@ -39,7 +39,7 @@ var ErrContentMismatch = errors.New("storage: dedup hit content differs from sto
 //
 // Put is atomic with respect to failure: if r returns an error, ctx is
 // canceled, or the read stops short of size, no partial blob is left
-// visible under key — implementations must stage writes (e.g. a temp file
+// visible under key - implementations must stage writes (e.g. a temp file
 // renamed into place, or an upload that is only finalized on success) so a
 // caller can safely retry the same key after a failed attempt without a
 // prior partial write corrupting the retry. Get/GetRange never observe a
@@ -47,7 +47,7 @@ var ErrContentMismatch = errors.New("storage: dedup hit content differs from sto
 type Store interface {
 	// Put streams exactly size bytes from r into key if not already
 	// present. Returns true if the blob was newly written, false if it
-	// already existed (deduplicated) — in the deduplicated case, r is
+	// already existed (deduplicated) - in the deduplicated case, r is
 	// drained/ignored without being stored again.
 	Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error)
 
@@ -81,7 +81,7 @@ type URLPresigner interface {
 // Deleter is an optional capability: backends that support removing a
 // previously-stored blob implement it. Not part of the core Store
 // interface since not every caller needs delete (the Xet Data API's chunk
-// store, for instance, never removes anything) — this exists for callers
+// store, for instance, never removes anything) - this exists for callers
 // like a storage-budget eviction sweep that do. Deleting an
 // already-absent key is not an error (idempotent).
 type Deleter interface {
@@ -93,7 +93,7 @@ type Deleter interface {
 // sweep) can tell whether it's over a size budget without maintaining its
 // own running total independently of the backend's actual state. This is
 // expected to be called on a slow poll interval (minutes), not a hot
-// path — backends are free to implement it by walking/listing everything
+// path - backends are free to implement it by walking/listing everything
 // they hold each call.
 type Sizer interface {
 	TotalBytes(ctx context.Context) (int64, error)

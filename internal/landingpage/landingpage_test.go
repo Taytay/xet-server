@@ -64,14 +64,20 @@ func TestHubHandler_RendersExpectedContent(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/api/repos/create", "revision/{revision}", "tree/{revision}", "branch/{branch}", "HF_ENDPOINT", "resolve/{revision}/{filename}"} {
+	for _, want := range []string{"/api/repos/create", "revision/{revision}", "tree/{revision}", "branch/{branch}", "HF_ENDPOINT", "resolve/{revision}/{filename}", "info/lfs/objects/batch"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing expected content %q", want)
 		}
 	}
-	// Swagger UI isn't mounted on the Hub shim's own port.
-	if strings.Contains(body, "/api-docs/") {
-		t.Error("Hub landing page links to /api-docs/, which isn't mounted on this port")
+	// Swagger UI IS mounted on the Hub shim's own port (cmd/xetd wires it
+	// onto the hub mux as well as the CAS mux). That placement is what
+	// makes Swagger UI's "Try it out" usable for Hub endpoints at all:
+	// the spec's only server entry is relative, so it resolves to
+	// whichever origin served the page - here, the Hub listener. Served
+	// solely from the CAS port, every Hub call would be cross-origin and
+	// blocked, since this server sends no CORS headers by design.
+	if !strings.Contains(body, "/api-docs/") {
+		t.Error("Hub landing page does not link to /api-docs/, which IS mounted on this port")
 	}
 }
 
@@ -135,14 +141,15 @@ func TestProxyHubHandler_RendersExpectedContent(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"/api/repos/create", "revision/{revision}", "tree/{revision}", "xet-read-token/{revision}", "HF_ENDPOINT", "resolve/{revision}/{filename}", "offline-resilient"} {
+	for _, want := range []string{"/api/repos/create", "revision/{revision}", "tree/{revision}", "xet-read-token/{revision}", "HF_ENDPOINT", "resolve/{revision}/{filename}", "offline-resilient", "info/lfs/objects/batch"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing expected content %q", want)
 		}
 	}
-	// Swagger UI isn't mounted on the Hub-facing proxy's own port, same as HubHandler.
-	if strings.Contains(body, "/api-docs/") {
-		t.Error("proxy Hub landing page links to /api-docs/, which isn't mounted on this port")
+	// Swagger UI IS mounted on the Hub-facing proxy's own port, same as
+	// HubHandler - see the explanation there.
+	if !strings.Contains(body, "/api-docs/") {
+		t.Error("proxy Hub landing page does not link to /api-docs/, which IS mounted on this port")
 	}
 }
 

@@ -103,7 +103,7 @@ body:
       label: Captured wire bytes (if a protocol/wire-format bug)
       description: >
         If this looks like a wire-compatibility issue (a real client's request gets rejected or misparsed),
-        a captured raw request body is the single most useful thing you can attach — see
+        a captured raw request body is the single most useful thing you can attach - see
         docs/PROTOCOL.md for how earlier bugs like this were diagnosed and fixed.
     validations:
       required: false

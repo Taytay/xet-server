@@ -3,7 +3,7 @@ package proxyhub
 // tree.go implements the cached read path for GET
 // /api/{repo_type}s/{repo_id}/tree/{revision}[/{path_in_repo}], serving
 // from Embedded (a real *hubserver.Server) once the revision's full
-// file list is known and fresh — matching internal/hubserver's own
+// file list is known and fresh - matching internal/hubserver's own
 // handleListTree byte-for-byte, since it's the same code.
 
 import (
@@ -11,9 +11,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/hfclient"
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // handleListTree implements the endpoint described above.
@@ -48,6 +48,17 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request, repoType
 
 	s.Embedded.IngestRepoInfo(repoType, repoID, revision)
 	for _, e := range entries {
+		// The upstream tree interleaves real files with directory
+		// entries (type "directory", size 0, a tree OID rather than file
+		// content). The embedded hubserver has no folder concept - every
+		// IngestFile records ends up served as "type": "file" (see
+		// internal/hubserver/tree.go), so recording a directory here
+		// would make huggingface_hub's snapshot_download build a
+		// RepoFile for it and try to resolve it, which 404s - exactly
+		// the bigcode/the-stack-v2 failure (top-level "data" folder).
+		if e.Type != "file" {
+			continue
+		}
 		xetHash := parseXetHashHex(e.XetHash)
 		s.recordFileSize(xetHash, e.Size)
 		s.Embedded.IngestFile(repoType, repoID, revision, e.Path, e.OID, e.Size, xetHash)
@@ -57,18 +68,21 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request, repoType
 }
 
 // writeTreeJSON is the -no-cache path's own response writer, matching
-// hubserver's exact wire shape (a bare JSON array — see
+// hubserver's exact wire shape (a bare JSON array - see
 // internal/hubserver/tree.go's doc comment on why) without needing
-// Embedded at all.
+// Embedded at all. Non-file entries (directories) are filtered out so the
+// -no-cache path can never hand a client a directory masquerading as a
+// file either.
 func writeTreeJSON(w http.ResponseWriter, entries []hfclient.TreeEntry, pathInRepo string) {
-	filtered := entries
-	if pathInRepo != "" {
-		filtered = make([]hfclient.TreeEntry, 0, len(entries))
-		for _, e := range entries {
-			if isUnderPath(e.Path, pathInRepo) {
-				filtered = append(filtered, e)
-			}
+	filtered := make([]hfclient.TreeEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Type != "file" {
+			continue
 		}
+		if pathInRepo != "" && !isUnderPath(e.Path, pathInRepo) {
+			continue
+		}
+		filtered = append(filtered, e)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(filtered); err != nil {
@@ -77,7 +91,7 @@ func writeTreeJSON(w http.ResponseWriter, entries []hfclient.TreeEntry, pathInRe
 }
 
 // parseXetHashHex parses hex (a tree entry's optional XetHash field) into
-// a merklehash.Hash, or the zero Hash if hex is empty or malformed —
+// a merklehash.Hash, or the zero Hash if hex is empty or malformed -
 // this is a best-effort enrichment (letting a subsequent local resolve
 // skip its own CAS lookup), never a hard failure: a tree listing without
 // this field is still perfectly usable.
@@ -92,7 +106,7 @@ func parseXetHashHex(hex string) merklehash.Hash {
 	return h
 }
 
-// isUnderPath is proxyhub's own copy of hubserver.isUnderPath —
+// isUnderPath is proxyhub's own copy of hubserver.isUnderPath -
 // duplicated (not imported) for the same reason as splitRepoPath (see
 // its note in proxyhub.go): an unexported helper of a package this one
 // only otherwise touches through its exported surface.

@@ -7,28 +7,30 @@ import (
 	"log/slog"
 	"net/http"
 
-	"xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/shardformat"
 )
 
 // chunkDedupPrefix is the only prefix xet-core's real CAS API accepts for
 // GET /v1/chunks/{prefix}/{hash} (see openapi/cas.openapi.yaml's
-// PrefixGlobalDedupeParam) — distinct from xorbPrefix ("default"), which
+// PrefixGlobalDedupeParam) - distinct from xorbPrefix ("default"), which
 // is for a different endpoint.
 const chunkDedupPrefix = "default-merkledb"
 
-// maxShardBytes caps a single shard upload's body size. Shards are
-// metadata (file/xorb info entries), bounded by chunk count rather than
-// file size — even a shard describing a maximally-chunked maxXorbBytes
-// xorb (128 MiB / DefaultMinSize 4 KiB ≈ 32K chunks) stays well under a
-// few MB. This cap exists to bound IngestShard's io.ReadAll, which
-// (unlike the xorb path) buffers the whole body in memory rather than
-// streaming to a temp file — shard bodies are always small enough that
-// this is fine, but an unbounded ReadAll still lets a hostile client force
-// arbitrary memory growth by simply not capping Content-Length.
-const maxShardBytes = 16 * 1024 * 1024
+// maxShardBytes caps a single shard upload's body size. Shards describe
+// one or more whole files' chunk/xorb manifests, so their size scales with
+// the files they cover - a real hf_xet client uploading a single multi-GB
+// model sends one shard enumerating every chunk hash of the file, which
+// easily exceeds 16 MiB (the previous cap, sized for a single xorb's worth
+// of entries) and caused real `hf upload` of large files to fail with 413.
+// This cap exists to bound IngestShard's io.ReadAll, which buffers the
+// whole body in memory rather than streaming to a temp file - it must stay
+// large enough for genuine single-file shards while still bounding a
+// hostile client's memory growth.
+const maxShardBytes = 512 * 1024 * 1024
 
 // handleUploadShard implements POST /v1/shards: read the body (capped at
-// maxShardBytes) and delegate to IngestShard — see its doc comment for
+// maxShardBytes) and delegate to IngestShard - see its doc comment for
 // what indexing a shard actually does.
 func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxShardBytes)
@@ -56,10 +58,10 @@ func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 // file-reconstruction entries into this server's in-memory fileRecon
 // index (keyed by file hash), and indexes every chunk hash referenced by
 // the shard's xorb-info section against body itself, backing the global
-// chunk-dedup lookup (GET /v1/chunks/{prefix}/{hash} — see
+// chunk-dedup lookup (GET /v1/chunks/{prefix}/{hash} - see
 // handleChunkDedup): the real wire contract for that endpoint is "return
 // the shard bytes that reference this chunk," which a real client parses
-// itself to discover chunks it can dedup against without re-uploading —
+// itself to discover chunks it can dedup against without re-uploading -
 // see docs/PROTOCOL.md's global-dedup section for the full story of how
 // this was confirmed against xet-core's own client source.
 //
@@ -83,7 +85,7 @@ func (s *Server) IngestShard(body []byte) error {
 			// FileMetadataExt.SHA256 reuses the 32-byte merklehash.Hash type
 			// for storage, but real hf_xet clients write it through the same
 			// byte-order transform as a genuine Merkle hash's Hex() (word
-			// reversal per 8-byte little-endian group) — confirmed by
+			// reversal per 8-byte little-endian group) - confirmed by
 			// capturing a real upload and comparing MetadataExt.SHA256's raw
 			// bytes against the plain SHA-256 in the commit payload's
 			// lfsFile.oid: Hex() of the former equals the latter exactly.
@@ -99,22 +101,32 @@ func (s *Server) IngestShard(body []byte) error {
 	}
 	s.fileReconMu.Unlock()
 
+	// Every chunk in this shard maps to THIS shard's own content-address
+	// hash, and the shard body is stored once under that same hash - the
+	// dedup layout snapshot memory-blowup fix relies on (see
+	// chunkHashToShard's doc comment). ComputeDataHash is content-addressed,
+	// so an identical shard body (same content, uploaded twice) resolves
+	// to the same entry with no duplication of storage.
+	shardHash := merklehash.ComputeDataHash(body)
 	var chunkCount int
 	s.chunkDedupMu.Lock()
+	if _, exists := s.shardBodies[shardHash]; !exists {
+		s.shardBodies[shardHash] = body
+	}
 	for _, x := range shard.Xorbs {
 		for _, c := range x.Chunks {
 			// First shard to reference a given chunk hash wins; later
 			// shards referencing the same (already-deduplicated) chunk
-			// don't need to replace it — any shard referencing the chunk
+			// don't need to replace it - any shard referencing the chunk
 			// is equally valid for a client's dedup purposes.
 			if _, exists := s.chunkHashToShard[c.ChunkHash]; !exists {
-				s.chunkHashToShard[c.ChunkHash] = body
+				s.chunkHashToShard[c.ChunkHash] = shardHash
 				chunkCount++
 			}
 		}
 	}
 	s.chunkDedupMu.Unlock()
-	slog.Debug("shard chunk-dedup index updated", "newChunkEntries", chunkCount)
+	slog.Debug("shard chunk-dedup index updated", "newChunkEntries", chunkCount, "shardHash", shardHash.Hex())
 
 	return nil
 }

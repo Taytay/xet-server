@@ -2,8 +2,8 @@ package proxyhub
 
 // cache.go: the freshness-tracking primitive every read endpoint in
 // this package uses. Unlike the old standalone proxyhub, this package
-// no longer caches VALUES itself — those live in Embedded (a real
-// *hubserver.Server) — it only needs to remember WHEN each key was last
+// no longer caches VALUES itself - those live in Embedded (a real
+// *hubserver.Server) - it only needs to remember WHEN each key was last
 // successfully refreshed from upstream, to implement -cache-ttl's
 // freshness window. See the package doc comment for the exact
 // stale-fallback policy.
@@ -26,7 +26,7 @@ func cacheKey(parts ...string) string {
 //     need a timestamp per key (the data itself lives in Embedded).
 //   - V = *hfclient.XetToken / string: xetTokenCache/casURLCache still
 //     need to hold an actual value, since xet-token responses are never
-//     ingested into Embedded (hubserver's own token minting is fake — see
+//     ingested into Embedded (hubserver's own token minting is fake - see
 //     the package doc comment) and the CAS URL has no home in Embedded at
 //     all.
 type ttlCache[V any] struct {
@@ -46,7 +46,7 @@ func newTTLCache[V any]() *ttlCache[V] {
 
 // Get reports whether an entry exists at all under key (present, at any
 // age) and, separately, whether it's within ttl of now (fresh). ttl < 0
-// means "never fresh" — every read must attempt an upstream refresh
+// means "never fresh" - every read must attempt an upstream refresh
 // first, falling back to this same entry only if that attempt fails.
 func (c *ttlCache[V]) Get(key string, ttl time.Duration) (value V, present, fresh bool) {
 	c.mu.RLock()
@@ -66,7 +66,7 @@ func (c *ttlCache[V]) Set(key string, value V) {
 }
 
 // Fresh reports whether key was marked fresh (via MarkFresh) within
-// ttl — the struct{}-valued freshness caches' whole API surface, since
+// ttl - the struct{}-valued freshness caches' whole API surface, since
 // they never need to store or retrieve any actual value.
 func (c *ttlCache[V]) Fresh(key string, ttl time.Duration) bool {
 	_, present, fresh := c.Get(key, ttl)

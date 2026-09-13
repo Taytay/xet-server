@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // buildTestXorb constructs a minimal but structurally valid xorb blob: N

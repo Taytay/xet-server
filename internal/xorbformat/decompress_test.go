@@ -1,11 +1,11 @@
 package xorbformat
 
-// Tests for DecompressChunkPayload — moved here from internal/casserver
+// Tests for DecompressChunkPayload - moved here from internal/casserver
 // (originally an unexported decompressChunkPayload) since
 // internal/proxycas needs the identical logic to derive a matching xorb
 // footer for bytes it only ever saw as an opaque download/relay, not an
 // upload it independently reconstructed chunk-by-chunk. Only
-// CompressionNone is round-tripped end-to-end here — LZ4/BG4 have their
+// CompressionNone is round-tripped end-to-end here - LZ4/BG4 have their
 // own dedicated package-level tests (internal/lz4, internal/bg4) for the
 // actual codec logic; this only needs to confirm DecompressChunkPayload
 // dispatches to the right one and validates the resulting length.

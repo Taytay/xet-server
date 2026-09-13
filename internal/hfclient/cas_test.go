@@ -3,7 +3,7 @@ package hfclient
 // Tests for the CAS-side calls (FetchXorb, FetchChunkDedup,
 // FetchReconstruction, UploadXorb, UploadShard), driven against a fake
 // upstream httptest.Server. Unlike the Hub-side tests, these confirm the
-// caller-closes-body, non-2xx-is-not-an-error contract explicitly — a
+// caller-closes-body, non-2xx-is-not-an-error contract explicitly - a
 // 404/416/206 from CAS is exactly what internal/proxycas needs to relay
 // downstream unchanged, not something this package should collapse into
 // an error.
@@ -16,7 +16,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/auth"
 )
 
 func newTestCASClient(t *testing.T, handler http.HandlerFunc) *CASClient {
@@ -83,7 +83,7 @@ func TestFetchXorb_NoRangeHeaderWhenEmpty(t *testing.T) {
 func TestFetchXorb_404IsNotAnError(t *testing.T) {
 	// A CAS 404 (unknown xorb) is exactly what proxycas needs to relay
 	// downstream unchanged, not something this package should turn into
-	// a Go error — unlike the Hub-side calls, which do return
+	// a Go error - unlike the Hub-side calls, which do return
 	// *StatusError on a non-2xx.
 	c := newTestCASClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

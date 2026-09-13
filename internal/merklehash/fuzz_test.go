@@ -2,7 +2,7 @@ package merklehash
 
 // Fuzz targets for merklehash's parsing entry points: FromHex (parses a
 // URL/JSON-facing hash string) and FromRawBytes (parses a binary-format
-// field's raw bytes). Both are called directly on attacker-supplied data —
+// field's raw bytes). Both are called directly on attacker-supplied data -
 // FromHex via hexParam in casserver (every {hash}/{file_id} URL path
 // segment), FromRawBytes throughout shardformat/xorbformat when reading a
 // 32-byte hash field off the wire.

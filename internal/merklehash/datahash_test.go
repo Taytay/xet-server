@@ -5,7 +5,7 @@ import "testing"
 // TestHex_ByteOrderReferenceVector reproduces xet-core's own
 // test_hash_hex_string_endianness (merklehash/data_hash.rs): a fixed 32-byte
 // array and its expected hex string, chosen specifically because it is NOT
-// symmetric under a naive whole-buffer hex encode — it only matches once
+// symmetric under a naive whole-buffer hex encode - it only matches once
 // each 8-byte group is reversed into little-endian u64 words first. This is
 // the exact bug this package's Hex()/FromHex() byte-order handling exists
 // to get right.

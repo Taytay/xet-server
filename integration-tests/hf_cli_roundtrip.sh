@@ -1,13 +1,13 @@
 #!/bin/bash
 # Real `hf` CLI end-to-end round-trip: drives the actual `hf upload` /
 # `hf download` shell commands (via huggingface_hub + hf_xet, installed
-# through pipenv — NOT this repo's own client) against the shared xetd
+# through pipenv - NOT this repo's own client) against the shared xetd
 # instance's Hub API shim ($HUB_URL), which in turn talks to the CAS server
 # ($XETD_URL). This is the strongest possible verification that this server
 # is wire- and API-compatible with the real Hugging Face ecosystem: nothing
 # here exercises this project's own client code, only the unmodified `hf`
 # CLI. Covers both `hf download REPO_ID FILENAME` (single named file) and
-# `hf download REPO_ID` (whole repo, no filename) — the latter exercises
+# `hf download REPO_ID` (whole repo, no filename) - the latter exercises
 # huggingface_hub's snapshot_download, which calls two endpoints
 # (.../revision/{revision}, .../tree/{revision}) the single-file path never
 # touches at all.
@@ -17,7 +17,7 @@
 #   make install
 #
 # If pipenv or its environment isn't set up, this test SKIPs (exit 77)
-# rather than failing the whole suite — it's an optional dependency, not a
+# rather than failing the whole suite - it's an optional dependency, not a
 # required one. $PYTHON_VERSION (passed down from integrationTests.sh, which
 # gets it from the Makefile's PYTHON_VERSION) is cross-checked against the
 # pipenv-managed interpreter actually in use, so a stale/mismatched venv
@@ -26,7 +26,7 @@
 # Known environment limitation: some corporate/sandboxed networks proxy all
 # outbound traffic, including localhost, and hf_xet's Rust HTTP client does
 # not consistently honor NO_PROXY/no_proxy for localhost there. When that
-# happens, `hf upload` hangs — not a xetd bug, since the same upload/download
+# happens, `hf upload` hangs - not a xetd bug, since the same upload/download
 # flow passes when driven directly against internal/casserver without going
 # through a proxied hf_xet client. Both the runner's outer timeout
 # (integrationTests.sh, XET_IT_TEST_TIMEOUT) and this script's own per-command
@@ -36,7 +36,19 @@
 set -euo pipefail
 
 PYTHON_VERSION="${PYTHON_VERSION:-3}"
-CMD_TIMEOUT="${XET_HF_CLI_CMD_TIMEOUT:-4}"
+
+# Per-`hf`-invocation timeout. Every runHf call pays `pipenv run` venv
+# resolution plus a cold Python interpreter start before hf does any work,
+# and on Windows that fixed overhead alone is often seconds - enough to trip
+# a 4s budget that is perfectly adequate on Linux/macOS. Keep the tight
+# bound where it's meaningful (it's what turns the proxied-localhost hang
+# described in the header into a fast, clear failure) and relax it where the
+# startup cost dominates.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) DEFAULT_CMD_TIMEOUT=20 ;;
+    *)                    DEFAULT_CMD_TIMEOUT=4  ;;
+esac
+CMD_TIMEOUT="${XET_HF_CLI_CMD_TIMEOUT:-$DEFAULT_CMD_TIMEOUT}"
 
 if ! command -v pipenv >/dev/null 2>&1; then
     echo "pipenv not found. Set up with: make install"
@@ -77,7 +89,7 @@ export HF_HOME="$WORKDIR/hf-home"
 export HF_XET_CACHE="$WORKDIR/hf-xet-cache"
 export HF_ENDPOINT="$HUB_URL"
 export HF_TOKEN="local-test-token"
-export HF_XET_LOG_PATH=/dev/null
+export HF_XET_LOG_PATH="${HF_XET_LOG_PATH:-/dev/null}"  # runner sets NUL on Windows
 export NO_PROXY="localhost,127.0.0.1,${NO_PROXY:-}"
 export no_proxy="localhost,127.0.0.1,${no_proxy:-}"
 mkdir -p "$HF_HOME" "$HF_XET_CACHE"
@@ -89,8 +101,13 @@ pipenv run python3 -c \
 REPO_ID="localtest/xet-server-hf-cli-it-$$"
 
 echo "hf upload $REPO_ID model.bin (timeout: ${CMD_TIMEOUT}s)"
-if ! runHf upload "$REPO_ID" "$TEST_FILE" model.bin; then
-    status=$?
+# Capture the status with `|| status=$?` rather than `if ! cmd; then status=$?`:
+# after `! cmd`, `$?` holds the NEGATED status (0 when cmd failed), so the
+# `-eq 124` timeout check below could never fire and a hang was reported as a
+# generic failure with no explanation.
+status=0
+runHf upload "$REPO_ID" "$TEST_FILE" model.bin || status=$?
+if [[ $status -ne 0 ]]; then
     [[ $status -eq 124 ]] && echo "TIMEOUT: 'hf upload' exceeded ${CMD_TIMEOUT}s (see script header re: proxy hangs)."
     exit 1
 fi
@@ -98,8 +115,9 @@ fi
 echo "hf download $REPO_ID model.bin (timeout: ${CMD_TIMEOUT}s)"
 DOWNLOAD_DIR="$WORKDIR/downloaded"
 mkdir -p "$DOWNLOAD_DIR"
-if ! runHf download "$REPO_ID" model.bin --local-dir "$DOWNLOAD_DIR"; then
-    status=$?
+status=0
+runHf download "$REPO_ID" model.bin --local-dir "$DOWNLOAD_DIR" || status=$?
+if [[ $status -ne 0 ]]; then
     [[ $status -eq 124 ]] && echo "TIMEOUT: 'hf download' exceeded ${CMD_TIMEOUT}s (see script header re: proxy hangs)."
     exit 1
 fi
@@ -115,8 +133,9 @@ echo "real hf CLI upload + download round-trip byte-identical"
 echo "hf download $REPO_ID (whole repo, timeout: ${CMD_TIMEOUT}s)"
 WHOLE_REPO_DIR="$WORKDIR/downloaded-whole-repo"
 mkdir -p "$WHOLE_REPO_DIR"
-if ! runHf download "$REPO_ID" --local-dir "$WHOLE_REPO_DIR"; then
-    status=$?
+status=0
+runHf download "$REPO_ID" --local-dir "$WHOLE_REPO_DIR" || status=$?
+if [[ $status -ne 0 ]]; then
     [[ $status -eq 124 ]] && echo "TIMEOUT: 'hf download' (whole repo) exceeded ${CMD_TIMEOUT}s (see script header re: proxy hangs)."
     exit 1
 fi

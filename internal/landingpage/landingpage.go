@@ -1,9 +1,9 @@
 // Package landingpage renders small, self-contained HTML pages so anyone
 // opening a xetd port directly in a browser (e.g. http://localhost:8420/)
-// immediately sees what that port is for and where to go next — instead
+// immediately sees what that port is for and where to go next - instead
 // of a raw 404 or a bare JSON response. Two variants: CASHandler for the
 // CAS + Xet Data API port, HubHandler for the Hub API shim port (started
-// separately via -hub-addr). No CSS/JS framework, no CDN dependency — one
+// separately via -hub-addr). No CSS/JS framework, no CDN dependency - one
 // inline <style> block per page, matching this project's "fully offline"
 // posture (see internal/apidocs).
 package landingpage
@@ -13,8 +13,8 @@ import (
 	"html/template"
 	"net/http"
 
-	"xet-server/internal/api"
-	"xet-server/internal/casserver"
+	"github.com/guilt/xet-server/internal/api"
+	"github.com/guilt/xet-server/internal/casserver"
 )
 
 const style = `
@@ -109,7 +109,7 @@ func render(w http.ResponseWriter, data pageData) {
 	}
 }
 
-// serveRootOnly wraps a rendered page so it only answers "/" — anything
+// serveRootOnly wraps a rendered page so it only answers "/" - anything
 // else 404s, exactly like http.ServeMux would if this were registered as
 // a normal pattern-based route, since a bare HandlerFunc otherwise
 // matches every path under it.
@@ -126,14 +126,14 @@ func serveRootOnly(data pageData) http.HandlerFunc {
 // CASHandler serves the landing page for xetd's main port (CAS protocol +
 // Xet Data API + interactive API docs). addr is this server's own listen
 // address (used only to build the quick-start example's -addr value, e.g.
-// ":8420" — never turned into a fabricated hostname/URL, since this
+// ":8420" - never turned into a fabricated hostname/URL, since this
 // server may be bound to any interface or reached through any hostname);
 // hubAddr is the Hub API shim's listen address, or "" if it wasn't
-// started — used only to decide whether to mention it exists.
+// started - used only to decide whether to mention it exists.
 func CASHandler(addr, hubAddr string) http.HandlerFunc {
 	note := ""
 	if hubAddr != "" {
-		note = fmt.Sprintf("A Hub API shim is also running on %s, for the real `hf` CLI — open it directly for its own quick-start guide.", hubAddr)
+		note = fmt.Sprintf("A Hub API shim is also running on %s, for the real `hf` CLI - open it directly for its own quick-start guide.", hubAddr)
 	}
 	data := pageData{
 		Title:    "Xet Server",
@@ -166,11 +166,11 @@ xet pull -server http://<this-host>%s -out ./restored.safetensors <file-id>`, ad
 // REST API so the real `hf upload`/`hf download` CLI commands work
 // end-to-end via HF_ENDPOINT. Swagger UI is not mounted on this port (it
 // lives on the CAS port, documenting both), so this page doesn't link to it
-// directly — hubAddr's own OtherPortNote-equivalent isn't needed since the
+// directly - hubAddr's own OtherPortNote-equivalent isn't needed since the
 // CAS port's landing page already cross-links here.
 func HubHandler() http.HandlerFunc {
 	data := pageData{
-		Title:    "Xet Server — Hub API shim",
+		Title:    "Xet Server - Hub API shim",
 		Subtitle: "A huggingface_hub-compatible Hub API shim, paired with a Xet CAS server on another port.",
 		Endpoints: []endpoint{
 			{"/api/repos/create", "POST", "Create (or no-op re-touch) a repo"},
@@ -181,20 +181,23 @@ func HubHandler() http.HandlerFunc {
 			{"/api/{repo_type}s/{repo_id}/xet-write-token/{revision}", "GET", "Issue a CAS endpoint + write-scoped bearer token"},
 			{"/api/{repo_type}s/{repo_id}/commit/{revision}", "POST", "Commit file entries to a revision"},
 			{"/api/{repo_type}s/{repo_id}/preupload/{revision}", "POST", "Negotiate per-file upload mode"},
+			{"/{repo_id}.git/info/lfs/objects/batch", "POST", "git-LFS batch negotiation - answers \"xet\", the entry point to the Xet upload path"},
 			{"/{repo_id}/resolve/{revision}/{filename}", "HEAD", "File metadata (triggers the Xet download path)"},
+			{"/api-docs/", "GET", "Interactive Swagger UI - \"Try it out\" calls THIS port, so Hub endpoints are callable here"},
 		},
 		QuickStart: `export HF_ENDPOINT="http://<this-host>:<this-port>"
 export HF_TOKEN="anything"   # ignored unless xetd was started with -auth-token
 
 hf upload myuser/my-model ./model.safetensors model.safetensors
 hf download myuser/my-model model.safetensors --local-dir ./downloaded`,
+		ShowAPIDocsLink: true,
 	}
 	return serveRootOnly(data)
 }
 
 // ProxyCASHandler serves the landing page for cmd/xet-proxyd's CAS-facing
-// port — CASHandler's counterpart for the proxy binary rather than xetd:
-// same route table shape (it embeds a real casserver.Server — see
+// port - CASHandler's counterpart for the proxy binary rather than xetd:
+// same route table shape (it embeds a real casserver.Server - see
 // internal/proxycas's package doc comment on why the endpoint list is
 // identical), but the subtitle/quick-start explain the caching/relay
 // behavior instead of xetd's "this is the only copy" framing. hubAddr is
@@ -202,7 +205,7 @@ hf download myuser/my-model model.safetensors --local-dir ./downloaded`,
 func ProxyCASHandler(addr, hubAddr string) http.HandlerFunc {
 	note := ""
 	if hubAddr != "" {
-		note = fmt.Sprintf("A Hub-facing proxy is also running on %s, relaying to the real huggingface.co — open it directly for its own quick-start guide.", hubAddr)
+		note = fmt.Sprintf("A Hub-facing proxy is also running on %s, relaying to the real huggingface.co - open it directly for its own quick-start guide.", hubAddr)
 	}
 	data := pageData{
 		Title:    "Xet Proxy Server",
@@ -214,11 +217,11 @@ func ProxyCASHandler(addr, hubAddr string) http.HandlerFunc {
 			{casserver.ReconstructionsPath, "GET", "Serve a cached reconstruction, or fetch-and-cache the whole file's from upstream on a miss"},
 			{casserver.ReconstructionsPathV2, "GET", "Same as above, multi-range-optimized response shape"},
 			{casserver.ChunksPath, "GET", "Always relayed live (no stable local cache key)"},
-			{"/api-docs/", "GET", "Interactive Swagger UI (same protocol as xetd's — see openapi.yaml)"},
+			{"/api-docs/", "GET", "Interactive Swagger UI (same protocol as xetd's - see openapi.yaml)"},
 		},
 		QuickStart: fmt.Sprintf(`xet-proxyd -addr %s -hub-addr <hub-port> -data ./xet-proxy-data
 
-# point HF_ENDPOINT at the Hub-facing port (not this one) for the real hf CLI —
+# point HF_ENDPOINT at the Hub-facing port (not this one) for the real hf CLI -
 # see the Hub-facing port's own landing page for that quick-start.`, addr),
 		OtherPortNote:   note,
 		ShowAPIDocsLink: true,
@@ -227,15 +230,15 @@ func ProxyCASHandler(addr, hubAddr string) http.HandlerFunc {
 }
 
 // ProxyHubHandler serves the landing page for cmd/xet-proxyd's Hub-facing
-// port — HubHandler's counterpart for the proxy binary. Same route table
+// port - HubHandler's counterpart for the proxy binary. Same route table
 // as HubHandler (internal/proxyhub embeds a real hubserver.Server too),
 // but every route here can fall back to a live relay-and-cache against
 // the real huggingface.co, and every read falls back to whatever's
 // already cached on any upstream failure.
 func ProxyHubHandler() http.HandlerFunc {
 	data := pageData{
-		Title:    "Xet Proxy Server — Hub API shim",
-		Subtitle: "A caching pull-through proxy for the real huggingface.co Hub API — point HF_ENDPOINT here and the real `hf` CLI works, offline-resilient once something's been fetched once.",
+		Title:    "Xet Proxy Server - Hub API shim",
+		Subtitle: "A caching pull-through proxy for the real huggingface.co Hub API - point HF_ENDPOINT here and the real `hf` CLI works, offline-resilient once something's been fetched once.",
 		Endpoints: []endpoint{
 			{"/api/repos/create", "POST", "Relay repo creation upstream, then mirror it into the local cache"},
 			{"/api/{repo_type}s/{repo_id}/revision/{revision}", "GET", "Serve cached repo info, or fetch-and-cache from upstream"},
@@ -245,14 +248,17 @@ func ProxyHubHandler() http.HandlerFunc {
 			{"/api/{repo_type}s/{repo_id}/xet-write-token/{revision}", "GET", "Same as above, write-scoped"},
 			{"/api/{repo_type}s/{repo_id}/commit/{revision}", "POST", "Relay a commit upstream, then mirror it into the local cache"},
 			{"/api/{repo_type}s/{repo_id}/preupload/{revision}", "POST", "Always relayed live (upload-mode negotiation)"},
+			{"/{repo_id}.git/info/lfs/objects/batch", "POST", "Relayed live to the real Hub (git-LFS wire protocol, not cached)"},
 			{"/{repo_id}/resolve/{revision}/{filename}", "HEAD", "Serve cached file metadata, or fetch-and-cache from upstream"},
+			{"/api-docs/", "GET", "Interactive Swagger UI - \"Try it out\" calls THIS port, so Hub endpoints are callable here"},
 		},
+		ShowAPIDocsLink: true,
 		QuickStart: `export HF_ENDPOINT="http://<this-host>:<this-port>"
-export HF_TOKEN="anything"   # forwarded upstream unchanged — see README's Authentication section
+export HF_TOKEN="anything"   # forwarded upstream unchanged - see README's Authentication section
 
 hf download someuser/some-model --local-dir ./downloaded
 # every repo/file this proxy has served once stays servable even after
-# huggingface.co becomes unreachable — see the main README's
+# huggingface.co becomes unreachable - see the main README's
 # "Caching pull-through proxy" section for the full offline-handoff story.`,
 	}
 	return serveRootOnly(data)

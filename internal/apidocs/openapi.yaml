@@ -8,7 +8,7 @@ info:
     shim (`internal/hubserver`, mounted on a separate port via `-hub-addr`)
     that lets the real `hf` CLI talk to this server end-to-end, and the Xet
     Data API (`internal/api`, mounted at `/v1` alongside the CAS protocol,
-    on a disjoint set of literal paths) — a simple, non-wire-compatible
+    on a disjoint set of literal paths) - a simple, non-wire-compatible
     chunk/dedup API for quick manual testing via the `xet` CLI.
 
     ## Authentication
@@ -20,22 +20,65 @@ info:
     `$XETD_AUTH_TOKEN`/`$HF_TOKEN`), which installs a single shared bearer
     token checked against every request:
 
-    - **401 Unauthorized** — no `Authorization` header, or a token that
+    - **401 Unauthorized** - no `Authorization` header, or a token that
       fails validation entirely (wrong token, malformed header).
-    - **403 Forbidden** — a valid token that lacks the scope (`read` or
+    - **403 Forbidden** - a valid token that lacks the scope (`read` or
       `write`) the endpoint requires.
 
+    In this UI, use **Authorize** and paste the same secret the server was
+    started with; it is sent as `Authorization: Bearer <token>` on every
+    "Try it out" call. If the server has no auth configured you can skip
+    this entirely - the token is ignored either way.
+
+    ## Trying endpoints from this page
+
+    The server entry is relative, so "Try it out" always targets whichever
+    host and port you loaded these docs from - no configuration needed, on
+    a remote host or a non-default port.
+
+    This spec documents two APIs that run on two listeners, and **both
+    serve these docs**, so open the one whose endpoints you want to call:
+
+    - `http://<host>:<addr-port>/api-docs/` - CAS protocol + Xet Data API
+    - `http://<host>:<hub-addr-port>/api-docs/` - Hub API shim
+
+    Endpoints belonging to the *other* listener are still documented on
+    whichever page you open (it is one spec), but calling them from here
+    would be cross-origin and the browser will block it - this server
+    sends no CORS headers by design, since a permissive policy would let
+    any website you visit issue authenticated requests to your local
+    server. Switch to the other port's `/api-docs/` page, or use `curl` /
+    the `hf` CLI. Every request and response shape documented here is
+    exact either way.
+
     See `internal/auth`'s package doc for the `Authenticator`/`Principal`
-    (server-side) and `CredentialHelper` (client-side) interfaces —
+    (server-side) and `CredentialHelper` (client-side) interfaces -
     implementing either lets a custom auth backend work with this server's
     existing routes unmodified.
   license:
     name: See repository LICENSE
 servers:
-  - url: http://localhost:8420
-    description: Default CAS + Xet Data API address (xetd -addr)
-  - url: http://localhost:8421
-    description: Default Hub API shim address (xetd -hub-addr), when enabled
+  # A single relative URL, deliberately. It resolves against whatever
+  # origin these docs were loaded from, so "Try it out" targets the right
+  # server with no configuration - on a remote host, behind a reverse
+  # proxy, or on a non-default -addr/-hub-addr.
+  #
+  # Both listeners serve /api-docs/ (see cmd/xetd and cmd/xet-proxyd), so
+  # the API you can exercise is simply the one belonging to the port you
+  # loaded this page from: open it on -addr for CAS + Xet Data API, or on
+  # -hub-addr for the Hub API. That keeps every call same-origin, which is
+  # what makes it work at all - this server sends no CORS headers, since a
+  # permissive policy would let any site the operator happens to visit
+  # drive their local server.
+  #
+  # Listing absolute URLs here instead (http://localhost:8420) would aim
+  # the browser at that port on the machine running the BROWSER - right
+  # only when that is also the server. A templated entry using OpenAPI
+  # server variables is no better: Swagger UI renders it as a literal
+  # placeholder with variable input boxes, which is noise rather than
+  # help. One relative entry is both correct and the least confusing.
+  - url: /
+    description: This server - whichever host/port you loaded these docs from.
 tags:
   - name: CAS
     description: >-
@@ -79,7 +122,7 @@ components:
       type: object
       description: >-
         casserver's plain-text error body (Content-Type: text/plain via
-        http.Error) is NOT this shape — only hubserver and the Xet Data
+        http.Error) is NOT this shape - only hubserver and the Xet Data
         API's JSON error paths use this. See each endpoint's response for
         its actual error content-type.
       properties:
@@ -203,21 +246,89 @@ components:
       type: object
       description: >-
         Small subset of the real Hub's ModelInfo/DatasetInfo/SpaceInfo
-        shape — huggingface_hub's snapshot_download only ever reads sha.
+        shape. snapshot_download reads `sha` to pin the revision and
+        `siblings` to enumerate files; both matter (see siblings).
       properties:
         id: { type: string, description: 'The repo ID, e.g. "org/name".' }
         sha:
           type: string
           description: >-
             Set to the revision name itself (e.g. "main"), not a real git
-            commit hash — this shim has no separate commit-hash identity
+            commit hash - this shim has no separate commit-hash identity
             for a revision distinct from its name.
         private: { type: boolean }
+        siblings:
+          type: array
+          description: >-
+            Every file committed to this revision. Must be non-empty for a
+            repo that has files: huggingface_hub's snapshot_download treats
+            an empty siblings list as unreliable and falls back to
+            list_repo_tree, which yields a GENERATOR - and tqdm's
+            thread_map then raises "min() arg is an empty sequence" on an
+            iterable of unknown length, before downloading anything. Only
+            rfilename is read off each entry.
+          items: { $ref: '#/components/schemas/RepoSibling' }
       required: [id, sha]
+    RepoSibling:
+      type: object
+      description: One file in a repo revision, as listed by repo-info's siblings array.
+      properties:
+        rfilename: { type: string, description: 'Path of the file within the repo, e.g. "model.gguf".' }
+      required: [rfilename]
+    LFSBatchRequest:
+      type: object
+      description: >-
+        git-LFS batch request body. Only operation and objects are read;
+        clients also send transfers/hash_algo/ref, which are ignored.
+      properties:
+        operation:
+          type: string
+          description: Only "upload" is accepted; anything else is a 400.
+          example: upload
+        transfers:
+          type: array
+          description: >-
+            Transfer types the client supports. Informational here - this
+            server always answers "xet" - but a client that did not offer
+            "xet" ignores the choice and falls back to plain LFS.
+          items: { type: string }
+          example: [basic, multipart, xet]
+        objects:
+          type: array
+          description: >-
+            One entry per file being negotiated. Capped per batch; a larger
+            array is rejected with 413 rather than truncated, since
+            silently dropping entries would leave the client believing
+            files were negotiated that never were. Real clients batch 256
+            (huggingface_hub's UPLOAD_BATCH_MAX_NUM_FILES).
+          items: { $ref: '#/components/schemas/LFSBatchObject' }
+      required: [operation, objects]
+    LFSBatchObject:
+      type: object
+      description: One file's git-LFS identity - its plain SHA-256 and byte size.
+      properties:
+        oid: { type: string, description: 'Plain SHA-256 of the file (hex), NOT the Xet/Merkle hash.' }
+        size: { type: integer, format: int64 }
+      required: [oid, size]
+    LFSBatchResponse:
+      type: object
+      description: >-
+        Batch response selecting the Xet transfer. Objects are echoed
+        back unchanged; per-object `actions` are omitted deliberately (see
+        the endpoint description).
+      properties:
+        transfer:
+          type: string
+          enum: [xet]
+          description: Always "xet" - this server stores files only as Xet xorbs.
+        objects:
+          type: array
+          items: { $ref: '#/components/schemas/LFSBatchObject' }
+      required: [transfer, objects]
     TreeEntry:
       type: object
       description: >-
-        One element of the tree-listing response array — deserialized by
+        One element of the tree-listing response array - deserialized by
         huggingface_hub's RepoFile. type is always "file"; this shim has
         no folder concept.
       properties:
@@ -327,7 +438,7 @@ paths:
       description: >-
         Requires write scope. {prefix} must be the literal "default".
         Body is opaque binary (chunk headers + compressed payloads, no
-        footer — see internal/xorbformat), capped at 128 MiB.
+        footer - see internal/xorbformat), capped at 128 MiB.
       parameters:
         - { name: prefix, in: path, required: true, schema: { type: string, enum: [default] } }
         - { name: hash, in: path, required: true, schema: { type: string }, description: Merkle xorb hash, hex. }
@@ -338,7 +449,7 @@ paths:
             schema: { type: string, format: binary }
       responses:
         '200':
-          description: Uploaded (or already present — see was_inserted).
+          description: Uploaded (or already present - see was_inserted).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UploadXorbResponse' }
@@ -361,7 +472,7 @@ paths:
       summary: Fetch raw xorb bytes
       description: >-
         Requires read scope. Supports a single-range `Range: bytes=<start>-<end>`
-        header (both bounds required — no open-ended or multi-range
+        header (both bounds required - no open-ended or multi-range
         requests). Byte-serving endpoint backing the URLs handed out in
         reconstruction fetch_info.
       parameters:
@@ -402,7 +513,7 @@ paths:
       description: >-
         Requires read scope. Note (source-verified, undocumented elsewhere):
         unlike GET/POST on this same path, this handler does NOT validate
-        {prefix} against "default" — any prefix value is accepted.
+        {prefix} against "default" - any prefix value is accepted.
       parameters:
         - { name: prefix, in: path, required: true, schema: { type: string } }
         - { name: hash, in: path, required: true, schema: { type: string } }
@@ -423,7 +534,7 @@ paths:
       summary: Upload a serialized shard
       description: >-
         Requires write scope. Body is opaque binary (file-info + xorb-info
-        sections, no footer — see internal/shardformat), capped at 16 MiB,
+        sections, no footer - see internal/shardformat), capped at 16 MiB,
         buffered in full before parsing.
       requestBody:
         required: true
@@ -480,7 +591,7 @@ paths:
       summary: File to xorb/chunk-range reconstruction map (V2, multi-range-optimized)
       description: >-
         Requires read scope. Same underlying data as V1, grouped by xorb
-        hash (xorbs) instead of one fetch_info entry per term — fewer
+        hash (xorbs) instead of one fetch_info entry per term - fewer
         signed URLs when a file's reconstruction touches the same xorb
         across multiple non-contiguous terms. Same Range/416 semantics as V1.
       parameters:
@@ -513,7 +624,7 @@ paths:
         Requires read scope. {prefix} must be the literal
         "default-merkledb" (distinct from the xorb-upload prefix). Returns
         the RAW BYTES of whichever previously-uploaded shard referenced
-        this chunk hash — not the chunk itself; the client re-parses the
+        this chunk hash - not the chunk itself; the client re-parses the
         returned shard to find dedup-eligible chunks. This is the real
         wire contract per xet-core's own OpenAPI spec.
       parameters:
@@ -536,7 +647,7 @@ paths:
       tags: [CAS]
       summary: No-op telemetry ack
       description: >-
-        Never gated by auth, regardless of server configuration — a
+        Never gated by auth, regardless of server configuration - a
         fire-and-forget client diagnostic with nothing sensitive to
         protect. Request body is ignored entirely.
       security: []
@@ -561,7 +672,7 @@ paths:
     post:
       tags: [Hub]
       summary: Create (or no-op re-touch) a repo
-      description: Requires write scope. Idempotent — repeat calls with the same name are no-ops.
+      description: Requires write scope. Idempotent - repeat calls with the same name are no-ops.
       requestBody:
         required: true
         content:
@@ -588,7 +699,7 @@ paths:
         REPO_ID` with no filename); `hf upload`'s CLI command also calls
         it to check whether a target --revision already exists before
         creating it. A missing revision returns 404 with
-        X-Error-Code: RevisionNotFound — required for huggingface_hub to
+        X-Error-Code: RevisionNotFound - required for huggingface_hub to
         raise its specific RevisionNotFoundError instead of a generic,
         uncaught error.
       parameters:
@@ -615,7 +726,7 @@ paths:
         Requires read scope. huggingface_hub's list_repo_tree, called
         with recursive=True by snapshot_download to enumerate files
         before downloading a whole repo. Response is a bare JSON array
-        (not an object wrapping one) — huggingface_hub's paginate() helper
+        (not an object wrapping one) - huggingface_hub's paginate() helper
         does `yield from r.json()`. An optional trailing path segment
         (.../tree/{revision}/{path_in_repo}) scopes the listing to files
         under that path; omitted here since this shim's only tested
@@ -646,7 +757,7 @@ paths:
         Requires write scope. Called by `hf upload`'s CLI command after
         a revision-info lookup reports the target --revision doesn't
         exist yet. Idempotent, matching real create_branch(exist_ok=True)
-        — repeat calls for the same branch name are harmless no-ops. This
+        - repeat calls for the same branch name are harmless no-ops. This
         shim's revisions already spring into existence implicitly on
         first commit; this just does the same thing eagerly, in response
         to an explicit request.
@@ -697,7 +808,7 @@ paths:
     get:
       tags: [Hub]
       summary: Issue a CAS endpoint + bearer token (write)
-      description: Requires write scope. See xet-read-token — identical response shape.
+      description: Requires write scope. See xet-read-token - identical response shape.
       parameters:
         - { name: repo_type, in: path, required: true, schema: { type: string }, example: model }
         - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
@@ -759,7 +870,7 @@ paths:
       tags: [Hub]
       summary: Negotiate per-file upload mode
       description: >-
-        Requires write scope. Stateless — repo_type/repo_id/revision path
+        Requires write scope. Stateless - repo_type/repo_id/revision path
         segments are parsed but not used by this handler.
       parameters:
         - { name: repo_type, in: path, required: true, schema: { type: string } }
@@ -781,6 +892,60 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /{repo_id}.git/info/lfs/objects/batch:
+    post:
+      tags: [Hub]
+      summary: git-LFS batch negotiation (entry point to the Xet upload path)
+      description: >-
+        Requires write scope. Despite the git-LFS URL, this is how a real
+        client enters the XET upload path: huggingface_hub offers the
+        server ["basic", "multipart", "xet"] and branches on the transfer
+        it picks, so answering "xet" here is what routes the client into
+        _upload_xet_files (xet-write-token + hf_xet upload to CAS). A
+        server without this endpoint gets no Xet upload traffic at all -
+        the client falls back to plain LFS and fails. Files below
+        huggingface_hub's ~5 MB LFS threshold are committed inline and
+        never reach this endpoint.
+
+
+        Per-object `actions` are deliberately absent from the response:
+        _validate_batch_actions requires only oid+size, and the Xet path
+        ignores actions entirely, re-deriving everything from the
+        xet-write-token plus the local file.
+
+
+        Accepts the same optional repo-type prefix as resolve
+        (datasets/..., spaces/...). The body must be exactly one JSON
+        value - trailing data is rejected rather than silently ignored -
+        and is bounded in both byte size and object count, since the
+        response echoes every object back.
+      parameters:
+        - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LFSBatchRequest' }
+      responses:
+        '200':
+          description: Transfer negotiated as "xet"; objects echoed back.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LFSBatchResponse' }
+        '400':
+          description: >-
+            Malformed JSON, trailing data after the JSON value, a
+            non-"upload" operation, or a repo_id whose namespace/name is
+            empty.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '405':
+          description: Method other than POST.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '413':
+          description: Body over the size cap, or more objects than the per-batch cap.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /{repo_id}/resolve/{revision}/{filename}:
     head:
       tags: [Hub]
@@ -789,8 +954,17 @@ paths:
         Requires read scope. huggingface_hub's HEAD call is what triggers
         the Xet download path client-side: it looks for X-Xet-Hash plus
         X-Xet-Refresh-Route, and downloads via hf_xet instead of calling
-        GET on this same URL. repo_id is always treated as repo type
-        "model" (not encoded in resolve URLs).
+        GET on this same URL.
+
+
+        Models use this bare path; datasets and spaces carry a repo-type
+        prefix (datasets/{repo_id}/resolve/... and
+        spaces/{repo_id}/resolve/...). The prefix is parsed by locating
+        "/resolve/" and reading the two segments before it as
+        namespace/name, so an unrecognized prefix degrades to "model"
+        rather than 404ing. repo_type also determines the
+        X-Xet-Refresh-Route returned below, which lives under /api/ and so
+        is always typed (e.g. /api/datasets/...).
       parameters:
         - { name: repo_id, in: path, required: true, schema: { type: string }, example: alice/my-model }
         - { name: revision, in: path, required: true, schema: { type: string }, example: main }
@@ -817,7 +991,7 @@ paths:
       summary: File metadata + unimplemented direct download
       description: >-
         Requires read scope. Same lookups/headers/404s as HEAD, but never
-        actually serves file bytes — always 501 once metadata is found.
+        actually serves file bytes - always 501 once metadata is found.
         Real clients use the Xet download path signaled by the headers
         instead of calling GET here.
       parameters:
@@ -859,7 +1033,7 @@ paths:
       tags: [Xet Data]
       summary: Download a previously-uploaded file
       description: >-
-        Requires read scope. No Range header support — always streams the
+        Requires read scope. No Range header support - always streams the
         full file.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }

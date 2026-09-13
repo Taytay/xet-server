@@ -13,7 +13,7 @@ import (
 
 // buildUncompressedFrame constructs a minimal valid LZ4 frame containing
 // size bytes of data as a single "uncompressed" block (the frame format's
-// own escape hatch for incompressible data — bit 31 of the block-size
+// own escape hatch for incompressible data - bit 31 of the block-size
 // field). This package has no encoder (decompression-only, per its
 // package doc), so this is the only way to get larger-than-the-one-real-
 // fixture LZ4 frame input for benchmarking without vendoring a real LZ4

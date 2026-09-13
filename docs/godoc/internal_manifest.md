@@ -1,7 +1,7 @@
-# `xet-server/internal/manifest`
+# `github.com/guilt/xet-server/internal/manifest`
 
 ```
-package manifest // import "xet-server/internal/manifest"
+package manifest // import "github.com/guilt/xet-server/internal/manifest"
 
 Package manifest describes how to reconstruct a file from an ordered list of
 content-defined chunks, analogous to Xet's file reconstruction metadata.

@@ -12,8 +12,8 @@ import (
 // commitLine mirrors one line of the ndjson commit payload
 // huggingface_hub sends: either {"key":"header",...} or
 // {"key":"lfsFile","value":{"path":...,"oid":...,"size":...}} for a
-// Xet/LFS-backed file (this server never sees "file" — small inline
-// content — since the test client only ever uploads via Xet).
+// Xet/LFS-backed file (this server never sees "file" - small inline
+// content - since the test client only ever uploads via Xet).
 type commitLine struct {
 	Key   string `json:"key"`
 	Value struct {
@@ -34,7 +34,7 @@ type commitResponse struct {
 // and declared SHA-256 (oid) against the named revision. The Xet/Merkle
 // file hash needed to actually serve the file on download is backfilled
 // lazily on first resolve request, by asking the paired CAS server (see
-// resolve.go) — the commit payload only ever carries the plain SHA-256,
+// resolve.go) - the commit payload only ever carries the plain SHA-256,
 // never the Xet hash. A revision that doesn't exist yet on this repo is
 // created implicitly, matching how pushing to a new branch name creates
 // it on a real repo.
@@ -121,7 +121,7 @@ type preuploadResponse struct {
 // handlePreupload implements POST /api/{repo_type}s/{repo_id}/preupload/{revision}:
 // tells huggingface_hub which upload path to use per file. Every non-empty
 // file is routed through "lfs" (which is what triggers the Xet upload path
-// once hf_xet is installed) — this server only ever expects Xet uploads,
+// once hf_xet is installed) - this server only ever expects Xet uploads,
 // so there is no separate small-file/regular-blob path to model.
 func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 	var req preuploadRequest

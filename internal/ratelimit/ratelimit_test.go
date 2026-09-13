@@ -174,7 +174,7 @@ func TestAllow_PrunesFullyRefilledStaleBucketsAfterPruneEvery(t *testing.T) {
 }
 
 func TestAllow_NeverPrunesWithZeroRefillRate(t *testing.T) {
-	// RefillPerSecond <= 0 means a bucket can never "fully refill" —
+	// RefillPerSecond <= 0 means a bucket can never "fully refill" -
 	// pruning it would be observably different from keeping it (the
 	// pruned/re-created bucket gets a full burst it hadn't earned back).
 	l := New(1, 0)

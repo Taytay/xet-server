@@ -254,10 +254,10 @@ func TestStore_TotalBytes_ExcludesFreshTempFile(t *testing.T) {
 		t.Fatalf("TotalBytes() error = %v", err)
 	}
 	if total != 100 {
-		t.Errorf("TotalBytes() = %d, want 100 — a fresh in-flight temp file must not be counted", total)
+		t.Errorf("TotalBytes() = %d, want 100 - a fresh in-flight temp file must not be counted", total)
 	}
 
-	// And it must still be on disk — TotalBytes must not have touched a
+	// And it must still be on disk - TotalBytes must not have touched a
 	// temp file young enough to plausibly be a live upload.
 	if _, err := os.Stat(tmpPath); err != nil {
 		t.Errorf("fresh temp file was removed by TotalBytes(), want it left alone: %v", err)
@@ -293,10 +293,10 @@ func TestStore_TotalBytes_ReapsStaleTempFile(t *testing.T) {
 		t.Fatalf("TotalBytes() error = %v", err)
 	}
 	if total != 100 {
-		t.Errorf("TotalBytes() = %d, want 100 — a stale orphaned temp file must not be counted", total)
+		t.Errorf("TotalBytes() = %d, want 100 - a stale orphaned temp file must not be counted", total)
 	}
 
-	// It must actually be gone afterward — silently excluding it forever
+	// It must actually be gone afterward - silently excluding it forever
 	// without reclaiming the disk space would be its own bug (the
 	// scenario this test guards against).
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {

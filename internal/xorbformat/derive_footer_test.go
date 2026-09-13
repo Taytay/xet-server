@@ -1,6 +1,6 @@
 package xorbformat
 
-// Tests for DeriveFooter — independently reconstructing a xorb's V1
+// Tests for DeriveFooter - independently reconstructing a xorb's V1
 // footer and content hash from raw chunk bytes with no footer at all
 // (the real upload wire format), shared by casserver (verifying a fresh
 // upload) and proxycas (deriving a footer for a xorb it only ever saw as
@@ -10,7 +10,7 @@ import (
 	"bytes"
 	"testing"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 func TestDeriveFooter_MatchesFooterWrittenByBuildTestXorb(t *testing.T) {

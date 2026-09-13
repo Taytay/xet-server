@@ -11,19 +11,19 @@ import (
 	"os"
 	"time"
 
-	"xet-server/internal/api"
-	"xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/api"
+	"github.com/guilt/xet-server/internal/auth"
 )
 
 // defaultHTTPClient bounds connect/TLS-handshake/response-header latency
-// (10s each) without a blanket request Timeout — a large xorb push/pull
+// (10s each) without a blanket request Timeout - a large xorb push/pull
 // can legitimately take longer than any single one of these phases
 // without being unhealthy. Mirrors internal/hfclient's own
 // defaultHTTPClient (see its doc comment for the full rationale); this
 // package's own risk profile differs (a one-shot CLI invocation against
 // a local xetd, not a long-running server under sustained concurrent
-// load), but a hung or unreachable server — e.g. a stale -server flag
-// pointing at a host that accepts connections but never responds —
+// load), but a hung or unreachable server - e.g. a stale -server flag
+// pointing at a host that accepts connections but never responds -
 // should still fail fast rather than hang the CLI command indefinitely.
 var defaultHTTPClient = &http.Client{
 	Transport: &http.Transport{
@@ -40,7 +40,7 @@ var defaultHTTPClient = &http.Client{
 // mounted at api.V1 (sharing that namespace with, but never overlapping
 // the specific paths of, the real CAS protocol). Cred, if set, is applied
 // to every outgoing request via its FillCredential method (see
-// auth.CredentialHelper) — nil is equivalent to
+// auth.CredentialHelper) - nil is equivalent to
 // auth.NoopCredentialHelper{}, this client's pre-v0.8.0 behavior of
 // attaching no credential at all.
 type Client struct {
@@ -55,14 +55,14 @@ func New(baseURL string) *Client {
 
 // route builds c.BaseURL+path, where path is one of internal/api's
 // exported path constants (api.UploadPath, api.FilesPrefix+id,
-// api.StatsPath, ...) — this client never re-types a version prefix or
+// api.StatsPath, ...) - this client never re-types a version prefix or
 // sub-path as its own string literal, so a path change on the server side
 // only requires updating internal/api, not every client call site too.
 func (c *Client) route(path string) string {
 	return c.BaseURL + path
 }
 
-// do fills req's credential (if c.Cred is set) and sends it — every
+// do fills req's credential (if c.Cred is set) and sends it - every
 // request this client makes should go through here rather than
 // c.HTTP.Get/Post directly, so a configured CredentialHelper is never
 // silently skipped on some code paths but not others.

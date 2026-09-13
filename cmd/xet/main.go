@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/client"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/client"
 )
 
 func main() {
@@ -42,7 +42,7 @@ func usage() {
 }
 
 // defaultServer is the last resort when neither -server nor $XET_SERVER is
-// set — this CLI's pre-v0.8.0 behavior of assuming a xetd instance on the
+// set - this CLI's pre-v0.8.0 behavior of assuming a xetd instance on the
 // default port on the same machine.
 const defaultServer = "http://localhost:8420"
 
@@ -50,12 +50,12 @@ const defaultServer = "http://localhost:8420"
 // flag wins, then environment, here just one variable deep) but with a
 // concrete fallback URL instead of the "None" sentinel, since an empty
 // server URL isn't a meaningful "no server configured" state the way an
-// empty auth token is — every command needs *some* URL to talk to.
+// empty auth token is - every command needs *some* URL to talk to.
 //
 // $XET_SERVER is this CLI's own variable, not $HF_ENDPOINT: HF_ENDPOINT
 // points the real `hf` CLI at xetd's Hub API shim (a different port,
 // speaking huggingface_hub's repo-based protocol), while -server here
-// points at the CAS + Xet Data API port — reusing HF_ENDPOINT would
+// points at the CAS + Xet Data API port - reusing HF_ENDPOINT would
 // silently send xet to the wrong server for anyone who already has it
 // exported for `hf`.
 func resolveServer(flagValue string) string {
@@ -69,7 +69,7 @@ func resolveServer(flagValue string) string {
 }
 
 // newClient builds a client.Client for baseURL, wiring authToken into a
-// auth.BearerCredentialHelper if non-empty/non-"None" — mirroring xetd's
+// auth.BearerCredentialHelper if non-empty/non-"None" - mirroring xetd's
 // own -auth-token convention exactly, so pointing xet at a xetd started
 // with -auth-token <secret> is just passing the same flag here. Empty or
 // "None" (the default) leaves the client's Cred at auth.NoopCredentialHelper{},

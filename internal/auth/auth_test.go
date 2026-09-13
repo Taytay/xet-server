@@ -2,12 +2,12 @@ package auth
 
 // Core correctness tests for NoAuth and StaticTokenAuth. Wiring-level
 // tests (casserver/hubserver enforcing scopes over real HTTP, backward
-// compatibility, adversarial headers) live alongside those packages —
+// compatibility, adversarial headers) live alongside those packages -
 // see internal/casserver/auth_test.go and internal/hubserver/auth_test.go.
 //
 // Every token string below (testFixtureToken, "wrong-fixture-token",
 // "shared-fixture-token") is a hardcoded test fixture with no relation
-// to any real credential — flagged explicitly so static-analysis secret
+// to any real credential - flagged explicitly so static-analysis secret
 // scanners don't need to guess.
 
 import (
@@ -88,7 +88,7 @@ func TestStaticTokenAuth_MalformedHeadersFailCleanly(t *testing.T) {
 		testFixtureToken,                   // missing "Bearer " prefix entirely
 		"Basic " + testFixtureToken,        // wrong scheme
 		"Bearer  " + testFixtureToken,      // double space (the extra space becomes part of the token, so it won't match)
-		"Bearer " + testFixtureToken + " ", // trailing space in token — must NOT match (not the same secret)
+		"Bearer " + testFixtureToken + " ", // trailing space in token - must NOT match (not the same secret)
 	}
 	for _, h := range cases {
 		t.Run(h, func(t *testing.T) {
@@ -115,7 +115,7 @@ func TestStaticTokenAuth_CaseInsensitiveSchemeStillMatchesToken(t *testing.T) {
 
 func TestNewStaticTokenAuth_EmptyTokenNeverAuthenticates(t *testing.T) {
 	// Constructing with an empty token must not become "accept anything,
-	// including an empty bearer token" — that would defeat the point of
+	// including an empty bearer token" - that would defeat the point of
 	// explicitly configuring a token at all.
 	a := NewStaticTokenAuth("")
 	req := httptest.NewRequest("GET", "/", nil)
@@ -158,7 +158,7 @@ func TestBearerCredentialHelper_RoundTripsWithStaticTokenAuth(t *testing.T) {
 	// The two halves of this package must actually interoperate: a
 	// request filled by BearerCredentialHelper must authenticate
 	// successfully against a StaticTokenAuth configured with the same
-	// token — this is the whole point of having a matched client/server
+	// token - this is the whole point of having a matched client/server
 	// pair of interfaces. "shared-fixture-token" is a hardcoded test
 	// value, not a real credential.
 	const sharedFixtureToken = "shared-fixture-token"
@@ -170,6 +170,6 @@ func TestBearerCredentialHelper_RoundTripsWithStaticTokenAuth(t *testing.T) {
 		t.Fatalf("FillCredential() error = %v", err)
 	}
 	if _, err := serverAuth.Authenticate(req); err != nil {
-		t.Errorf("Authenticate() error = %v, want nil — client and server must interoperate on the same token", err)
+		t.Errorf("Authenticate() error = %v, want nil - client and server must interoperate on the same token", err)
 	}
 }

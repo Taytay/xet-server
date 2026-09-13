@@ -2,21 +2,21 @@
 // interfaces, kept deliberately small so a third party can implement a
 // custom backend (JWT, OAuth, mTLS, an internal SSO integration, whatever
 // a real deployment needs) without touching casserver, hubserver, or the
-// cmd/xet client at all — implement Authenticator (server side) and/or
+// cmd/xet client at all - implement Authenticator (server side) and/or
 // CredentialHelper (client side), and both sides of this project work
 // with it automatically.
 //
 // This mirrors the real xet-core/hf_xet protocol's actual auth model
 // (confirmed against xet-core's own openapi/cas.openapi.yaml and its
 // client-side xet_client::common::auth module): Authorization: Bearer
-// <token>, with tokens carrying scopes (read, write) — 401 for a missing
+// <token>, with tokens carrying scopes (read, write) - 401 for a missing
 // or invalid token, 403 for a valid token lacking the scope a given
 // endpoint requires. See docs/PROTOCOL.md for the full writeup.
 //
 // The zero-configuration default on both sides (NoAuth, NoopCredentialHelper)
 // is byte-for-byte today's pre-v0.8.0 behavior: no token is required, and
 // none is sent. Passing -auth-token to xetd or xet is what opts into
-// enforcement/sending a credential — existing deployments and scripts
+// enforcement/sending a credential - existing deployments and scripts
 // that never pass that flag see no behavior change at all.
 package auth
 
@@ -34,11 +34,11 @@ type Scope string
 
 const (
 	// ScopeRead gates every read-only CAS/Hub endpoint (reconstruction,
-	// xorb fetch, chunk-dedup lookup, resolve) — mirrors the real
+	// xorb fetch, chunk-dedup lookup, resolve) - mirrors the real
 	// protocol's `read` scope.
 	ScopeRead Scope = "read"
 	// ScopeWrite gates every mutating CAS/Hub endpoint (xorb/shard
-	// upload, commit, repo create) — mirrors the real protocol's `write`
+	// upload, commit, repo create) - mirrors the real protocol's `write`
 	// scope.
 	ScopeWrite Scope = "write"
 )
@@ -48,7 +48,7 @@ const (
 // two methods so a minimal custom implementation (e.g. "this token maps
 // to this one hardcoded scope set") costs almost nothing to write.
 type Principal interface {
-	// Subject returns an identifier for logging/auditing — a username,
+	// Subject returns an identifier for logging/auditing - a username,
 	// token ID, service account name, whatever the Authenticator
 	// considers meaningful. Not used for any authorization decision
 	// itself; HasScope is.
@@ -69,7 +69,7 @@ var ErrUnauthenticated = errors.New("auth: request is not authenticated")
 // scope the caller is about to check for. In practice this project's
 // Authenticator implementations return a Principal from Authenticate and
 // let the caller check HasScope itself (see casserver/hubserver's
-// requireScope helper) — ErrForbidden exists for a custom Authenticator
+// requireScope helper) - ErrForbidden exists for a custom Authenticator
 // that prefers to reject at authentication time instead, and for callers
 // that want one consistent sentinel for "authenticated but not allowed"
 // regardless of which layer decided that.
@@ -78,7 +78,7 @@ var ErrForbidden = errors.New("auth: principal lacks required scope")
 // Authenticator validates an incoming HTTP request's credential and
 // returns the Principal it maps to. Implementations should extract
 // whatever credential their scheme uses (a bearer token, a client
-// certificate, a signed cookie, ...) from r and validate it — r must not
+// certificate, a signed cookie, ...) from r and validate it - r must not
 // be mutated.
 //
 // A request with no credential at all is not a special case an
@@ -92,7 +92,7 @@ type Authenticator interface {
 
 // NoAuth is the default Authenticator: every request succeeds, and the
 // returned Principal holds every scope unconditionally. This is exactly
-// this project's pre-v0.8.0 behavior (no auth enforcement at all) — both
+// this project's pre-v0.8.0 behavior (no auth enforcement at all) - both
 // casserver.Server and hubserver.Server use this by default until
 // SetAuthenticator is called with something else, so existing code that
 // never touches the new auth APIs is completely unaffected.

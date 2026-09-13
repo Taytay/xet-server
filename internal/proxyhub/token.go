@@ -1,24 +1,24 @@
 package proxyhub
 
 // token.go: GET /api/{repo_type}s/{repo_id}/xet-{read,write}-token/{revision}.
-// The one read endpoint that CANNOT delegate to Embedded — hubserver's
+// The one read endpoint that CANNOT delegate to Embedded - hubserver's
 // own xet-token handler mints a fake random token, worthless against
-// the real upstream CAS — so this package caches the real XetToken
+// the real upstream CAS - so this package caches the real XetToken
 // value itself, independent of Embedded, under the same freshness+
 // fallback policy every other endpoint uses. See the package doc
 // comment for why CasURL is rewritten while AccessToken passes through
 // unchanged, and why the real upstream CAS URL is ALSO tracked
 // separately in casURLCache regardless of this endpoint's own per-repo
 // cache entry (cmd/xet-proxyd's CAS-facing routing needs one shared
-// "most recently known" value — see UpstreamCASBaseURL).
+// "most recently known" value - see UpstreamCASBaseURL).
 
 import (
 	"net/http"
 	"strconv"
 	"time"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/hfclient"
 )
 
 func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType, repoID, revision string, kind hfclient.XetTokenKind) {
@@ -38,7 +38,7 @@ func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType
 	if tok.CasURL != "" {
 		// Recorded regardless of NoCache: this is routing state (which
 		// real CAS base URL to point the CAS-facing proxy at), not cached
-		// user data — withholding it under -no-cache would leave
+		// user data - withholding it under -no-cache would leave
 		// UpstreamCASBaseURL permanently unanswered, 503ing every CAS
 		// request even though every Hub call is still relayed live.
 		s.casURLCache.Set(casURLCacheKey, tok.CasURL)
@@ -55,7 +55,7 @@ func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType
 
 // UpstreamCASBaseURL returns the most recently observed real upstream
 // CAS base URL, or "" if none has been seen yet. Only ever reads
-// present, never fresh — this cache has no periodic re-check to
+// present, never fresh - this cache has no periodic re-check to
 // perform (the value only ever changes as a side effect of a real
 // xet-token relay above, not on any TTL-driven schedule), so the ttl
 // argument to Get is inert here; -1 makes that explicit rather than
@@ -66,7 +66,7 @@ func (s *Server) UpstreamCASBaseURL() (string, bool) {
 }
 
 // fetchOrServeCache implements the shared TTL-freshness-then-
-// stale-fallback policy for a VALUE cache (xetTokenCache/casURLCache —
+// stale-fallback policy for a VALUE cache (xetTokenCache/casURLCache -
 // the two caches in this package that still hold actual data, unlike
 // the struct{}-valued freshness trackers repo.go/tree.go/resolve.go
 // use against Embedded directly).

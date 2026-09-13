@@ -2,14 +2,14 @@ package hfclient
 
 // Tests for the Hub-side calls (RepoInfo, ListTree, GetXetToken, Resolve,
 // CreateRepo, CreateBranch, Commit, Preupload), driven against a fake
-// upstream httptest.Server standing in for the real huggingface.co — this
+// upstream httptest.Server standing in for the real huggingface.co - this
 // sandbox cannot reach the real Hub, so every test here verifies the
 // exact request this package sends (method, URL, headers, body) and that
 // it parses a real-shaped response correctly, using a fake server that
 // asserts on those exact things rather than a live one.
 //
 // Every token string below (e.g. "test-fixture-token-not-a-real-secret")
-// is a hardcoded test fixture with no relation to any real credential —
+// is a hardcoded test fixture with no relation to any real credential -
 // flagged explicitly so static-analysis secret scanners don't need to
 // guess.
 
@@ -22,7 +22,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/auth"
 )
 
 const testFixtureToken = "test-fixture-token-not-a-real-secret"
@@ -35,7 +35,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.S
 }
 
 // requireBearer fails the test unless r carries exactly the expected
-// bearer token — used by every fake-upstream handler below to verify
+// bearer token - used by every fake-upstream handler below to verify
 // pure credential passthrough actually happened (the caller's token
 // reached the upstream request unchanged, not silently dropped or
 // replaced by some proxy-owned secret).
@@ -178,7 +178,7 @@ func TestGetXetToken_ReadVsWriteHitsDifferentPath(t *testing.T) {
 func TestGetXetToken_ParsesCasURLFromJSONBody(t *testing.T) {
 	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		// Deliberately omit the X-Xet-* headers real huggingface_hub's
-		// resolve path reads, to prove this call reads the JSON body —
+		// resolve path reads, to prove this call reads the JSON body -
 		// see docs/PROTOCOL.md section 6 on why the body, not headers, is
 		// what hf_xet's token-refresh call site actually decodes.
 		json.NewEncoder(w).Encode(XetToken{CasURL: "https://cas.example.invalid", Exp: 999, AccessToken: "the-token"})
@@ -215,7 +215,7 @@ func TestResolve_ParsesHeadersFromHEADResponse(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	info, err := c.Resolve(context.Background(), nil, "alice/my-model", "main", "model.bin")
+	info, err := c.Resolve(context.Background(), nil, "model", "alice/my-model", "main", "model.bin")
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -233,6 +233,76 @@ func TestResolve_ParsesHeadersFromHEADResponse(t *testing.T) {
 	}
 	if info.XetRefreshRoute != "https://example.invalid/refresh" {
 		t.Errorf("XetRefreshRoute = %q", info.XetRefreshRoute)
+	}
+}
+
+// TestResolve_CrossOriginRedirectKeepsXetHeaders pins the exact behavior
+// the real Hub exercises for a Xet file: the resolve HEAD answers 302 with
+// an absolute (CDN) Location and the Xet metadata on the 302's own headers.
+// The client must NOT follow that redirect (following it to the CDN drops
+// X-Xet-Hash) - it must read the metadata from the 302, matching
+// huggingface_hub's allow_redirects=False, follow_relative_redirects=True.
+func TestResolve_CrossOriginRedirectKeepsXetHeaders(t *testing.T) {
+	hitCDN := false
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCDN = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(cdn.Close)
+
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", cdn.URL+"/signed/blob")
+		w.Header().Set("X-Xet-Hash", "xet1122xet1122")
+		w.Header().Set("X-Linked-Size", "1048576")
+		w.Header().Set("X-Linked-Etag", `"sha256ish"`)
+		w.WriteHeader(http.StatusFound)
+	})
+
+	info, err := c.Resolve(context.Background(), nil, "model", "alice/my-model", "main", "model.bin")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if info.XetHash != "xet1122xet1122" {
+		t.Errorf("XetHash = %q, want the 302's own header (redirect must not be followed)", info.XetHash)
+	}
+	if info.LinkedSize != 1048576 {
+		t.Errorf("LinkedSize = %d, want 1048576", info.LinkedSize)
+	}
+	if hitCDN {
+		t.Error("cross-origin redirect was followed; the CDN must not be hit for metadata")
+	}
+}
+
+// TestResolve_FollowsSameOriginRedirect pins that a same-origin (relative)
+// redirect - the shape a plain, non-Xet file's resolve uses, e.g. to the
+// resolve-cache endpoint - is still followed, and the metadata is read from
+// the response it lands on.
+func TestResolve_FollowsSameOriginRedirect(t *testing.T) {
+	c, ts := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/alice/my-model/resolve/main/model.bin":
+			w.Header().Set("Location", "/api/resolve-cache/model.bin")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		case "/api/resolve-cache/model.bin":
+			w.Header().Set("ETag", `"plainfile"`)
+			w.Header().Set("Content-Length", "42")
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path = %q", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	_ = ts
+
+	info, err := c.Resolve(context.Background(), nil, "model", "alice/my-model", "main", "model.bin")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if info.ETag != `"plainfile"` {
+		t.Errorf("ETag = %q, want the followed response's ETag", info.ETag)
+	}
+	if info.XetHash != "" {
+		t.Errorf("XetHash = %q, want empty for a non-Xet file", info.XetHash)
 	}
 }
 
@@ -318,7 +388,7 @@ func TestPreupload_SendsFilesAndParsesResult(t *testing.T) {
 	if len(results) != 1 || results[0].UploadMode != "lfs" {
 		t.Errorf("results = %+v", results)
 	}
-	// Regression test: ShouldIgnore must round-trip through Preupload —
+	// Regression test: ShouldIgnore must round-trip through Preupload -
 	// real huggingface_hub's _fetch_upload_modes reads
 	// file["shouldIgnore"] with no default, so a silently-dropped field
 	// crashes the real hf CLI with a KeyError, not a clean Go-side error.
@@ -328,7 +398,7 @@ func TestPreupload_SendsFilesAndParsesResult(t *testing.T) {
 }
 
 // containsField re-marshals v and checks the JSON output contains field
-// — used where the zero value (false, "") of a field under test is
+// - used where the zero value (false, "") of a field under test is
 // indistinguishable from "field absent" via a plain struct comparison.
 func containsField(t *testing.T, field string, v any) bool {
 	t.Helper()

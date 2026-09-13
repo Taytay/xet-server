@@ -24,7 +24,7 @@ func TestMount_WithMethodProducesMethodPrefixedPattern(t *testing.T) {
 		t.Errorf("GET /stats -> %q, want %q", got, "stats")
 	}
 
-	// A different method on the same path must NOT match — Mount with an
+	// A different method on the same path must NOT match - Mount with an
 	// explicit method must actually constrain by method, not just path.
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, httptest.NewRequest("POST", "/stats", nil))

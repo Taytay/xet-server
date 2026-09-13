@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // fakeCAS is a minimal casInfo implementation for testing hubserver in
@@ -103,7 +103,7 @@ func TestXetWriteToken_SetsHeaders(t *testing.T) {
 	}
 
 	// hf_xet's Rust client (DirectRefreshRouteTokenRefresher::get_cas_jwt in
-	// xet-core) decodes this response as JSON, not from headers — an empty
+	// xet-core) decodes this response as JSON, not from headers - an empty
 	// body here makes it retry indefinitely instead of failing fast. See
 	// xet_client/src/hub_client/types.rs's CasJWTInfo for the wire format.
 	var body xetTokenResponse
@@ -220,7 +220,7 @@ func TestRevisions_MainCreatedImplicitlyOnRepoCreate(t *testing.T) {
 
 	// A resolve against the implicit "main" revision on a freshly-created,
 	// never-committed-to repo must 404 (file not found), not error out as
-	// if the revision itself doesn't exist — main always exists once the
+	// if the revision itself doesn't exist - main always exists once the
 	// repo does.
 	req, _ := http.NewRequest(http.MethodHead, ts.URL+"/alice/my-model/resolve/main/anything.bin", nil)
 	resolveResp, err := http.DefaultClient.Do(req)
@@ -279,7 +279,7 @@ func TestRevisions_IndependentFileSetsPerRevision(t *testing.T) {
 	mainResp.Body.Close()
 
 	// ...and the SAME path to a different revision with a DIFFERENT
-	// OID/size — real branches diverge exactly like this.
+	// OID/size - real branches diverge exactly like this.
 	devNdjson := `{"key":"lfsFile","value":{"path":"model.bin","algo":"sha256","oid":"dev-oid","size":222}}` + "\n"
 	devResp, err := http.Post(ts.URL+"/api/models/alice/my-model/commit/dev", "application/x-ndjson", strings.NewReader(devNdjson))
 	if err != nil {

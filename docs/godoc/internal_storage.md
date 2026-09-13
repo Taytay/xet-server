@@ -1,7 +1,7 @@
-# `xet-server/internal/storage`
+# `github.com/guilt/xet-server/internal/storage`
 
 ```
-package storage // import "xet-server/internal/storage"
+package storage // import "github.com/guilt/xet-server/internal/storage"
 
 Package storage defines a backend-agnostic content-addressed object store.
 Chunks and xorbs are both stored as opaque blobs keyed by content hash; the
@@ -17,7 +17,7 @@ VARIABLES
 var ErrContentMismatch = errors.New("storage: dedup hit content differs from stored blob")
     ErrContentMismatch is returned (via errors.Is) by VerifyingStore.Put
     when a dedup hit's incoming content differs from what's already stored
-    under the same key — a hash collision or storage corruption, since two
+    under the same key - a hash collision or storage corruption, since two
     different byte sequences should never produce the same content hash. Unlike
     ErrSizeMismatch, this is never a normal client protocol error; it always
     indicates something worth an operator's attention. See VerifyingStore's doc
@@ -44,7 +44,7 @@ type Deleter interface {
     Deleter is an optional capability: backends that support removing a
     previously-stored blob implement it. Not part of the core Store interface
     since not every caller needs delete (the Xet Data API's chunk store,
-    for instance, never removes anything) — this exists for callers like a
+    for instance, never removes anything) - this exists for callers like a
     storage-budget eviction sweep that do. Deleting an already-absent key is not
     an error (idempotent).
 
@@ -55,13 +55,13 @@ type Sizer interface {
     currently stored implement it, so a caller (e.g. an eviction sweep) can tell
     whether it's over a size budget without maintaining its own running total
     independently of the backend's actual state. This is expected to be called
-    on a slow poll interval (minutes), not a hot path — backends are free to
+    on a slow poll interval (minutes), not a hot path - backends are free to
     implement it by walking/listing everything they hold each call.
 
 type Store interface {
 	// Put streams exactly size bytes from r into key if not already
 	// present. Returns true if the blob was newly written, false if it
-	// already existed (deduplicated) — in the deduplicated case, r is
+	// already existed (deduplicated) - in the deduplicated case, r is
 	// drained/ignored without being stored again.
 	Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error)
 
@@ -86,7 +86,7 @@ type Store interface {
 
     Put is atomic with respect to failure: if r returns an error, ctx is
     canceled, or the read stops short of size, no partial blob is left visible
-    under key — implementations must stage writes (e.g. a temp file renamed
+    under key - implementations must stage writes (e.g. a temp file renamed
     into place, or an upload that is only finalized on success) so a caller can
     safely retry the same key after a failed attempt without a prior partial
     write corrupting the retry. Get/GetRange never observe a partially-written
@@ -95,7 +95,7 @@ type Store interface {
 func NewVerifyingStore(inner Store) Store
     NewVerifyingStore wraps inner. The returned *VerifyingStore implements
     whichever of Deleter, Sizer, and URLPresigner inner itself implements
-    — wrapping a backend that lacks one of these (e.g. fsstore has no
+    - wrapping a backend that lacks one of these (e.g. fsstore has no
     URLPresigner) must not make it appear to gain that capability, or callers
     that type-assert for it (casserver's presigned-URL fallback, eviction's
     Sweeper) would be silently misled. See the capabilityShim types below for
@@ -118,13 +118,13 @@ type VerifyingStore struct {
 }
     VerifyingStore wraps a Store to add an opt-in verification pass on every
     dedup hit: when Put finds key already exists, instead of trusting the
-    content hash alone (the default, and by far the cheaper, behavior — see
+    content hash alone (the default, and by far the cheaper, behavior - see
     Store's own doc comment), it reads the existing stored blob and the incoming
     reader concurrently and compares them chunk-by-chunk, bailing at the first
     mismatch rather than reading either side in full once a difference is found.
 
     This exists purely as defense-in-depth against a hash collision or
-    undetected storage-layer corruption — both exceedingly unlikely with BLAKE3,
+    undetected storage-layer corruption - both exceedingly unlikely with BLAKE3,
     but "exceedingly unlikely" is a probability, not a guarantee, and this
     project would rather refuse a write it can't vouch for than silently trust a
     hash match that turns out to be wrong. It is deliberately NOT the default:
@@ -135,12 +135,12 @@ type VerifyingStore struct {
 
     If the incoming content doesn't match on a dedup hit, Put returns an error
     satisfying errors.Is(err, ErrContentMismatch) and does NOT overwrite the
-    existing stored blob — a mismatch means something is already wrong (a
+    existing stored blob - a mismatch means something is already wrong (a
     collision or corruption), and blindly overwriting would destroy the only
     evidence of which side is actually correct without fixing anything.
 
     A key that does not yet exist passes straight through to Inner.Put with no
-    extra reads of any kind — the non-dedup-hit path costs nothing beyond what
+    extra reads of any kind - the non-dedup-hit path costs nothing beyond what
     Inner.Put itself costs, whether or not verification is enabled.
 
 func (v *VerifyingStore) Get(ctx context.Context, key string) (io.ReadCloser, error)

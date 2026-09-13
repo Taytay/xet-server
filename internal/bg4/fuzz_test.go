@@ -24,7 +24,7 @@ func FuzzReverse(f *testing.F) {
 		if len(out) != len(data) {
 			t.Fatalf("Reverse(%d bytes) returned %d bytes, want same length", len(data), len(out))
 		}
-		// Apply(Reverse(x)) must reproduce x exactly — Reverse's own doc
+		// Apply(Reverse(x)) must reproduce x exactly - Reverse's own doc
 		// comment states it's the exact inverse of Apply.
 		roundTripped := Apply(out)
 		for i := range data {

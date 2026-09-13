@@ -25,7 +25,7 @@ func FuzzDecompressFrame(f *testing.F) {
 	// a match-length extension inflating one block far past its frame
 	// descriptor's declared max block size. Kept small here (fuzzing runs
 	// this seed on every invocation, unlike the dedicated regression test)
-	// — still exercises the same code path the full-size bomb does.
+	// - still exercises the same code path the full-size bomb does.
 	f.Add(buildAmplificationBombFrame(buildAmplificationBombBlock(1000)))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -34,7 +34,7 @@ func FuzzDecompressFrame(f *testing.F) {
 				t.Fatalf("DecompressFrame panicked on input of length %d: %v", len(data), r)
 			}
 		}()
-		// Any error return is fine — this is untrusted input by design.
+		// Any error return is fine - this is untrusted input by design.
 		// The failure modes under test are a panic, or taking
 		// disproportionately long relative to input size (the
 		// amplification-DoS shape fixed in frame.go: decompression must be
@@ -43,7 +43,7 @@ func FuzzDecompressFrame(f *testing.F) {
 		start := time.Now()
 		_, _ = DecompressFrame(data)
 		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-			t.Fatalf("DecompressFrame took %v on a %d-byte input — possible unbounded decompression amplification", elapsed, len(data))
+			t.Fatalf("DecompressFrame took %v on a %d-byte input - possible unbounded decompression amplification", elapsed, len(data))
 		}
 	})
 }
@@ -63,7 +63,7 @@ func FuzzDecompressBlock(f *testing.F) {
 		// Clamp dstLen to a sane range: an unclamped huge dstLen would
 		// itself allocate a giant buffer regardless of the decoder's own
 		// logic, which is a property of the API contract (caller must
-		// know the real decoded size), not a decoder bug — DecompressFrame
+		// know the real decoded size), not a decoder bug - DecompressFrame
 		// above is the fuzz target for the "attacker controls the claimed
 		// size" case via decompressBlockUnknownSize's own regrowth logic.
 		dstLen := dstLenSeed % (1 << 20)

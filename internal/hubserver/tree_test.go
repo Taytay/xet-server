@@ -1,12 +1,12 @@
 package hubserver
 
 // Tests for the three endpoints closing the whole-repo-download gap:
-// GET .../revision/{revision} (repo info — huggingface_hub's
+// GET .../revision/{revision} (repo info - huggingface_hub's
 // snapshot_download resolves this before listing/downloading files), GET
 // .../tree/{revision} (file listing), and POST .../branch/{branch}
 // (branch creation, called by `hf upload`'s CLI command when pushing to a
 // revision that doesn't exist yet). Discovered missing by driving the
-// real `hf` CLI end-to-end against this shim — `hf download REPO_ID` (no
+// real `hf` CLI end-to-end against this shim - `hf download REPO_ID` (no
 // filename) 404s without these; `hf download REPO_ID FILENAME` (a single
 // named file) already worked before this fix and still does.
 
@@ -51,7 +51,7 @@ func TestRepoInfo_MainExistsImplicitlyEvenWithoutACommit(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	// "main" always exists once the repo does (created implicitly), even
-	// before any commit — matching how a real repo always has a default
+	// before any commit - matching how a real repo always has a default
 	// branch.
 	resp, err := http.Get(ts.URL + "/api/models/alice/never-committed/revision/main")
 	if err != nil {
@@ -76,7 +76,7 @@ func TestRepoInfo_UnknownRevisionReturns404WithRevisionNotFoundErrorCode(t *test
 	}
 	// huggingface_hub's hf_raise_for_status only raises the specific
 	// RevisionNotFoundError (which `hf upload`'s branch-creation step
-	// specifically catches) when this header is present on a 404 — a
+	// specifically catches) when this header is present on a 404 - a
 	// plain 404 falls through to a generic, uncaught HfHubHTTPError
 	// instead. This header is the actual fix, not the status code alone.
 	if got := resp.Header.Get("X-Error-Code"); got != "RevisionNotFound" {
@@ -126,7 +126,7 @@ func TestListTree_ReturnsCommittedFiles(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	// list_repo_tree's paginate() helper does `yield from r.json()` — the
+	// list_repo_tree's paginate() helper does `yield from r.json()` - the
 	// response must be a bare JSON array, not an object wrapping one.
 	var got []treeEntry
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
@@ -173,7 +173,7 @@ func TestListTree_EmptyRevisionReturnsEmptyArrayNotNull(t *testing.T) {
 		t.Fatalf("decode error = %v", err)
 	}
 	if got == nil {
-		t.Error("decoded to nil, want an empty (but non-null) array — a null response would fail huggingface_hub's iteration over it")
+		t.Error("decoded to nil, want an empty (but non-null) array - a null response would fail huggingface_hub's iteration over it")
 	}
 }
 

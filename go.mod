@@ -1,4 +1,4 @@
-module xet-server
+module github.com/guilt/xet-server
 
 go 1.27.1
 

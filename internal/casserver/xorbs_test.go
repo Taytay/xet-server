@@ -37,7 +37,7 @@ func TestFetchXorb_RangedResponseHasContentLength(t *testing.T) {
 	}
 	got := rangeResp.Header.Get("Content-Length")
 	if got == "" {
-		t.Fatal("Content-Length missing on a 206 response — WriteHeader must be called after, not before, setting it")
+		t.Fatal("Content-Length missing on a 206 response - WriteHeader must be called after, not before, setting it")
 	}
 	if want := strconv.Itoa(5); got != want {
 		t.Errorf("Content-Length = %q, want %q", got, want)

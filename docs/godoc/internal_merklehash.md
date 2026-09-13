@@ -1,7 +1,7 @@
-# `xet-server/internal/merklehash`
+# `github.com/guilt/xet-server/internal/merklehash`
 
 ```
-package merklehash // import "xet-server/internal/merklehash"
+package merklehash // import "github.com/guilt/xet-server/internal/merklehash"
 
 Package merklehash ports xet-core's DataHash type and Merkle-aggregation
 algorithm (xet_core_structures/src/merklehash/*.rs) to Go, byte-for-byte, so
@@ -21,7 +21,7 @@ type ChunkEntry struct {
 
 type Hash [32]byte
     Hash is xet-core's DataHash: a 256-bit value stored as 4 little-endian
-    u64 words (mirrored here as a plain 32-byte array in wire order — see
+    u64 words (mirrored here as a plain 32-byte array in wire order - see
     Hex/FromHex for the non-obvious byte-order translation).
 
 func ComputeDataHash(slice []byte) Hash
@@ -54,7 +54,7 @@ func XorbHash(chunks []ChunkEntry) Hash
     no salt.
 
 func (h Hash) Bytes() []byte
-    Bytes returns the 32 raw wire-order bytes, with no byte-order translation —
+    Bytes returns the 32 raw wire-order bytes, with no byte-order translation -
     the inverse of FromRawBytes, for writing into a binary format field.
 
 func (h Hash) HMAC(key Hash) Hash
@@ -67,7 +67,7 @@ func (h Hash) Hex() string
     printed as 16 lowercase hex digits in *big-endian* (normal) digit order.
     Because a little-endian u64's most-significant byte is its last byte in
     memory, this means each 8-byte group's byte order is reversed relative to
-    a naive hex-encode of the raw bytes — verified against xet-core's own test
+    a naive hex-encode of the raw bytes - verified against xet-core's own test
     vector in the package tests.
 
 func (h Hash) IsZero() bool
@@ -77,7 +77,7 @@ func (h Hash) IsZero() bool
 func (h Hash) MarshalText() ([]byte, error)
     MarshalText implements encoding.TextMarshaler via Hex(), so a Hash can be
     used directly as a JSON object/map key (encoding/json requires map key types
-    to implement TextMarshaler, be a string, or be an integer — Hash as a plain
+    to implement TextMarshaler, be a string, or be an integer - Hash as a plain
     [32]byte array satisfies none of those on its own) and so json.Marshal of a
     struct field renders a Hash the same way every other hash already appears in
     this project's JSON responses (Hex, not raw bytes).
@@ -92,7 +92,7 @@ func (h Hash) String() string
 func (h Hash) TruncateHash() uint64
     TruncateHash returns h's first 64-bit word, matching xet-core's
     truncate_hash (metadata_shard/utils.rs: `hash.deref()[0]`). Used as the
-    sort/lookup key in a shard's file/xorb/chunk lookup tables — a different
+    sort/lookup key in a shard's file/xorb/chunk lookup tables - a different
     word than Mod64 uses, so the two must not be confused.
 
 func (h *Hash) UnmarshalText(text []byte) error

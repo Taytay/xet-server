@@ -2,38 +2,43 @@ package proxyhub
 
 // resolve.go implements the cached read path for HEAD (and, minimally,
 // GET) /{repo_id}/resolve/{revision}/{filename}, serving from Embedded
-// (a real *hubserver.Server) once the file is known and fresh —
+// (a real *hubserver.Server) once the file is known and fresh -
 // matching internal/hubserver's own handleResolve byte-for-byte,
 // including its X-Xet-Refresh-Route header: Embedded's own
 // refreshRouteURL already builds that from the incoming request's own
-// Host, which is already this proxy's own address, not the real Hub's —
+// Host, which is already this proxy's own address, not the real Hub's -
 // so no rewrite step is needed here at all.
 
 import (
 	"net/http"
 	"strconv"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/hfclient"
 )
 
-func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, revision, filename string) {
-	// repoType is not encoded in a resolve URL — hubserver's own
-	// handleResolve assumes "model" for the exact same reason (see its
-	// doc comment); IngestFile below must agree, or a resolve served
-	// from Embedded after a repo-info/tree fetch under some OTHER
-	// repoType would look up the wrong revisionState.
-	const repoType = "model"
-	key := cacheKey(repoID, revision, filename)
+// handleResolve serves one file's resolve metadata. repoType comes from
+// the request URL's own prefix (see parseResolvePath): "model" for a bare
+// /{repo_id}/resolve/... path, "dataset"/"space" for the prefixed shapes.
+// It is threaded into BOTH the upstream call (the real Hub 404s a dataset
+// resolved at the model URL) and every Embedded Ingest*/Has* call, which
+// key their state by repoType - mixing types there would look up the
+// wrong revisionState.
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoType, repoID, revision, filename string) {
+	key := cacheKey(repoType, repoID, revision, filename)
 	cred := auth.CredentialFromRequest(r)
 
 	if s.NoCache {
-		info, err := s.Hub.Resolve(r.Context(), cred, repoID, revision, filename)
+		info, err := s.Hub.Resolve(r.Context(), cred, repoType, repoID, revision, filename)
 		if err != nil {
 			writeUpstreamError(w, err)
 			return
 		}
-		writeResolveHeaders(w, r, repoID, revision, info)
+		if info.XetHash == "" {
+			s.relayHubLive(w, r)
+			return
+		}
+		writeResolveHeaders(w, r, repoType, repoID, revision, info)
 		return
 	}
 
@@ -43,7 +48,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 	}
 
 	callCtx, cancel := s.callContext(r)
-	info, err := s.Hub.Resolve(callCtx, cred, repoID, revision, filename)
+	info, err := s.Hub.Resolve(callCtx, cred, repoType, repoID, revision, filename)
 	cancel()
 	if err != nil {
 		if s.Embedded.HasFile(repoType, repoID, revision, filename) {
@@ -51,6 +56,22 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 			return
 		}
 		writeUpstreamError(w, err)
+		return
+	}
+
+	// A file with no X-Xet-Hash upstream is NOT a Xet file (e.g. a small
+	// inline blob like a repo's README.md or .gitattributes). Embedded's
+	// resolve handler can only serve Xet files - it answers via the CAS
+	// reconstruction data keyed by the Xet hash, and this proxy's
+	// XetHashForSHA256 bridge reports "unknown" for everything else - so
+	// serving from Embedded would 404 (exactly the bigcode/the-stack-v2
+	// failure on resolve/main/.gitattributes after the directory fix).
+	// These files are tiny metadata blobs; relay them live from the real
+	// Hub instead, and never ingest them into Embedded (so the cached
+	// path above can't later hand back a CAS-backed 404). Real Xet files
+	// keep the fetch-and-cache path below.
+	if info.XetHash == "" {
+		s.relayHubLive(w, r)
 		return
 	}
 
@@ -66,9 +87,9 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, repoID, r
 
 // writeResolveHeaders is the -no-cache path's own header writer,
 // matching hubserver's exact header set without needing Embedded at
-// all — mirrors internal/hubserver/resolve.go's handleResolve.
-func writeResolveHeaders(w http.ResponseWriter, r *http.Request, repoID, revision string, info *hfclient.ResolveInfo) {
-	refreshRoute := refreshRouteURL(r, repoID, revision)
+// all - mirrors internal/hubserver/resolve.go's handleResolve.
+func writeResolveHeaders(w http.ResponseWriter, r *http.Request, repoType, repoID, revision string, info *hfclient.ResolveInfo) {
+	refreshRoute := refreshRouteURL(r, repoType, repoID, revision)
 	w.Header().Set("X-Repo-Commit", info.RepoCommit)
 	w.Header().Set("ETag", info.ETag)
 	w.Header().Set("X-Linked-Etag", info.ETag)
@@ -84,16 +105,21 @@ func writeResolveHeaders(w http.ResponseWriter, r *http.Request, repoID, revisio
 	http.Error(w, "direct GET not supported; use the Xet download path via X-Xet-Hash", http.StatusNotImplemented)
 }
 
-// refreshRouteURL is proxyhub's own copy of hubserver.refreshRouteURL —
+// refreshRouteURL is proxyhub's own copy of hubserver.refreshRouteURL -
 // duplicated (not imported) since it's an unexported helper of a
 // package this one only otherwise touches through its exported
 // Ingest*/Has*/ServeHTTP surface (see splitRepoPath's identical note in
 // proxyhub.go). Encodes the X-Xet-Refresh-Route wire contract, so any
 // change here must be mirrored in hubserver's copy.
-func refreshRouteURL(r *http.Request, repoID, revision string) string {
+//
+// The /api/ namespace always carries a pluralized repo type, so a
+// dataset's refresh route must be /api/datasets/... - hardcoding
+// "models" here would send the client's token refresh to a nonexistent
+// model of the same name once its first token expired mid-download.
+func refreshRouteURL(r *http.Request, repoType, repoID, revision string) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	return scheme + "://" + r.Host + "/api/models/" + repoID + "/xet-read-token/" + revision
+	return scheme + "://" + r.Host + "/api/" + repoType + "s/" + repoID + "/xet-read-token/" + revision
 }

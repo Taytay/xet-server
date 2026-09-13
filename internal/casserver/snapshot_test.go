@@ -15,9 +15,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"xet-server/internal/merklehash"
-	"xet-server/internal/shardformat"
-	"xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
 )
 
 func TestSnapshot_RestoresFileReconAndXorbState(t *testing.T) {
@@ -83,7 +83,7 @@ func TestSnapshot_RestoresFileReconAndXorbState(t *testing.T) {
 	}
 
 	// A fresh server, same storage backend (the xorb bytes are already on
-	// disk via store — only the in-memory indices need restoring).
+	// disk via store - only the in-memory indices need restoring).
 	restored := New(store)
 	if err := restored.LoadSnapshot(snapPath); err != nil {
 		t.Fatalf("LoadSnapshot() error = %v", err)
@@ -104,7 +104,7 @@ func TestSnapshot_RestoresFileReconAndXorbState(t *testing.T) {
 		t.Fatalf("restored reconstruction status = %d", restoredRecon.StatusCode)
 	}
 	// Compare everything except the fetch URL's host:port, which
-	// legitimately differs between the two httptest.Server instances —
+	// legitimately differs between the two httptest.Server instances -
 	// same underlying data either way.
 	if restoredResp.OffsetIntoFirstRange != origResp.OffsetIntoFirstRange {
 		t.Errorf("restored OffsetIntoFirstRange = %d, want %d", restoredResp.OffsetIntoFirstRange, origResp.OffsetIntoFirstRange)
@@ -174,7 +174,15 @@ func TestSnapshot_MissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestSnapshot_RejectsIncompatibleVersion(t *testing.T) {
+func TestSnapshot_IncompatibleVersionStartsFreshWithoutError(t *testing.T) {
+	// An unknown-version snapshot on disk must not crash a restart -
+	// LoadSnapshot warns and leaves every in-memory index at its
+	// freshly-constructed empty state, so a server upgrade whose new
+	// build bumped snapshotVersion still starts (xorbs on disk remain
+	// and the indices get rebuilt as clients touch each one again),
+	// instead of hard-failing at startup and needing manual snapshot
+	// deletion. Prior behavior (a hard error here) would surface in
+	// production as a restart loop after any snapshot-format bump.
 	store, err := fsstore.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("fsstore.New() error = %v", err)
@@ -186,8 +194,12 @@ func TestSnapshot_RejectsIncompatibleVersion(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	if err := srv.LoadSnapshot(path); err == nil {
-		t.Error("LoadSnapshot() error = nil, want an error for an incompatible snapshot version")
+	if err := srv.LoadSnapshot(path); err != nil {
+		t.Errorf("LoadSnapshot() error = %v, want nil for an incompatible snapshot version (should warn + start fresh)", err)
+	}
+	if len(srv.fileRecon) != 0 || len(srv.xorbFooters) != 0 || len(srv.chunkHashToShard) != 0 || len(srv.shardBodies) != 0 {
+		t.Errorf("expected every index to stay empty after loading an incompatible-version snapshot; got fileRecon=%d xorbFooters=%d chunkHashToShard=%d shardBodies=%d",
+			len(srv.fileRecon), len(srv.xorbFooters), len(srv.chunkHashToShard), len(srv.shardBodies))
 	}
 }
 
@@ -247,6 +259,6 @@ func TestSnapshot_RestoredEvictionCandidatesHaveBackfilledLastAccess(t *testing.
 		}
 	}
 	if !found {
-		t.Error("restored xorb missing from EvictionCandidates() — xorbRawLength restored without a corresponding xorbLastAccess entry")
+		t.Error("restored xorb missing from EvictionCandidates() - xorbRawLength restored without a corresponding xorbLastAccess entry")
 	}
 }

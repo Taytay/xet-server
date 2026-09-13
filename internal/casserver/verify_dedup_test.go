@@ -19,8 +19,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"xet-server/internal/storage"
-	"xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
 )
 
 // newVerifyingTestServer is like newTestServer but wraps its fsstore.Store
@@ -66,7 +66,7 @@ func TestVerifyDedup_UndetectedCorruptionIsRefusedNotHealedOrAccepted(t *testing
 
 	// Simulate undetected storage-layer corruption: flip bytes directly on
 	// disk, same length, so the file size and directory listing look
-	// completely normal — this is the "quiet corruption" scenario, not a
+	// completely normal - this is the "quiet corruption" scenario, not a
 	// crash or truncation something else would already catch.
 	blobPath := findStoredBlobPath(t, fsRoot, xorbHash.Hex())
 	corruptStoredBlob(t, blobPath)
@@ -83,11 +83,11 @@ func TestVerifyDedup_UndetectedCorruptionIsRefusedNotHealedOrAccepted(t *testing
 	defer resp2.Body.Close()
 	body2, _ := io.ReadAll(resp2.Body)
 	if resp2.StatusCode == http.StatusOK {
-		t.Fatalf("second upload status = 200, want an error — corruption must be detected, not silently accepted as a dedup hit; body = %s", body2)
+		t.Fatalf("second upload status = 200, want an error - corruption must be detected, not silently accepted as a dedup hit; body = %s", body2)
 	}
 	t.Logf("second upload correctly rejected: status=%d body=%s", resp2.StatusCode, body2)
 
-	// The server must NOT have auto-healed the corruption either — a
+	// The server must NOT have auto-healed the corruption either - a
 	// mismatch on Put is refused without touching the existing stored
 	// blob (see storage.VerifyingStore's doc comment), so a subsequent
 	// fetch still returns the (still-corrupted) bytes. This is a
@@ -103,7 +103,7 @@ func TestVerifyDedup_UndetectedCorruptionIsRefusedNotHealedOrAccepted(t *testing
 	defer getResp.Body.Close()
 	fetched, _ := io.ReadAll(getResp.Body)
 	if bytes.Equal(fetched, original) {
-		t.Error("fetched content matches the original after corruption+rejected-reupload — expected it to remain corrupted (refuse-not-heal), not silently repaired")
+		t.Error("fetched content matches the original after corruption+rejected-reupload - expected it to remain corrupted (refuse-not-heal), not silently repaired")
 	}
 
 	// The server must still be healthy for unrelated traffic.
@@ -133,7 +133,7 @@ func findStoredBlobPath(t *testing.T, root, hexKey string) string {
 }
 
 // corruptStoredBlob flips a byte roughly in the middle of the file,
-// preserving its length — the specific corruption shape that a naive
+// preserving its length - the specific corruption shape that a naive
 // truncation/size check would never catch, which is exactly why content
 // verification (not just size checking) is the point of this feature.
 func corruptStoredBlob(t *testing.T, path string) {

@@ -3,7 +3,7 @@ package auth
 // resolve.go: the token-resolution primitive shared by every binary in
 // this project (xetd, xet, and any future relay/proxy) that needs to turn
 // a -auth-token-style flag plus a prioritized list of environment
-// variables into one token — and the primitive a relay/proxy needs to
+// variables into one token - and the primitive a relay/proxy needs to
 // pull a caller's credential back out of an incoming request in order to
 // forward it upstream unchanged (credential chaining, not just two
 // independently-configured secrets).
@@ -31,13 +31,13 @@ import (
 // This is the one call shape every binary in this project uses to resolve
 // its token: xetd calls auth.ResolveToken(*authToken, "XETD_AUTH_TOKEN",
 // "HF_TOKEN") so its shared secret can fall back to the same $HF_TOKEN a
-// user already has exported for the real `hf` CLI — a local xetd then
+// user already has exported for the real `hf` CLI - a local xetd then
 // "just works" as a drop-in replacement without configuring a second,
 // separate secret. xet calls auth.ResolveToken(authToken, "XET_AUTH_TOKEN",
 // "HF_TOKEN") for the same reason on the client side. A future relay/proxy
 // (e.g. one that authenticates local callers and forwards their credential
 // to the real huggingface.co Xet backend) resolves its own upstream
-// credential with the identical call, just a different env var chain —
+// credential with the identical call, just a different env var chain -
 // no new primitive needed to support that case.
 func ResolveToken(flagValue string, envVars ...string) string {
 	if flagValue != "" && flagValue != "None" {
@@ -57,7 +57,7 @@ func ResolveToken(flagValue string, envVars ...string) string {
 // Exported (StaticTokenAuth uses the same logic internally) so a
 // relay/proxy Authenticator can pull a caller's credential back out of a
 // request it just authenticated, in order to forward that exact credential
-// upstream via a CredentialHelper — the chaining primitive a passthrough
+// upstream via a CredentialHelper - the chaining primitive a passthrough
 // proxy needs, as opposed to resolving its own independent, unrelated
 // upstream secret.
 func BearerToken(r *http.Request) string {

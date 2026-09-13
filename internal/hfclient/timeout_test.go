@@ -5,7 +5,7 @@ package hfclient
 // not hold the calling goroutine open indefinitely. This class of
 // failure was never exercised by this package's other tests (all driven
 // against a real, responsive httptest.Server with zero artificial
-// latency) — see docs/PROTOCOL.md or the v0.9.0 CHANGELOG entry on why
+// latency) - see docs/PROTOCOL.md or the v0.9.0 CHANGELOG entry on why
 // this needed its own dedicated coverage.
 //
 // These tests use a short custom timeout (not the real 10s default) so
@@ -21,7 +21,7 @@ import (
 )
 
 // hangingListener accepts a connection and then never writes a response
-// — simulating a completely unresponsive upstream (a hung real
+// - simulating a completely unresponsive upstream (a hung real
 // huggingface.co, a network partition that drops responses but not the
 // TCP handshake, etc.) more realistically than closing the connection
 // outright, which most HTTP clients handle very differently (an
@@ -40,7 +40,7 @@ func newHangingServer(t *testing.T) (addr string, cleanup func()) {
 				return
 			}
 			// Accept the connection (completing the TCP handshake) but
-			// never read or write anything — the request's headers are
+			// never read or write anything - the request's headers are
 			// never even fully answered, let alone a response body sent.
 			go func() {
 				<-done
@@ -59,7 +59,7 @@ func TestDefaultHTTPClient_ResponseHeaderTimeoutBoundsHungUpstream(t *testing.T)
 	defer cleanup()
 
 	// A short timeout standing in for defaultHTTPClient's real 10s
-	// bound — same Transport field, same mechanism, just fast enough for
+	// bound - same Transport field, same mechanism, just fast enough for
 	// a unit test.
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -90,7 +90,7 @@ func TestNew_UsesDefaultHTTPClientWithBoundedTransport(t *testing.T) {
 		t.Fatal("defaultHTTPClient.Transport is not *http.Transport")
 	}
 	if transport.ResponseHeaderTimeout <= 0 {
-		t.Error("defaultHTTPClient.Transport.ResponseHeaderTimeout is unset — a hung upstream would block forever")
+		t.Error("defaultHTTPClient.Transport.ResponseHeaderTimeout is unset - a hung upstream would block forever")
 	}
 }
 

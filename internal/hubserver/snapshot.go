@@ -2,7 +2,7 @@
 // mirroring casserver's snapshot.go: an atomic (stage-then-rename) JSON
 // dump of every repo/revision/file this server knows about, and a load of
 // that file on startup. See casserver/snapshot.go's package doc comment
-// for the full tradeoff writeup (periodic checkpoint, not a WAL — writes
+// for the full tradeoff writeup (periodic checkpoint, not a WAL - writes
 // between snapshots are lost on a hard crash).
 //
 // Server's live state (repoState/revisionState, each carrying its own
@@ -16,7 +16,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // fileRefSnapshot mirrors fileRef with no unexported-field restrictions
@@ -55,7 +55,7 @@ const snapshotVersion = 1
 // never observe a partially-written file.
 //
 // As with casserver's Snapshot, this briefly RLocks each repo/revision in
-// turn rather than holding one lock across the whole operation — this
+// turn rather than holding one lock across the whole operation - this
 // server's own locking design (see the package doc comment) is already
 // per-repo/per-revision specifically so unrelated repos don't contend, and
 // a snapshot is not a stronger consistency boundary than any other
@@ -186,7 +186,7 @@ func (s *Server) LoadSnapshot(path string) error {
 			rs.revisions[name] = vs
 		}
 		// Ensure the implicit default revision exists even if the
-		// snapshot predates a code version that always created it —
+		// snapshot predates a code version that always created it -
 		// matches getOrCreateRepo's own invariant that every repo has at
 		// least "main" present.
 		if _, ok := rs.revisions[defaultRevision]; !ok {

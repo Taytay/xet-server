@@ -31,7 +31,7 @@ func FuzzParseByteRange(f *testing.F) {
 			return
 		}
 		// Any successfully parsed range must be internally consistent and
-		// within bounds — the whole point of this function is to hand
+		// within bounds - the whole point of this function is to hand
 		// callers a range they can trust without re-validating.
 		if start < 0 || end < start {
 			t.Fatalf("parseByteRange(%q, %d) = start=%d end=%d, want 0 <= start <= end", header, total, start, end)

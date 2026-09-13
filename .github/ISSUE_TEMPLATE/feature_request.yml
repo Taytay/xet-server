@@ -24,10 +24,10 @@ body:
     attributes:
       label: Roughly which area does this touch?
       options:
-        - label: CAS HTTP API (internal/casserver) — reconstruction, xorb/shard upload, dedup
-        - label: Hub API shim (internal/hubserver) — repo/commit/resolve, revisions, auth
+        - label: CAS HTTP API (internal/casserver) - reconstruction, xorb/shard upload, dedup
+        - label: Hub API shim (internal/hubserver) - repo/commit/resolve, revisions, auth
         - label: Wire format (merklehash / xorbformat / shardformat)
-        - label: Storage backend (internal/storage) — new backend, presigning, etc.
+        - label: Storage backend (internal/storage) - new backend, presigning, etc.
         - label: CLI / demo API (cmd/xet, internal/api)
         - label: Docs / tooling
     validations:
@@ -40,7 +40,7 @@ body:
       description: >
         If you have an idea of how this could be implemented, share it here. If this relates to real
         Xet protocol behavior, a link to the relevant xet-core source (or a captured real-client
-        payload) is especially useful — see docs/PROTOCOL.md for how prior wire-format work was
+        payload) is especially useful - see docs/PROTOCOL.md for how prior wire-format work was
         grounded in real captures rather than guesswork.
     validations:
       required: false

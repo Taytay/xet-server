@@ -12,15 +12,15 @@ import (
 // XorbChunkSequenceHeader carry a NumEntries field read directly off the
 // wire with no bound against how many bytes are actually left to read.
 // Before the fix, readFileInfoSection did make([]FileDataSequenceEntry,
-// fh.NumEntries) — a ~50-byte malicious shard claiming NumEntries near
+// fh.NumEntries) - a ~50-byte malicious shard claiming NumEntries near
 // uint32's max forced an attempted allocation of tens of gigabytes before
 // a single one of the claimed entries had been validated to exist on the
 // wire. POST /v1/shards accepts up to 16 MiB (see casserver.maxShardBytes)
 // and requires no auth, so this was reachable from any client.
 //
 // The fix (append-based incremental growth capped at a small
-// preallocation ceiling) must still correctly parse honest shards — see
-// TestShard_RoundTrip and TestReadShard_RealHFXetCapture for that — this
+// preallocation ceiling) must still correctly parse honest shards - see
+// TestShard_RoundTrip and TestReadShard_RealHFXetCapture for that - this
 // test only asserts the malicious case fails fast (an EOF-shaped parse
 // error) rather than attempting a huge allocation or hanging.
 func TestReadShard_MaliciousNumEntriesDoesNotOOM(t *testing.T) {
@@ -32,7 +32,7 @@ func TestReadShard_MaliciousNumEntriesDoesNotOOM(t *testing.T) {
 	}
 
 	// One FileDataSequenceHeader claiming the maximum possible NumEntries,
-	// immediately followed by EOF — no actual entry bytes.
+	// immediately followed by EOF - no actual entry bytes.
 	maliciousHeader := FileDataSequenceHeader{
 		FileHash:   hashFromByte(0xAB),
 		FileFlags:  0,
@@ -60,7 +60,7 @@ func TestReadShard_MaliciousNumEntriesDoesNotOOM(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("ReadShard() did not return within 5s on a malicious NumEntries payload — looks hung, not just slow")
+		t.Fatal("ReadShard() did not return within 5s on a malicious NumEntries payload - looks hung, not just slow")
 	}
 
 	if parseErr == nil {
@@ -72,13 +72,13 @@ func TestReadShard_MaliciousNumEntriesDoesNotOOM(t *testing.T) {
 	// never need more than a few MB of heap growth. The old, unfixed code
 	// would have attempted a single allocation request of ~206 GB, which
 	// fails immediately with a fatal OOM (not a recoverable panic) on any
-	// real machine — so on a fixed build we expect this to stay small; on
+	// real machine - so on a fixed build we expect this to stay small; on
 	// a reintroduced regression, the goroutine above would crash the whole
 	// test binary rather than this assertion ever running.
 	const maxReasonableGrowth = 64 * 1024 * 1024
 	grew := after.TotalAlloc - before.TotalAlloc
 	if grew > maxReasonableGrowth {
-		t.Errorf("heap grew by %d bytes parsing a 50-byte malicious payload, want < %d — looks like unbounded preallocation regressed", grew, maxReasonableGrowth)
+		t.Errorf("heap grew by %d bytes parsing a 50-byte malicious payload, want < %d - looks like unbounded preallocation regressed", grew, maxReasonableGrowth)
 	}
 }
 

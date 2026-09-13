@@ -25,8 +25,8 @@ func BenchmarkComputeDataHash_1MB(b *testing.B)  { benchmarkComputeDataHash(b, 1
 
 // benchmarkXorbHash measures Merkle-aggregation throughput across
 // numChunks chunk hashes, roughly the number of 64KB-average chunks in a
-// single xorb (real xet-core targets ~64MB xorbs — see
-// casserver.maxXorbBytes's doc comment — so ~1000 chunks/xorb at the
+// single xorb (real xet-core targets ~64MB xorbs - see
+// casserver.maxXorbBytes's doc comment - so ~1000 chunks/xorb at the
 // default average chunk size is a realistic upper bound).
 func benchmarkXorbHash(b *testing.B, numChunks int) {
 	chunks := make([]ChunkEntry, numChunks)

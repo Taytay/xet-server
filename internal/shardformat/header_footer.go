@@ -1,6 +1,6 @@
 // Package shardformat implements the on-wire binary layout of a Xet shard
-// — the file/xorb reconstruction index real clients upload via
-// POST /v1/shards — ported from
+// - the file/xorb reconstruction index real clients upload via
+// POST /v1/shards - ported from
 // xet_core_structures/src/metadata_shard/{shard_format,file_structs,xorb_structs}.rs.
 //
 // A shard file is: header, file-info section (one FileDataSequenceHeader +
@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"io"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // headerTag is xet-core's MDB_SHARD_HEADER_TAG: literal bytes "HFRepoMetaData\0"

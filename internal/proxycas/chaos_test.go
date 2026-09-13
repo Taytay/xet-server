@@ -1,6 +1,6 @@
 package proxycas
 
-// Chaos/reliability tests for a MISBEHAVING UPSTREAM — the failure class
+// Chaos/reliability tests for a MISBEHAVING UPSTREAM - the failure class
 // this package's other tests never touch, since they all run against a
 // fake upstream that answers instantly and correctly. internal/casserver's
 // own chaos_test.go covers the equivalent ground for casserver's LOCAL
@@ -10,7 +10,7 @@ package proxycas
 // outbound call to the real huggingface.co CAS, so "upstream hangs",
 // "upstream freezes mid-body", and "upstream resets the connection
 // mid-body" are all live production failure modes for THIS package, and
-// each one has to end in a bounded, clean error — never a corrupt or
+// each one has to end in a bounded, clean error - never a corrupt or
 // truncated xorb ingested into the embedded server (see
 // casserver.IngestXorb's doc comment on re-deriving and verifying the
 // hash of everything it accepts), and never a loss of the offline-serving
@@ -23,7 +23,7 @@ package proxycas
 //   - internal/proxyhub/timeout_test.go proves MetadataCallTimeout bounds
 //     a slow-drip upstream. proxycas deliberately has NO per-call timeout
 //     field to test the equivalent of (grep: MetadataCallTimeout exists
-//     only in internal/proxyhub) — a xorb transfer can legitimately be
+//     only in internal/proxyhub) - a xorb transfer can legitimately be
 //     large and slow, which is the same reason hfclient.defaultHTTPClient
 //     sets per-phase Transport bounds but no blanket request Timeout. See
 //     TestChaos_FrozenMidBodyUpstreamBoundedOnlyByCallerContext for what
@@ -33,8 +33,8 @@ package proxycas
 // no logging of their own at all (only casserver's httpError does, Warn
 // for 5xx / Debug for 4xx, one line per request, with no dedup or
 // throttling machinery by design). Since proxycas returns its upstream
-// failures via writeFetchError, the tests below — including the
-// thundering-herd one, which drives 16 concurrent failures — add no log
+// failures via writeFetchError, the tests below - including the
+// thundering-herd one, which drives 16 concurrent failures - add no log
 // lines whatsoever, and none of these paths retries internally, so
 // nothing here can multiply output beyond one line per request. No new
 // throttling mechanism is warranted or added.
@@ -57,15 +57,15 @@ import (
 	"testing"
 	"time"
 
-	"xet-server/internal/hfclient"
-	"xet-server/internal/reconwire"
-	"xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/reconwire"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
 )
 
 // newChaosProxy builds a proxycas Server fronted by an httptest.Server,
 // wired to casClient as its upstream. Same shape as newTestServer (see
 // proxycas_test.go), except the caller supplies the *hfclient.CASClient
-// directly instead of just an upstream URL — these tests need to inject a
+// directly instead of just an upstream URL - these tests need to inject a
 // custom *http.Client (a short ResponseHeaderTimeout, so a hung-upstream
 // test doesn't sit for hfclient's real 10s) and to point at a raw
 // net.Listener rather than an httptest.Server.
@@ -86,7 +86,7 @@ func newChaosProxy(t *testing.T, casClient *hfclient.CASClient) (*httptest.Serve
 
 // shortHeaderTimeoutCASClient targets baseURL with a 200ms
 // ResponseHeaderTimeout standing in for hfclient.defaultHTTPClient's real
-// 10s — the identical Transport field and mechanism, just fast enough for
+// 10s - the identical Transport field and mechanism, just fast enough for
 // a unit test (same trick as internal/hfclient/timeout_test.go).
 func shortHeaderTimeoutCASClient(baseURL string) *hfclient.CASClient {
 	return &hfclient.CASClient{
@@ -100,7 +100,7 @@ func shortHeaderTimeoutCASClient(baseURL string) *hfclient.CASClient {
 }
 
 // newHangingUpstream accepts TCP connections and then never writes a
-// single byte of response — a completely unresponsive upstream CAS (a
+// single byte of response - a completely unresponsive upstream CAS (a
 // hung huggingface.co, a partition that drops responses but not the
 // handshake). Mirrors internal/hfclient/timeout_test.go's
 // newHangingServer; kept local because that helper is unexported in
@@ -133,8 +133,8 @@ func newHangingUpstream(t *testing.T) (addr string) {
 
 // frozenBodyHandler answers with a full, honest-looking 200 (correct
 // Content-Length for contentLength bytes) and flushes those headers
-// immediately — so hfclient's ResponseHeaderTimeout is satisfied and
-// never fires — then writes NO body at all until its request context is
+// immediately - so hfclient's ResponseHeaderTimeout is satisfied and
+// never fires - then writes NO body at all until its request context is
 // canceled or the test finishes. This is the "connected but frozen byte
 // stream" case: strictly harder than internal/proxyhub's slowDripHandler,
 // which eventually delivers.
@@ -162,7 +162,7 @@ func frozenBodyHandler(contentLength int, testDone <-chan struct{}, sawCancel ch
 func TestChaos_HungUpstreamBeforeHeadersFailsFastWith502(t *testing.T) {
 	// Cold cache miss against an upstream that completes the TCP
 	// handshake and then answers nothing, ever. The request must end in a
-	// bounded time with an error status — this is exactly what
+	// bounded time with an error status - this is exactly what
 	// hfclient's Transport ResponseHeaderTimeout is there to guarantee,
 	// observed here through a whole proxycas request rather than at the
 	// client layer in isolation.
@@ -197,7 +197,7 @@ func TestChaos_FrozenMidBodyUpstreamBoundedOnlyByCallerContext(t *testing.T) {
 	// proxycas fetch path bounds how long the body read may take. There
 	// is no read deadline, no body-read timeout, and no proxycas
 	// equivalent of internal/proxyhub's MetadataCallTimeout (deliberately
-	// — a real xorb transfer can be large and slow; see
+	// - a real xorb transfer can be large and slow; see
 	// hfclient.defaultHTTPClient's doc comment on why there is no blanket
 	// request Timeout either). ensureXorbCached passes r.Context()
 	// straight through to hfclient, so the ONLY thing that ever stops a
@@ -220,7 +220,7 @@ func TestChaos_FrozenMidBodyUpstreamBoundedOnlyByCallerContext(t *testing.T) {
 
 	ts, proxy := newChaosProxy(t, shortHeaderTimeoutCASClient(casTS.URL))
 
-	// The caller's own deadline is the only bound in play — keep it short
+	// The caller's own deadline is the only bound in play - keep it short
 	// so this test costs a fraction of a second regardless.
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
@@ -246,7 +246,7 @@ func TestChaos_FrozenMidBodyUpstreamBoundedOnlyByCallerContext(t *testing.T) {
 	select {
 	case <-sawCancel:
 	case <-time.After(2 * time.Second):
-		t.Error("upstream never saw its request canceled — a downstream disconnect must propagate out to the upstream fetch, not orphan it")
+		t.Error("upstream never saw its request canceled - a downstream disconnect must propagate out to the upstream fetch, not orphan it")
 	}
 
 	if proxy.Embedded.HasXorbFooter(xorbHash) {
@@ -259,7 +259,7 @@ func TestChaos_FrozenMidBodyUpstreamBoundedOnlyByCallerContext(t *testing.T) {
 
 // resetMidBodyUpstream serves a raw, hand-written HTTP/1.1 response
 // promising Content-Length bytes, writes only the first half of them,
-// then slams the TCP connection shut — a mid-body reset/truncation,
+// then slams the TCP connection shut - a mid-body reset/truncation,
 // which no amount of httptest.Server politeness can reproduce (it always
 // frames its own responses correctly). Returns the listener address.
 func resetMidBodyUpstream(t *testing.T, blob []byte) (addr string) {
@@ -302,7 +302,7 @@ func TestChaos_ConnectionResetMidBodyNeverCachesTruncatedXorb(t *testing.T) {
 	// Content-Length promised, failing the ingest before anything is
 	// indexed; and (2) even if a truncation somehow read cleanly,
 	// IngestXorb re-derives the hash from the chunk stream and rejects a
-	// mismatch (ErrXorbHashMismatch) — it never trusts the claimed hash.
+	// mismatch (ErrXorbHashMismatch) - it never trusts the claimed hash.
 	blob, xorbHash := buildFooterlessXorb(t, [][]byte{bytes.Repeat([]byte("truncated payload "), 64)})
 	addr := resetMidBodyUpstream(t, blob)
 
@@ -324,10 +324,10 @@ func TestChaos_ConnectionResetMidBodyNeverCachesTruncatedXorb(t *testing.T) {
 		t.Errorf("request took %v, want it to fail promptly on the reset", elapsed)
 	}
 	if proxy.Embedded.HasXorbFooter(xorbHash) {
-		t.Error("a truncated xorb was indexed in the embedded server — cached corruption")
+		t.Error("a truncated xorb was indexed in the embedded server - cached corruption")
 	}
 	if has, err := proxy.Embedded.HasXorbBytes(context.Background(), xorbHash); err == nil && has {
-		t.Error("a truncated xorb's bytes were stored in the embedded server — cached corruption")
+		t.Error("a truncated xorb's bytes were stored in the embedded server - cached corruption")
 	}
 }
 
@@ -335,7 +335,7 @@ func TestChaos_ResetMidBodyLeavesNoPoisonedStateForACleanRetry(t *testing.T) {
 	// The retry half of the previous test, mirroring casserver's own
 	// TestChaos_InterruptedUploadThenCleanRetry: after a mid-body reset,
 	// a later fetch of the SAME hash against a recovered upstream must
-	// succeed and serve byte-correct content — the failed attempt must
+	// succeed and serve byte-correct content - the failed attempt must
 	// leave nothing behind for the retry to inherit.
 	blob, xorbHash := buildFooterlessXorb(t, [][]byte{bytes.Repeat([]byte("retry payload "), 64)})
 
@@ -351,7 +351,7 @@ func TestChaos_ResetMidBodyLeavesNoPoisonedStateForACleanRetry(t *testing.T) {
 			return
 		}
 		// Promise the full length, deliver half, then abort the response
-		// — http.ErrAbortHandler makes net/http close the connection
+		// - http.ErrAbortHandler makes net/http close the connection
 		// without writing a trailing anything, which the client sees as a
 		// truncated body.
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(blob)))
@@ -392,7 +392,7 @@ func TestChaos_ResetMidBodyLeavesNoPoisonedStateForACleanRetry(t *testing.T) {
 		t.Fatalf("status after upstream recovered = %d, want 200 (the failed attempt must not poison the retry)", okResp.StatusCode)
 	}
 	if !bytes.Equal(got, blob) {
-		t.Errorf("served %d bytes, want the full %d — content differs after a reset-then-retry", len(got), len(blob))
+		t.Errorf("served %d bytes, want the full %d - content differs after a reset-then-retry", len(got), len(blob))
 	}
 	if !proxy.Embedded.HasXorbFooter(xorbHash) {
 		t.Error("successful retry did not populate the embedded server")
@@ -405,7 +405,7 @@ func TestChaos_ResetMidBodyLeavesNoPoisonedStateForACleanRetry(t *testing.T) {
 func TestChaos_ThunderingHerdOnColdKeyWithSlowUpstream(t *testing.T) {
 	// Many concurrent requests for the SAME cold key while upstream is
 	// slow. There is deliberately no single-flight/dedup layer in this
-	// package, so more than one upstream fetch is expected and fine —
+	// package, so more than one upstream fetch is expected and fine -
 	// what must hold is that concurrent fetch-and-ingest of one hash is
 	// race-free (this test is meaningful mainly under -race), that every
 	// caller gets correct bytes, and that the end state is a single
@@ -456,11 +456,11 @@ func TestChaos_ThunderingHerdOnColdKeyWithSlowUpstream(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("thundering herd did not complete within 10s — possible deadlock on the cold-key fetch path")
+		t.Fatal("thundering herd did not complete within 10s - possible deadlock on the cold-key fetch path")
 	}
 
 	if corrupt.Load() != 0 {
-		t.Errorf("%d of %d concurrent responses had wrong content — concurrent fetch-and-ingest of one key corrupted data", corrupt.Load(), concurrency)
+		t.Errorf("%d of %d concurrent responses had wrong content - concurrent fetch-and-ingest of one key corrupted data", corrupt.Load(), concurrency)
 	}
 	if got := ok.Load(); got != concurrency {
 		t.Errorf("%d of %d concurrent requests succeeded with correct bytes, want all", got, concurrency)
@@ -494,7 +494,7 @@ func TestChaos_AlreadyCachedXorbServedInstantlyWhileUpstreamFrozen(t *testing.T)
 	// already covers): upstream is still accepting connections and still
 	// answering with headers, it just never delivers a body again. An
 	// already-cached xorb must still be served immediately, with zero
-	// upstream traffic — proving the cache check in ensureXorbCached
+	// upstream traffic - proving the cache check in ensureXorbCached
 	// short-circuits before any upstream call, so upstream chaos cannot
 	// leak into a request that doesn't need upstream at all.
 	testDone := make(chan struct{})
@@ -546,7 +546,7 @@ func TestChaos_AlreadyCachedXorbServedInstantlyWhileUpstreamFrozen(t *testing.T)
 	}
 	afterCold := fetches.Load()
 	if afterCold <= primed {
-		t.Fatal("cold-key GET never reached upstream — the frozen-upstream precondition did not hold")
+		t.Fatal("cold-key GET never reached upstream - the frozen-upstream precondition did not hold")
 	}
 
 	// The real assertion: the already-cached xorb is still served, fast,
@@ -580,7 +580,7 @@ func TestChaos_AlreadyCachedXorbServedInstantlyWhileUpstreamFrozen(t *testing.T)
 func TestChaos_ReconstructionWithFrozenXorbFetchIngestsNothing(t *testing.T) {
 	// A reconstruction miss fans out into a xorb fetch per term (see
 	// ensureFileReconCached), so upstream chaos on the XORB leg has to
-	// fail the whole reconstruction cleanly — it must not leave a
+	// fail the whole reconstruction cleanly - it must not leave a
 	// half-populated file reconstruction referencing a xorb the embedded
 	// server doesn't actually have, which would make a later
 	// reconstruction response advertise fetch URLs for missing bytes.
@@ -623,7 +623,7 @@ func TestChaos_ReconstructionWithFrozenXorbFetchIngestsNothing(t *testing.T) {
 	}
 
 	if proxy.Embedded.HasFileRecon(fileHash) {
-		t.Error("file reconstruction was ingested even though one of its xorbs was never fetched — would advertise fetch URLs for absent bytes")
+		t.Error("file reconstruction was ingested even though one of its xorbs was never fetched - would advertise fetch URLs for absent bytes")
 	}
 	if proxy.Embedded.HasXorbFooter(xorbHash) {
 		t.Error("xorb was indexed although its body never arrived")

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // FileDataSequenceHeader mirrors file_structs.rs's FileDataSequenceHeader:

@@ -16,7 +16,7 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/storage"
 )
 
 func benchmarkDedupHit(b *testing.B, size int, verify bool) {
@@ -58,7 +58,7 @@ func BenchmarkDedupHit_64MB_VerifyOff(b *testing.B) { benchmarkDedupHit(b, 64<<2
 func BenchmarkDedupHit_64MB_VerifyOn(b *testing.B)  { benchmarkDedupHit(b, 64<<20, true) }
 
 // benchmarkMismatchAtPosition measures how long a rejected Put takes when
-// the mismatch is planted at a given fraction of the object's length —
+// the mismatch is planted at a given fraction of the object's length -
 // proving bail-at-first-mismatch cost scales with mismatch position
 // rather than always reading (and comparing) the full object regardless
 // of where the difference actually is.

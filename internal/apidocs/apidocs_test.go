@@ -79,7 +79,7 @@ func TestHandler_IndexReferencesOpenAPISpecByRelativePath(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 	if !strings.Contains(string(body), `"openapi.yaml"`) {
-		t.Error(`index.html does not reference "openapi.yaml" by relative path — Swagger UI would fail to load the spec`)
+		t.Error(`index.html does not reference "openapi.yaml" by relative path - Swagger UI would fail to load the spec`)
 	}
 }
 
@@ -99,10 +99,23 @@ func TestHandler_OpenAPISpecIsValidYAMLWithExpectedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	// Not a full YAML parse (no yaml package dependency in this module) —
+	// Not a full YAML parse (no yaml package dependency in this module) -
 	// just confirm the served content is recognizably the OpenAPI spec
 	// and not, say, an empty or truncated embed.
-	for _, want := range []string{"openapi: 3.0.3", "/v1/xorbs/{prefix}/{hash}", "/api/repos/create", "/v1/upload"} {
+	for _, want := range []string{
+		"openapi: 3.0.3",
+		"/v1/xorbs/{prefix}/{hash}",
+		"/api/repos/create",
+		"/v1/upload",
+		// The git-LFS batch endpoint is the entry point to the entire Xet
+		// upload path (a server without it gets no Xet uploads at all), so
+		// its absence from the spec is worth failing on rather than
+		// noticing later.
+		"/{repo_id}.git/info/lfs/objects/batch",
+		// repo-info's siblings list: an empty one sends huggingface_hub
+		// down a fallback that breaks whole-repo downloads entirely.
+		"siblings",
+	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("served openapi.yaml missing expected content %q", want)
 		}

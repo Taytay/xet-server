@@ -1,6 +1,6 @@
 package proxyhub
 
-// Chaos/reliability tests for a MISBEHAVING UPSTREAM — the real Hub (or
+// Chaos/reliability tests for a MISBEHAVING UPSTREAM - the real Hub (or
 // whatever -upstream-hub-url points at) hanging before it ever sends
 // response headers, dying only after the first call has already been
 // cached, returning a real HTTP 200 carrying garbage/truncated JSON, or
@@ -8,7 +8,7 @@ package proxyhub
 // test throughout is the one this package exists for (see the package
 // doc comment): ANY upstream failure falls back to whatever Embedded
 // already holds, no matter how old, and a request never fails outright
-// once a fallback value exists — while a genuinely cold cache still
+// once a fallback value exists - while a genuinely cold cache still
 // fails CLEANLY (a 502 with a JSON body) and FAST, never hanging or
 // panicking.
 //
@@ -34,20 +34,20 @@ import (
 	"testing"
 	"time"
 
-	"xet-server/internal/hfclient"
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 const testCASBaseURL = "http://localhost:8420"
 
 // newHangingHubURL returns the base URL of a listener that completes the
-// TCP handshake and then never writes a response — a completely
+// TCP handshake and then never writes a response - a completely
 // unresponsive upstream (a hung huggingface.co, a network partition that
 // drops responses but not the handshake). This is proxyhub's own copy of
 // internal/hfclient/timeout_test.go's newHangingServer, adapted to hand
 // back a base URL a *Server can be pointed at; closing the connection
 // outright would be a materially different (and much easier) failure for
-// an HTTP client to notice — an immediate reset, not a hang.
+// an HTTP client to notice - an immediate reset, not a hang.
 func newHangingHubURL(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -75,14 +75,14 @@ func newHangingHubURL(t *testing.T) string {
 }
 
 // newTestServerAt is newTestServer's (proxyhub_test.go) counterpart for
-// an upstream that has no *httptest.Server to hand over — the raw
+// an upstream that has no *httptest.Server to hand over - the raw
 // hanging listeners above.
 func newTestServerAt(hubBaseURL string) *Server {
 	return New(hubBaseURL, testCASBaseURL)
 }
 
 // hangAfterFirstCall serves healthy for the first request and then hangs
-// on every subsequent one until that request's own context is canceled —
+// on every subsequent one until that request's own context is canceled -
 // i.e. until proxyhub's MetadataCallTimeout (or the downstream client)
 // gives up. Models the common real-world shape of upstream trouble:
 // something got cached while the Hub was fine, and the Hub then stopped
@@ -116,7 +116,7 @@ func resolveHandler(w http.ResponseWriter, r *http.Request) {
 const testXetHashHex = "abababababababababababababababababababababababababababababababab"
 
 // wantJSONError asserts resp carries this package's standard
-// httpErrorJSON body shape — proving the failure was handled
+// httpErrorJSON body shape - proving the failure was handled
 // deliberately (through writeUpstreamError) rather than by a panic
 // unwinding through the handler, which the client would see as a bare
 // EOF/500 with no body at all.
@@ -162,7 +162,7 @@ func TestChaos_RepoInfoHungUpstreamFallsBackToCachedRevision(t *testing.T) {
 
 // TestChaos_HungUpstreamWithNothingCachedFailsCleanlyAndFast proves the
 // other half of the same scenario: with no cached value to fall back to,
-// each read endpoint must produce a real 502 with a JSON body promptly —
+// each read endpoint must produce a real 502 with a JSON body promptly -
 // not hang for the downstream client's full patience, and not panic.
 func TestChaos_HungUpstreamWithNothingCachedFailsCleanlyAndFast(t *testing.T) {
 	s := newTestServerAt(newHangingHubURL(t))
@@ -206,7 +206,7 @@ func TestChaos_HungUpstreamWithNothingCachedFailsCleanlyAndFast(t *testing.T) {
 // TestChaos_UpstreamDiesAfterFirstCallThenEveryRepeatStillSucceeds is
 // the "cached once, upstream then broken forever" scenario: with the
 // default CacheTTL of -1 every request re-attempts upstream, so each
-// repeat pays MetadataCallTimeout and then falls back — the point being
+// repeat pays MetadataCallTimeout and then falls back - the point being
 // that no repeat ever FAILS, however many times in a row upstream hangs,
 // and the served body stays correct rather than degrading to an empty
 // 200. Also the "survived chaos, still serving" proof (cf.
@@ -261,7 +261,7 @@ func TestChaos_UpstreamDiesAfterFirstCallThenEveryRepeatStillSucceeds(t *testing
 // TestChaos_XetTokenUpstreamHangsAfterFirstCallStillServesStaleToken
 // covers the one endpoint that cannot fall back through Embedded at all
 // (see token.go): its stale fallback comes from xetTokenCache via
-// fetchOrServeCache, and must survive the same hung upstream — including
+// fetchOrServeCache, and must survive the same hung upstream - including
 // still rewriting CasURL and passing the real AccessToken through.
 func TestChaos_XetTokenUpstreamHangsAfterFirstCallStillServesStaleToken(t *testing.T) {
 	hubTS := httptest.NewServer(hangAfterFirstCall(xetTokenHandler))
@@ -305,7 +305,7 @@ func TestChaos_XetTokenUpstreamHangsAfterFirstCallStillServesStaleToken(t *testi
 }
 
 // TestChaos_ResolveUpstreamHangsAfterFirstCallStillServesCachedMetadata
-// exercises the resolve read path's fallback under a hung upstream — the
+// exercises the resolve read path's fallback under a hung upstream - the
 // path whose local answer additionally depends on this package's own
 // CAS-bridge FileSize lookup (see Server.FileSize) surviving alongside
 // Embedded's file record.
@@ -351,7 +351,7 @@ func TestChaos_ResolveUpstreamHangsAfterFirstCallStillServesCachedMetadata(t *te
 }
 
 // garbageJSONHandler answers with a real HTTP 200 whose body is not JSON
-// at all — an upstream that is reachable and "healthy" at the HTTP layer
+// at all - an upstream that is reachable and "healthy" at the HTTP layer
 // but whose payload cannot be parsed (a captive portal, a misrouted CDN
 // error page served as 200, a partially-deployed API).
 func garbageJSONHandler(w http.ResponseWriter, r *http.Request) {
@@ -361,7 +361,7 @@ func garbageJSONHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // truncatedJSONHandler promises more bytes than it writes, so the
-// connection dies mid-body and the decoder sees an unexpected EOF — the
+// connection dies mid-body and the decoder sees an unexpected EOF - the
 // same class of failure as garbage, reached differently.
 func truncatedJSONHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -371,9 +371,9 @@ func truncatedJSONHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // TestChaos_MalformedUpstreamJSONWithNothingCachedIsACleanBadGateway
-// pins down that an hfclient JSON decode failure — which surfaces as a
+// pins down that an hfclient JSON decode failure - which surfaces as a
 // plain fmt.Errorf("decode ...: %w") value, NOT a *hfclient.StatusError
-// (see hfclient.RepoInfo/ListTree/GetXetToken) — travels the exact same
+// (see hfclient.RepoInfo/ListTree/GetXetToken) - travels the exact same
 // writeUpstreamError path as a network failure, yielding a 502 with a
 // JSON body rather than a panic, an empty 200, or the upstream's own
 // misleading 200 relayed onward.
@@ -450,7 +450,7 @@ func TestChaos_MalformedUpstreamJSONFallsBackToCache(t *testing.T) {
 // DELIBERATE, documented gap rather than a defect: ListTree paginates
 // internally within a single context (see hfclient's own doc comment on
 // defaultHTTPClient and proxyhub's package doc comment), so
-// MetadataCallTimeout is intentionally NOT applied to it — a fixed
+// MetadataCallTimeout is intentionally NOT applied to it - a fixed
 // per-call bound would abort a legitimately large but healthy listing
 // partway through. Consequence: if page 2 hangs, nothing in this package
 // cuts the request short; the only backstop is hfclient's
@@ -482,10 +482,10 @@ func TestChaos_ListTreeHungSecondPageHasNoPerPageBound(t *testing.T) {
 	elapsed := time.Since(start)
 	if err == nil {
 		resp.Body.Close()
-		t.Fatalf("tree listing completed in %v despite a hung second page — a per-page bound now exists; this test (and the doc comments claiming ListTree is unbounded) need revisiting", elapsed)
+		t.Fatalf("tree listing completed in %v despite a hung second page - a per-page bound now exists; this test (and the doc comments claiming ListTree is unbounded) need revisiting", elapsed)
 	}
 	if elapsed < 2*s.MetadataCallTimeout {
-		t.Errorf("request ended after %v, want it to run past MetadataCallTimeout (%v) — that bound is deliberately not applied to ListTree", elapsed, s.MetadataCallTimeout)
+		t.Errorf("request ended after %v, want it to run past MetadataCallTimeout (%v) - that bound is deliberately not applied to ListTree", elapsed, s.MetadataCallTimeout)
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("request took %v, want it bounded by this test's own %v deadline", elapsed, patience)
@@ -494,7 +494,7 @@ func TestChaos_ListTreeHungSecondPageHasNoPerPageBound(t *testing.T) {
 
 // TestChaos_ListTreeSlowSecondPageStillCompletesForAPatientClient is the
 // flip side of the gap above: a slow-but-healthy second page must still
-// be followed to completion, with every entry ingested — exactly what a
+// be followed to completion, with every entry ingested - exactly what a
 // per-call bound on ListTree would have broken.
 func TestChaos_ListTreeSlowSecondPageStillCompletesForAPatientClient(t *testing.T) {
 	page2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -532,7 +532,7 @@ func TestChaos_ListTreeSlowSecondPageStillCompletesForAPatientClient(t *testing.
 		t.Errorf("got %d entries, want both pages' entries", len(entries))
 	}
 	if !s.Embedded.HasFile("model", "alice/my-model", "main", "data/train.bin") {
-		t.Error("second page's file was not ingested — pagination was cut short")
+		t.Error("second page's file was not ingested - pagination was cut short")
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("request took %v, want a little over the 300ms page-2 delay", elapsed)
@@ -545,7 +545,7 @@ func TestChaos_ListTreeSlowSecondPageStillCompletesForAPatientClient(t *testing.
 // upstream, and races to ingest the same repo/revision/file records (and
 // this package's own fileSizeByXetHash map). There is deliberately no
 // single-flight coalescing here, so what matters is that the concurrent
-// ingests are safe and every caller still gets a correct answer — run
+// ingests are safe and every caller still gets a correct answer - run
 // under `go test -race` this is the file's data-race check.
 func TestChaos_ConcurrentColdCacheRequestsWhileUpstreamIsSlow(t *testing.T) {
 	const upstreamDelay = 150 * time.Millisecond

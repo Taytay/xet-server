@@ -1,7 +1,7 @@
 package reconwire
 
 // Tests for BuildV1/BuildV2's clipping and grouping logic, driven
-// directly against fake FooterLookup/FetchURLBuilder callbacks — no HTTP
+// directly against fake FooterLookup/FetchURLBuilder callbacks - no HTTP
 // server needed, since this package is a pure function of its inputs
 // (see the package doc comment). internal/casserver's own integration
 // tests exercise this same logic end-to-end through real HTTP requests;
@@ -11,9 +11,9 @@ import (
 	"errors"
 	"testing"
 
-	"xet-server/internal/merklehash"
-	"xet-server/internal/shardformat"
-	"xet-server/internal/xorbformat"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/xorbformat"
 )
 
 func hashFromByte(b byte) merklehash.Hash {
@@ -89,7 +89,7 @@ func TestBuildV1_RangeSkipsTermsOutsideWindow(t *testing.T) {
 	fetchURL, _ := fakeFetchURLBuilder()
 
 	// Range [150, 199] falls entirely within the second term (byte offset
-	// 100-199) — the first term (0-99) must be skipped entirely.
+	// 100-199) - the first term (0-99) must be skipped entirely.
 	resp, err := BuildV1(entries, 150, 199, fakeFooterLookup(footers), fetchURL)
 	if err != nil {
 		t.Fatalf("BuildV1() error = %v", err)
@@ -148,7 +148,7 @@ func TestBuildV2_GroupsMultipleTermsUnderOneXorb(t *testing.T) {
 		t.Errorf("got %d ranges, want 2 (both terms grouped under the same xorb)", len(fetches[0].Ranges))
 	}
 	// The URL builder must only be called once per distinct xorb hash,
-	// even though two terms reference it — the whole point of V2's
+	// even though two terms reference it - the whole point of V2's
 	// grouping optimization.
 	if *calls != 1 {
 		t.Errorf("fetchURL called %d times, want 1 (reused across both terms)", *calls)
@@ -181,7 +181,7 @@ func TestFileSize_SumsUnpackedSegmentBytes(t *testing.T) {
 // TestBuildV1_ChunkIndexOutOfRangeReturnsErrorNotPanic pins the fix for a
 // real reachable crash: entries can originate from an untrusted upstream
 // reconstruction response (internal/proxycas ingests one into
-// casserver.Server.IngestFileRecon without re-deriving it — see the
+// casserver.Server.IngestFileRecon without re-deriving it - see the
 // package doc comment), so a term whose ChunkIndexEnd exceeds its xorb's
 // actual footer chunk count must be rejected with an error, never index
 // footer.ChunkBoundaryOffsets out of bounds.
@@ -189,7 +189,7 @@ func TestBuildV1_ChunkIndexOutOfRangeReturnsErrorNotPanic(t *testing.T) {
 	xorbHash := hashFromByte(0x11)
 	entries := []shardformat.FileDataSequenceEntry{
 		// The footer below has only 2 chunks (ChunkBoundaryOffsets has 2
-		// entries), but this term claims chunk index 5 — a hostile or
+		// entries), but this term claims chunk index 5 - a hostile or
 		// malformed upstream response shape.
 		{XorbHash: xorbHash, UnpackedSegmentBytes: 100, ChunkIndexStart: 0, ChunkIndexEnd: 5},
 	}
@@ -229,9 +229,9 @@ func TestBuildV2_ChunkIndexOutOfRangeReturnsErrorNotPanic(t *testing.T) {
 }
 
 // FuzzBuildV1_NeverPanics drives BuildV1 with adversarial
-// FileDataSequenceEntry values — untrusted-shaped input by construction
+// FileDataSequenceEntry values - untrusted-shaped input by construction
 // (see the package doc comment on why entries is not always internally
-// consistent) — asserting only that it never panics, regardless of how
+// consistent) - asserting only that it never panics, regardless of how
 // the chunk-index fields relate to the footer's actual chunk count.
 func FuzzBuildV1_NeverPanics(f *testing.F) {
 	f.Add(uint32(0), uint32(1), uint32(2))

@@ -4,7 +4,7 @@ package api
 // (most chunks already stored, dedup fast-path dominates) versus a fully
 // unique file of the same size (every chunk is new, full hash+store cost
 // paid for each). The gap between these two quantifies what dedup
-// actually buys in wall-clock terms, not just in bytes-stored — the
+// actually buys in wall-clock terms, not just in bytes-stored - the
 // dedup fast-path (storage.Store.Has-style short-circuit inside Put) must
 // still chunk and hash every byte either way, so this also shows the
 // floor cost that never goes away regardless of duplication.
@@ -20,7 +20,7 @@ import (
 
 func init() {
 	// Suppress the per-upload slog.Info line (see handleUpload) during
-	// benchmarks — B.N can run into the hundreds of iterations, and
+	// benchmarks - B.N can run into the hundreds of iterations, and
 	// interleaved log lines make -bench output unreadable without
 	// affecting the measured operation itself.
 	slog.SetLogLoggerLevel(slog.LevelWarn)
@@ -45,7 +45,7 @@ func randomContentBytes(size int) []byte {
 // per b.N-loop... but that would keep re-chunking a growing dedup index
 // across iterations, which is exactly what we want to measure for the
 // "highly duplicate" case (post-first-upload, every subsequent chunk is
-// already known) — so unlike a typical benchmark, priming happens once
+// already known) - so unlike a typical benchmark, priming happens once
 // outside the timed loop specifically to reach steady-state dedup, and
 // each timed iteration re-uploads the identical bytes to measure the
 // fully-deduplicated cost.
@@ -77,7 +77,7 @@ func benchmarkUploadSteadyState(b *testing.B, data []byte) {
 }
 
 // benchmarkUploadAlwaysNew uploads distinct random content each
-// iteration — every chunk is new on every call, so this measures the
+// iteration - every chunk is new on every call, so this measures the
 // no-dedup-possible floor: chunk + hash + store, every byte, every time.
 func benchmarkUploadAlwaysNew(b *testing.B, size int) {
 	srv, err := New(b.TempDir())

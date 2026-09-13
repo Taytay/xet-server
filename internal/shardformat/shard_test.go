@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 func hashFromByte(b byte) merklehash.Hash {

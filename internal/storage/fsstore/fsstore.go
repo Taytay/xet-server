@@ -5,14 +5,17 @@ package fsstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
-	"xet-server/internal/storage"
+	"github.com/guilt/xet-server/internal/storage"
 )
 
 var (
@@ -33,19 +36,33 @@ func New(root string) (*Store, error) {
 }
 
 // tempFileMarker is the substring os.CreateTemp's pattern
-// (filepath.Base(p)+".tmp-*") always produces in a staging file's name —
+// (filepath.Base(p)+".tmp-*") always produces in a staging file's name -
 // used by TotalBytes to distinguish a completed blob from an in-flight
 // upload's staging file (see TotalBytes's doc comment).
 const tempFileMarker = ".tmp-"
 
+// openRetries and openRetryDelay bound Get/GetRange's retry of os.Open on
+// Windows, where a concurrent Put's stage-then-rename can transiently make
+// the blob path unopenable (ERROR_SHARING_VIOLATION) for a few
+// milliseconds. A content-addressed store's blobs are immutable, so
+// retrying is always safe: the bytes are identical whether the open lands
+// just before or just after the rename completes. POSIX never needs this -
+// rename(2) is atomic, so an open sees either the old or the new file -
+// and the guard is runtime.GOOS so the constant is never matched on Unix.
+const (
+	openRetries         = 5
+	openRetryDelay      = 5 * time.Millisecond
+	errSharingViolation = 32 // ERROR_SHARING_VIOLATION
+)
+
 // staleTempFileAge is how old a ".tmp-*" staging file must be before
 // TotalBytes treats it as orphaned (a crashed/killed process that never
-// reached its own os.Remove(tmp) cleanup path — see Put's error-handling
+// reached its own os.Remove(tmp) cleanup path - see Put's error-handling
 // branches, none of which run if the process dies mid-copy) rather than a
 // legitimately in-flight upload. Chosen well above any realistic single
 // xorb upload duration (even a slow multi-GB transfer over a bad link),
-// so a false positive here — reaping a temp file that's actually still
-// being written — should not happen in practice; a true in-flight upload
+// so a false positive here - reaping a temp file that's actually still
+// being written - should not happen in practice; a true in-flight upload
 // this old almost certainly belongs to a client that's gone anyway.
 const staleTempFileAge = 30 * time.Minute
 
@@ -70,13 +87,13 @@ func (s *Store) Has(_ context.Context, key string) (bool, error) {
 // Put stages the write to a per-attempt temp file and only renames it into
 // place once size bytes have been fully copied from r. If r errs, ctx is
 // canceled, or the copy stops short of size, the temp file is removed and
-// no partial blob is ever visible under key — a caller can retry Put with a
+// no partial blob is ever visible under key - a caller can retry Put with a
 // fresh reader afterward with no cleanup of its own required.
 //
 // The temp file is created via os.CreateTemp (not a fixed PID-based name):
 // concurrent Put calls for the *same* key within one process are a normal,
 // expected race (e.g. several clients uploading an identical xorb at once
-// — see TestAdversarial_ConcurrentUploadsOfSameXorb), and each needs its
+// - see TestAdversarial_ConcurrentUploadsOfSameXorb), and each needs its
 // own independent staging file rather than colliding on one shared path.
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (written bool, err error) {
 	p := s.path(key)
@@ -112,7 +129,7 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (w
 	if err := os.Rename(tmp, p); err != nil {
 		os.Remove(tmp)
 		// Another concurrent Put for the same key may have already
-		// renamed its own temp file into place first — that's a
+		// renamed its own temp file into place first - that's a
 		// successful dedup, not a failure, from this caller's
 		// perspective, as long as p now actually exists.
 		if _, statErr := os.Stat(p); statErr == nil {
@@ -123,8 +140,46 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64) (w
 	return true, nil
 }
 
+// openBlob opens the blob stored under key, retrying briefly when a
+// concurrent Put's rename transiently makes the path unopenable on Windows
+// (see the openRetries comment above). After the retries are exhausted any
+// remaining error is returned unchanged, so a genuinely locked file still
+// surfaces to the caller as a real fault rather than a silent retry loop.
+func (s *Store) openBlob(key string) (*os.File, error) {
+	path := s.path(key)
+	var lastErr error
+	for attempt := 0; attempt <= openRetries; attempt++ {
+		f, err := os.Open(path)
+		if err == nil {
+			return f, nil
+		}
+		lastErr = err
+		if !isTransientWindowsOpenError(err) {
+			break
+		}
+		time.Sleep(openRetryDelay)
+	}
+	return nil, lastErr
+}
+
+// isTransientWindowsOpenError reports whether err is the classic transient
+// state during a concurrent os.Rename on Windows: the path is briefly
+// locked and a retry in a few milliseconds will land on a readable file.
+// Only matched on Windows (on Unix the identical errno value is EPIPE,
+// which os.Open can never return).
+func isTransientWindowsOpenError(err error) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	return errno == errSharingViolation
+}
+
 func (s *Store) Get(_ context.Context, key string) (io.ReadCloser, error) {
-	f, err := os.Open(s.path(key))
+	f, err := s.openBlob(key)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, storage.ErrNotFound
@@ -135,7 +190,7 @@ func (s *Store) Get(_ context.Context, key string) (io.ReadCloser, error) {
 }
 
 func (s *Store) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, error) {
-	f, err := os.Open(s.path(key))
+	f, err := s.openBlob(key)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, storage.ErrNotFound
@@ -173,18 +228,18 @@ func (s *Store) Delete(_ context.Context, key string) error {
 
 // TotalBytes walks the store's root and sums the size of every *completed*
 // stored blob. This is an O(number of blobs) directory walk, not a cached
-// counter — fine for a slow poll (an eviction sweep runs every few
+// counter - fine for a slow poll (an eviction sweep runs every few
 // minutes at most), but callers should not call this on any request hot
 // path.
 //
-// In-flight upload staging files (os.CreateTemp's ".tmp-*" names — see
+// In-flight upload staging files (os.CreateTemp's ".tmp-*" names - see
 // Put) are excluded from the total: counting them would inflate the
 // measured size by uploads that haven't committed yet and may never
 // complete, skewing an eviction budget check upward for no real storage
 // that will persist. But a temp file left behind by a process that
 // crashed or was killed mid-upload (Put's own os.Remove(tmp) cleanup
 // never got to run) is a real, permanent disk-space leak if silently
-// excluded forever — so a temp file older than staleTempFileAge is
+// excluded forever - so a temp file older than staleTempFileAge is
 // treated as orphaned: it's reaped (removed) here rather than skipped, so
 // disk space is actually reclaimed instead of just hidden from the count.
 func (s *Store) TotalBytes(_ context.Context) (int64, error) {

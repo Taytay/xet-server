@@ -4,7 +4,7 @@ package hubserver
 // huggingface_hub's list_repo_tree, which snapshot_download (used by
 // `hf download` for a whole-repo download) calls with recursive=True to
 // enumerate every file before downloading them. Paired with
-// handleRepoInfo (repo.go) — together these are the two endpoints a
+// handleRepoInfo (repo.go) - together these are the two endpoints a
 // whole-repo download needs beyond what single-named-file downloads
 // already used (xet-token issuance, resolve/HEAD).
 
@@ -23,7 +23,7 @@ import (
 // single-file request, but the tree listing is the only chance to hand it
 // over up front for every file in one round trip). "type": "file" is the
 // discriminator list_repo_tree uses to build a RepoFile instead of a
-// RepoFolder — this shim has no folder concept, so every entry is "file".
+// RepoFolder - this shim has no folder concept, so every entry is "file".
 type treeEntry struct {
 	Type    string `json:"type"`
 	Path    string `json:"path"`
@@ -35,10 +35,10 @@ type treeEntry struct {
 // handleListTree implements the tree-listing endpoint described above.
 // pathInRepo filters to files whose path is under that prefix (a real
 // Hub tree listing scopes to one folder unless the caller recurses from
-// the root) — empty means the whole revision. Matches handleRepoInfo's
+// the root) - empty means the whole revision. Matches handleRepoInfo's
 // read-path convention exactly, including the X-Error-Code header on a
 // missing revision (see handleRepoInfo's doc comment for why that header
-// is required, not cosmetic) — the repo is implicitly touched, but a
+// is required, not cosmetic) - the repo is implicitly touched, but a
 // nonexistent revision 404s rather than being silently created.
 func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request, repoType, repoID, revision, pathInRepo string) {
 	rs := s.getOrCreateRepo(repoType, repoID)
@@ -63,7 +63,7 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request, repoType
 	}
 	vs.mu.RUnlock()
 
-	// Deterministic order for test/debugging friendliness — the real Hub
+	// Deterministic order for test/debugging friendliness - the real Hub
 	// API makes no ordering guarantee, and huggingface_hub's own
 	// paginate() consumes results as a plain iterable, so any order is
 	// spec-valid; this just avoids flaky-looking diffs between calls.
@@ -71,7 +71,7 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request, repoType
 
 	// list_repo_tree's paginate() helper does `yield from r.json()`, i.e.
 	// it expects a bare JSON array at the top level, not an object
-	// wrapping one — unlike every other response this shim returns via
+	// wrapping one - unlike every other response this shim returns via
 	// writeJSON.
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(entries); err != nil {

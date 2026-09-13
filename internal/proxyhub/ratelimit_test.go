@@ -3,7 +3,7 @@ package proxyhub
 // Tests for SetRateLimiter: does gate actually enforce it (burst
 // allowed, then 429 with Retry-After) across the dispatch functions
 // (handleAPIGet/handleAPIPost/handleResolveDispatch each call gate
-// per-case rather than through a single wrapper — see gate's doc
+// per-case rather than through a single wrapper - see gate's doc
 // comment), and does a configured rate limiter leave the
 // offline-fallback path (see TestRepoInfo_OfflineAfterCacheStillServes
 // RegardlessOfTTL) working for requests still within budget?
@@ -14,8 +14,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"xet-server/internal/hfclient"
-	"xet-server/internal/ratelimit"
+	"github.com/guilt/xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/ratelimit"
 )
 
 func TestRateLimit_BurstAllowedThenTooManyRequests(t *testing.T) {
@@ -106,7 +106,7 @@ func TestRateLimit_OfflineFallbackStillServedWithinBudget(t *testing.T) {
 
 func TestRateLimit_AppliesAcrossAllThreeDispatchFunctions(t *testing.T) {
 	// gate is called inline per-case in handleAPIGet, handleAPIPost, and
-	// handleResolveDispatch (no single shared wrapper) — verify the
+	// handleResolveDispatch (no single shared wrapper) - verify the
 	// limit is enforced via all three, not just handleAPIGet.
 	hubTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

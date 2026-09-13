@@ -40,7 +40,7 @@ func FuzzScanChunks(f *testing.F) {
 	f.Add([]byte("XETBLOB")) // just the footer ident, no chunks at all
 	f.Add(make([]byte, 4))   // shorter than one chunk header
 	// A chunk header claiming a huge CompressedLength with no payload
-	// bytes following — ScanChunks must fail on the resulting Seek/read,
+	// bytes following - ScanChunks must fail on the resulting Seek/read,
 	// not hang or allocate based on the claim (it only seeks, never
 	// allocates CompressedLength bytes itself, but worth pinning as a
 	// regression target since the whole point of this fuzz pass is
@@ -88,7 +88,7 @@ func FuzzParseFooterV1(f *testing.F) {
 	f.Add([]byte("XETBLOB"))
 	f.Add([]byte("NOTAVALIDIDENT!"))
 	// A footer claiming a huge NumChunks with no chunk hash bytes
-	// following — the regression target for the allocation-size DoS fixed
+	// following - the regression target for the allocation-size DoS fixed
 	// in ParseFooterV1 (see maxFooterEntryPreallocate).
 	var hugeCount bytes.Buffer
 	hugeCount.WriteString("XETBLOB")

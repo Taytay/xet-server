@@ -40,7 +40,7 @@ func nextMergeCut(hashes []hashSize) int {
 
 // mergedHashOfSequence mirrors merged_hash_of_sequence: format each entry
 // as "{hash_hex} : {size}\n", concatenate, and hash the result as an
-// internal Merkle node. The exact text format matters — it's part of what
+// internal Merkle node. The exact text format matters - it's part of what
 // makes this hash byte-compatible with xet-core.
 func mergedHashOfSequence(group []hashSize) hashSize {
 	var buf []byte

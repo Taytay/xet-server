@@ -1,21 +1,21 @@
-# `xet-server/internal/xorbformat`
+# `github.com/guilt/xet-server/internal/xorbformat`
 
 ```
-package xorbformat // import "xet-server/internal/xorbformat"
+package xorbformat // import "github.com/guilt/xet-server/internal/xorbformat"
 
 WriteFooterV1 writes footer f's wire representation to w, matching
 xet_object_format.rs's XorbObjectInfoV1::serialize. Used by this package's
 own tests to build round-trip fixtures; a real CAS server only ever needs
 ParseFooterV1 for xorbs uploaded by real clients.
 
-Package xorbformat implements the on-wire binary layout of a xorb —
+Package xorbformat implements the on-wire binary layout of a xorb -
 the aggregated-chunk storage unit real Xet clients (hf_xet/xet-core)
-upload via POST /v1/xorbs/{prefix}/{hash} — ported from
+upload via POST /v1/xorbs/{prefix}/{hash} - ported from
 xet_core_structures/src/xorb_object/{xorb_chunk_format,xorb_object_format}.rs.
 
 A CAS server's job is to store a xorb's serialized bytes as an opaque blob and
 later hand back raw byte ranges for reconstruction; the (possibly compressed)
-chunk payloads are never decompressed server-side — only the client does that
+chunk payloads are never decompressed server-side - only the client does that
 after fetching. Accordingly, this package parses chunk headers and the V1 footer
 (hashes, boundary offsets) without needing to implement any compression codec.
 
@@ -32,10 +32,10 @@ func DecompressChunkPayload(scheme CompressionScheme, payload []byte, uncompress
     DecompressChunkPayload returns the uncompressed bytes of one chunk's payload
     per its declared compression scheme. Real hf_xet clients upload xorbs
     without a footer (chunk metadata is reconstructed by the server from the
-    raw chunk stream — see casserver.IngestXorb), so this is the only way to
+    raw chunk stream - see casserver.IngestXorb), so this is the only way to
     obtain a chunk's true content and independently verify its claimed hash.
     Exported (rather than kept package-internal to casserver) since it's a pure
-    codec-dispatch function with no casserver-specific state — a natural fit for
+    codec-dispatch function with no casserver-specific state - a natural fit for
     this package alongside the rest of the wire-format logic it already owns.
 
 func WriteChunkHeader(w io.Writer, h ChunkHeader) error
@@ -80,7 +80,7 @@ func ReadChunkHeader(r io.Reader) (ChunkHeader, error)
 type CompressionScheme uint8
     CompressionScheme mirrors xet_core_structures::CompressionScheme's wire
     discriminants (compression_scheme.rs). Never decoded/encoded here beyond
-    recording which scheme a chunk claims — the server treats chunk payload
+    recording which scheme a chunk claims - the server treats chunk payload
     bytes as opaque regardless of scheme.
 
 const (
@@ -107,7 +107,7 @@ func DeriveFooter(r interface {
 }) (footer FooterV1, computedHash merklehash.Hash, err error)
     DeriveFooter independently reconstructs a xorb's V1 footer and content
     hash by scanning r's chunk headers (via ScanChunks) and decompressing each
-    chunk's payload (via DecompressChunkPayload) — the same reconstruction real
+    chunk's payload (via DecompressChunkPayload) - the same reconstruction real
     hf_xet clients rely on the server side to perform, since a real upload never
     includes a footer at all ("XORBs are sent without footer - the server/client
     reconstructs it from chunk data", per xet-core's file_upload_session.rs).

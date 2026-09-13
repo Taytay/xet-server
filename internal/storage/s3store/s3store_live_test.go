@@ -44,7 +44,7 @@ func TestAgainstLiveMinIO(t *testing.T) {
 		t.Fatalf("Put() error = %v", err)
 	}
 	if !written {
-		t.Log("Put() reported written=false (object may already exist from a prior run) — continuing")
+		t.Log("Put() reported written=false (object may already exist from a prior run) - continuing")
 	}
 
 	has, err = s.Has(ctx, key)

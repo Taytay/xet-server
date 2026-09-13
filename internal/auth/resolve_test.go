@@ -6,7 +6,7 @@ package auth
 // convention on top of.
 //
 // Every token string below (e.g. "test-fixture-token-not-a-real-secret") is
-// a hardcoded test fixture with no relation to any real credential —
+// a hardcoded test fixture with no relation to any real credential -
 // flagged explicitly so static-analysis secret scanners don't need to
 // guess.
 

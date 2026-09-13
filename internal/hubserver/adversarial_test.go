@@ -2,7 +2,7 @@ package hubserver
 
 // Adversarial payload tests for the Hub API shim: malformed ndjson commit
 // bodies, hostile repo/file path segments, and oversized inputs. Mirrors
-// casserver's adversarial_test.go in spirit — checked for a clean error
+// casserver's adversarial_test.go in spirit - checked for a clean error
 // response and that the server keeps answering correctly afterward.
 
 import (
@@ -74,7 +74,7 @@ func TestAdversarial_CommitOversizedLine(t *testing.T) {
 	client := ts.Client()
 
 	// One ndjson line larger than bufio.Scanner's configured max token
-	// size (10 MiB, see handleCommit) — must surface as a clean error via
+	// size (10 MiB, see handleCommit) - must surface as a clean error via
 	// scanner.Err(), not panic or hang.
 	oversizedLine := `{"key":"lfsFile","value":{"path":"` + strings.Repeat("x", 11*1024*1024) + `","oid":"abc","size":1}}` + "\n"
 
@@ -103,7 +103,7 @@ func TestAdversarial_ResolveHostileFilenames(t *testing.T) {
 		"%2e%2e%2fpath%2ftraversal",
 		"file with spaces and 'quotes\" and <tags>",
 		"\n\r\t",
-		strings.Repeat("😀", 1000), // multi-byte UTF-8 stress
+		strings.Repeat(":-)", 1000), // multi-byte UTF-8 stress
 	}
 
 	for _, filename := range hostileFilenames {

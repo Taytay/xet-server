@@ -1,13 +1,13 @@
 package main
 
 // Unit tests for newClient's -auth-token/$XET_AUTH_TOKEN/$HF_TOKEN
-// precedence rule — mirrors cmd/xetd's resolveSecretFlag tests, but on the
+// precedence rule - mirrors cmd/xetd's resolveSecretFlag tests, but on the
 // client side, and with the additional $HF_TOKEN fallback (the same
 // variable the real `hf` CLI reads) so pointing xet at an HF_TOKEN already
 // exported for `hf` "just works" without a separate credential.
 //
 // Every token string below (e.g. "test-fixture-token-not-a-real-secret") is
-// a hardcoded test fixture with no relation to any real credential —
+// a hardcoded test fixture with no relation to any real credential -
 // flagged explicitly so static-analysis secret scanners don't need to
 // guess.
 
@@ -78,7 +78,7 @@ func TestNewClient_NoFlagNoEnvSendsNoCredential(t *testing.T) {
 }
 
 // resolveServerFixtureURL and resolveServerEnvFixtureURL are hardcoded
-// test values with no relation to any real server — plain example.invalid
+// test values with no relation to any real server - plain example.invalid
 // URLs, not credentials, so no "not a real secret" labeling is needed
 // here, unlike the token fixtures above.
 const (

@@ -1,0 +1,170 @@
+name: Build and Release Go Binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Mermaid CLI (mmdc)
+        run: |
+          bun add -g @mermaid-js/mermaid-cli
+          bunx puppeteer browsers install chrome-headless-shell
+          mmdc --version
+
+      - name: Build docs (HTML)
+        run: make docs
+
+      - name: Rename docs output to docs/html
+        run: mv docs/build docs/html
+
+      - name: Upload docs (HTML)
+        uses: actions/upload-artifact@v4
+        with:
+          name: xet-server-${{ github.ref_name }}-docs
+          path: docs/html
+
+  build:
+    needs: docs
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - linux-amd64
+          - linux-arm64
+          - linux-riscv64
+          - linux-arm
+          - linux-386
+          - linux-ppc64le
+          - linux-s390x
+          - windows-amd64
+          - windows-arm64
+          - windows-386
+          - darwin-amd64
+          - darwin-arm64
+          - freebsd-amd64
+          - freebsd-arm64
+          - freebsd-arm
+          - freebsd-386
+          - openbsd-amd64
+          - openbsd-arm64
+          - openbsd-arm
+          - openbsd-386
+          - netbsd-amd64
+          - netbsd-arm64
+          - netbsd-arm
+          - netbsd-386
+          - solaris-amd64
+          - dragonfly-amd64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Install UPX
+        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+
+      - name: Tidy dependencies
+        run: |
+          go mod tidy
+
+      - name: Download docs (HTML)
+        uses: actions/download-artifact@v4
+        with:
+          name: xet-server-${{ github.ref_name }}-docs
+          path: docs/html
+
+      - name: Parse platform
+        id: parse
+        run: |
+          echo "os=$(echo ${{ matrix.platform }} | awk -F'-' '{print $1}')" >> $GITHUB_OUTPUT
+          echo "arch=$(echo ${{ matrix.platform }} | awk -F'-' '{print $2}')" >> $GITHUB_OUTPUT
+          echo "exe=$([[ ${{ matrix.platform }} == windows* ]] && echo .exe || echo '')" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        run: |
+          mkdir -p staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}
+          CGO_ENABLED=0 GOOS=${{ steps.parse.outputs.os }} GOARCH=${{ steps.parse.outputs.arch }} \
+            go build -ldflags "-s -w" -o staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}/xetd${{ steps.parse.outputs.exe }} ./cmd/xetd
+          CGO_ENABLED=0 GOOS=${{ steps.parse.outputs.os }} GOARCH=${{ steps.parse.outputs.arch }} \
+            go build -ldflags "-s -w" -o staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}/xet-proxyd${{ steps.parse.outputs.exe }} ./cmd/xet-proxyd
+          CGO_ENABLED=0 GOOS=${{ steps.parse.outputs.os }} GOARCH=${{ steps.parse.outputs.arch }} \
+            go build -ldflags "-s -w" -o staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}/xet${{ steps.parse.outputs.exe }} ./cmd/xet
+
+      - name: Compress binaries with UPX
+        run: |
+          if [[ "${{ matrix.platform }}" != *"riscv64"* && "${{ matrix.platform }}" != *"ppc64le"* && "${{ matrix.platform }}" != *"s390x"* ]]; then
+            upx --best staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}/xetd${{ steps.parse.outputs.exe }} || true
+            upx --best staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}/xet-proxyd${{ steps.parse.outputs.exe }} || true
+            upx --best staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}/xet${{ steps.parse.outputs.exe }} || true
+          fi
+
+      - name: Stage docs and README
+        run: |
+          cd staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}
+          cp ../../README.md ../../CHANGELOG.md ../../LICENSE.md ../../CONTRIBUTING.md .
+          mkdir -p docs
+          cp ../../docs/*.md docs/
+          cp -r ../../docs/html docs/html
+          echo "${{ github.ref_name }}" > VERSION
+
+      - name: Run tests
+        if: matrix.platform == 'linux-amd64'
+        run: |
+          go test ./...
+
+      - name: Upload staged directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: xet-server-${{ github.ref_name }}-${{ matrix.platform }}
+          path: staging/xet-server-${{ github.ref_name }}-${{ matrix.platform }}
+
+  release:
+    needs: [docs, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download staged directories
+        uses: actions/download-artifact@v4
+        with:
+          pattern: xet-server-*-*-*
+          path: dist-staging
+
+      - name: Create zips and checksums
+        run: |
+          mkdir -p dist
+          cd dist-staging
+          for d in xet-server-*/; do
+            d="${d%/}"
+            zip -r "../dist/${d}.zip" "$d"
+          done
+          cd ../dist
+          sha256sum *.zip > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

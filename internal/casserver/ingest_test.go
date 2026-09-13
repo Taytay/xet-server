@@ -2,11 +2,11 @@ package casserver
 
 // Tests for the exported ingestion methods (IngestXorb, IngestShard,
 // IngestFileRecon) and their read-accessor counterparts (HasXorbFooter,
-// HasXorbBytes, HasFileRecon) — the API surface a caller embedding this
+// HasXorbBytes, HasFileRecon) - the API surface a caller embedding this
 // Server as a caching layer (internal/proxycas, internal/proxyhub) uses
 // instead of reimplementing upload-validation/indexing logic
 // independently. Driven directly against the exported methods, not
-// through HTTP — internal/casserver's existing handler-level tests
+// through HTTP - internal/casserver's existing handler-level tests
 // (casserver_test.go) already cover the HTTP boundary these methods sit
 // behind.
 
@@ -15,8 +15,8 @@ import (
 	"context"
 	"testing"
 
-	"xet-server/internal/merklehash"
-	"xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/shardformat"
 )
 
 func hashFromByte(b byte) merklehash.Hash {

@@ -1,7 +1,7 @@
-# `xet-server/internal/chunk`
+# `github.com/guilt/xet-server/internal/chunk`
 
 ```
-package chunk // import "xet-server/internal/chunk"
+package chunk // import "github.com/guilt/xet-server/internal/chunk"
 
 Package chunk implements content-defined chunking (CDC) using a gear-hash
 rolling hash, in the same spirit as HF Xet's chunker: chunk boundaries are

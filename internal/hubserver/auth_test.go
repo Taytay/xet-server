@@ -1,12 +1,12 @@
 package hubserver
 
 // Auth wiring tests: scope enforcement per route, backward compatibility (a
-// Server constructed the old way — no SetAuthenticator call — must behave
+// Server constructed the old way - no SetAuthenticator call - must behave
 // identically to before v0.8.0), and adversarial Authorization headers.
 // Mirrors internal/casserver/auth_test.go's structure and conventions.
 //
 // Every token string below (e.g. "test-fixture-token-not-a-real-secret") is
-// a hardcoded test fixture with no relation to any real credential —
+// a hardcoded test fixture with no relation to any real credential -
 // flagged explicitly so static-analysis secret scanners don't need to
 // guess.
 
@@ -18,12 +18,12 @@ import (
 	"strings"
 	"testing"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // testFixtureToken is the shared-secret value every test in this file
-// configures StaticTokenAuth with. Not a real credential of any kind — just
+// configures StaticTokenAuth with. Not a real credential of any kind - just
 // a fixed string two test helpers need to agree on.
 const testFixtureToken = "test-fixture-token-not-a-real-secret"
 
@@ -42,7 +42,7 @@ func newAuthTestServer(t *testing.T, token string) (*httptest.Server, *fakeCAS) 
 // doWithAuth sends method/url with bearerHeader as the raw Authorization
 // header value (skipped entirely if empty). Returns ok=false if net/http's
 // own client rejected the header before ever sending the request (e.g. a
-// value containing a raw control character or CRLF) — callers should treat
+// value containing a raw control character or CRLF) - callers should treat
 // that as an acceptable outcome for adversarial input, the same as a clean
 // 401 from the server, since either way the malformed credential never
 // reached (or succeeded against) the server.
@@ -361,7 +361,7 @@ func TestAuth_AdversarialAuthorizationHeaders(t *testing.T) {
 			resp, ok := doWithAuth(t, http.MethodGet, ts.URL+"/api/models/alice/my-model/xet-read-token/main", tc.header, nil)
 			if !ok {
 				// net/http's client refused to even send this header (a raw
-				// control character or CRLF) — the malformed credential
+				// control character or CRLF) - the malformed credential
 				// never reached the server, which is just as good as the
 				// server rejecting it itself.
 				return

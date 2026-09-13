@@ -1,18 +1,18 @@
 // Package reconwire defines the wire types and response-building logic
-// for GET /v1|v2/reconstructions/{file_id} — extracted out of
+// for GET /v1|v2/reconstructions/{file_id} - extracted out of
 // internal/casserver so the clipping/grouping logic behind both
 // endpoints has a single, independently-tested home. casserver's own
 // handlers still do the clipping (calling BuildV1/BuildV2 directly);
 // internal/proxycas only consumes the wire types (ResponseV1) to decode
 // an upstream reconstruction response before feeding its terms into
-// casserver.Server.IngestFileRecon — casserver's own delegation then
+// casserver.Server.IngestFileRecon - casserver's own delegation then
 // runs the same BuildV1/BuildV2 logic over that ingested data. Because
 // entries reaching BuildV1/BuildV2 by that path originated from an
 // untrusted upstream response, physicalRange bounds-checks every
 // chunk-index field it uses to index a footer's slices rather than
 // trusting entries to already be internally consistent.
 //
-// This package has no notion of "where entries come from" — callers
+// This package has no notion of "where entries come from" - callers
 // supply the file's entries and a FooterLookup callback (each server's
 // own xorbFooters index has a different concrete type/locking strategy),
 // keeping this package a pure function of its inputs.
@@ -21,9 +21,9 @@ package reconwire
 import (
 	"fmt"
 
-	"xet-server/internal/merklehash"
-	"xet-server/internal/shardformat"
-	"xet-server/internal/xorbformat"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/xorbformat"
 )
 
 // IndexRange mirrors xet-core's wire shape for a chunk-index range:
@@ -65,7 +65,7 @@ type ResponseV1 struct {
 }
 
 // XorbRangeDescriptor is one chunk-range/byte-range pair within a
-// XorbMultiRangeFetch — xet-core's XorbRangeDescriptor. Chunks uses
+// XorbMultiRangeFetch - xet-core's XorbRangeDescriptor. Chunks uses
 // exclusive end (matching IndexRange elsewhere); Bytes uses inclusive
 // end (matching ByteRange elsewhere).
 type XorbRangeDescriptor struct {
@@ -74,7 +74,7 @@ type XorbRangeDescriptor struct {
 }
 
 // XorbMultiRangeFetch is a single fetch URL covering possibly multiple
-// disjoint chunk ranges for one xorb — xet-core's XorbMultiRangeFetch.
+// disjoint chunk ranges for one xorb - xet-core's XorbMultiRangeFetch.
 type XorbMultiRangeFetch struct {
 	URL    string                `json:"url"`
 	Ranges []XorbRangeDescriptor `json:"ranges"`
@@ -83,7 +83,7 @@ type XorbMultiRangeFetch struct {
 // ResponseV2 is GET /v2/reconstructions/{file_id}'s response body: same
 // Terms/OffsetIntoFirstRange as V1, but Xorbs groups every chunk/byte
 // range touched for a given xorb hash under that hash's key, each range
-// paired with a fetch URL — the "multi-range" optimization the V2
+// paired with a fetch URL - the "multi-range" optimization the V2
 // endpoint exists for.
 type ResponseV2 struct {
 	OffsetIntoFirstRange int64                            `json:"offset_into_first_range"`
@@ -92,25 +92,25 @@ type ResponseV2 struct {
 }
 
 // FooterLookup resolves a xorb hash to its known V1 footer, or ok=false
-// if this server has no footer for it yet — the one piece of state
+// if this server has no footer for it yet - the one piece of state
 // BuildV1/BuildV2 need that isn't already in entries. The sole caller is
 // casserver.Server (its own xorbFooters index); proxycas.Server never
-// calls BuildV1/BuildV2 directly — it embeds a real casserver.Server and
+// calls BuildV1/BuildV2 directly - it embeds a real casserver.Server and
 // delegates reconstruction serving to it (see internal/proxycas's
 // package doc comment).
 type FooterLookup func(hash merklehash.Hash) (footer xorbformat.FooterV1, ok bool)
 
 // FetchURLBuilder returns the URL a client should fetch hash's bytes
-// from — casserver may hand out a presigned storage URL or its own
+// from - casserver may hand out a presigned storage URL or its own
 // byte-serving endpoint. The sole caller is casserver.Server; proxycas
-// never constructs one of its own (see FooterLookup's doc comment) — it
+// never constructs one of its own (see FooterLookup's doc comment) - it
 // gets casserver's own byte-serving endpoint for free by delegating to
 // its embedded Server, which is exactly the URL a caching proxy needs
 // anyway (relaying a real presigned URL would bypass its cache).
 type FetchURLBuilder func(hash merklehash.Hash) (string, error)
 
 // ErrUnknownXorbFooter is returned (wrapped) by BuildV1/BuildV2 when
-// entries references a xorb this server has no footer for — the
+// entries references a xorb this server has no footer for - the
 // server-side fault casserver surfaces as a 500 (a shard referenced a
 // xorb whose upload session never completed). proxycas never sees this
 // error directly: it only reaches BuildV1/BuildV2 indirectly, through
@@ -125,7 +125,7 @@ func (e *ErrUnknownXorbFooter) Error() string {
 // an entry's ChunkIndexStart/ChunkIndexEnd falls outside its xorb's own
 // footer's chunk count. entries can originate from an untrusted upstream
 // reconstruction response (internal/proxycas ingests one into
-// casserver.Server.IngestFileRecon without independently re-deriving it —
+// casserver.Server.IngestFileRecon without independently re-deriving it -
 // see this package's doc comment), so this is a real, reachable input
 // validation failure, not just defensive programming: without this
 // check, a malformed or hostile upstream response would index a slice
@@ -142,7 +142,7 @@ func (e *ErrChunkIndexOutOfRange) Error() string {
 }
 
 // physicalRange computes the physical (compressed+header) byte range
-// e's chunk-index range occupies within footer — see
+// e's chunk-index range occupies within footer - see
 // ErrChunkIndexOutOfRange's doc comment for why e's fields are
 // validated against footer's actual chunk count rather than trusted.
 func physicalRange(footer xorbformat.FooterV1, e shardformat.FileDataSequenceEntry) (start, end int64, err error) {
@@ -163,7 +163,7 @@ func physicalRange(footer xorbformat.FooterV1, e shardformat.FileDataSequenceEnt
 	return start, end, nil
 }
 
-// FileSize returns entries' total logical (uncompressed) byte length —
+// FileSize returns entries' total logical (uncompressed) byte length -
 // the file's full size, used both to clip a requested range and (by
 // callers) to decide whether a cached fileRecon entry can serve a whole
 // downstream request without an upstream call.
@@ -179,7 +179,7 @@ func FileSize(entries []shardformat.FileDataSequenceEntry) int64 {
 // (inclusive) exactly as BuildV1/BuildV2 both need: skipping any term
 // entirely outside the window, computing offsetIntoFirstRange from the
 // first term actually kept, resolving each kept term's footer + physical
-// byte range, and appending the term common to both response shapes —
+// byte range, and appending the term common to both response shapes -
 // visit then handles the one part that actually differs between V1
 // (one FetchInfoEntry per term) and V2 (grouped multi-range fetches per
 // xorb).
@@ -229,7 +229,7 @@ func forEachClippedTerm(
 }
 
 // BuildV1 clips entries to [rangeStart, rangeEnd] (inclusive) and builds
-// the V1 response — the exact logic casserver.handleReconstructionV1's
+// the V1 response - the exact logic casserver.handleReconstructionV1's
 // loop used to contain inline.
 func BuildV1(entries []shardformat.FileDataSequenceEntry, rangeStart, rangeEnd int64, lookupFooter FooterLookup, fetchURL FetchURLBuilder) (ResponseV1, error) {
 	resp := ResponseV1{FetchInfo: make(map[string][]FetchInfoEntry)}
@@ -256,7 +256,7 @@ func BuildV1(entries []shardformat.FileDataSequenceEntry, rangeStart, rangeEnd i
 
 // BuildV2 is BuildV1's V2 counterpart: same clipping, grouped by xorb
 // hash with multiple ranges per fetch URL instead of V1's one entry per
-// term — the exact logic casserver.handleReconstructionV2's loop used to
+// term - the exact logic casserver.handleReconstructionV2's loop used to
 // contain inline.
 func BuildV2(entries []shardformat.FileDataSequenceEntry, rangeStart, rangeEnd int64, lookupFooter FooterLookup, fetchURL FetchURLBuilder) (ResponseV2, error) {
 	resp := ResponseV2{Xorbs: make(map[string][]XorbMultiRangeFetch)}

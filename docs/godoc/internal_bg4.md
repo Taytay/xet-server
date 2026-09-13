@@ -1,7 +1,7 @@
-# `xet-server/internal/bg4`
+# `github.com/guilt/xet-server/internal/bg4`
 
 ```
-package bg4 // import "xet-server/internal/bg4"
+package bg4 // import "github.com/guilt/xet-server/internal/bg4"
 
 Package bg4 implements the "ByteGrouping4" transform xet-core applies before
 LZ4 compression for the ByteGrouping4LZ4 chunk compression scheme: bytes are
@@ -13,7 +13,7 @@ bytes directly.
 Ported from the public reference implementation's algorithm and cross-checked
 against its own published test vector (github.com/ jedisct1/zig-xet,
 src/compression.zig: applyByteGrouping / reverseByteGrouping), since xet-core's
-own Rust source was not read for this transform — only its existence and name
+own Rust source was not read for this transform - only its existence and name
 (compression_scheme.rs) were confirmed there.
 
 FUNCTIONS

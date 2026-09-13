@@ -81,7 +81,7 @@ if XET_AUTH_TOKEN= HF_TOKEN= "$XET" pull -server "$SERVER_URL" -out "$WORKDIR/sh
 fi
 echo "pull with no token correctly failed"
 
-# Correct token via $XET_AUTH_TOKEN (not the flag) must succeed — proves the
+# Correct token via $XET_AUTH_TOKEN (not the flag) must succeed - proves the
 # client-side environment-variable fallback works end-to-end, not just the
 # flag path already exercised by the push above.
 XET_AUTH_TOKEN="$AUTH_TOKEN" HF_TOKEN= "$XET" pull -server "$SERVER_URL" -out "$WORKDIR/restored.bin" "$fileId"

@@ -13,15 +13,15 @@ import (
 	"sync"
 	"testing"
 
-	"xet-server/internal/merklehash"
-	"xet-server/internal/ratelimit"
-	"xet-server/internal/shardformat"
-	"xet-server/internal/storage/fsstore"
-	"xet-server/internal/xorbformat"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/ratelimit"
+	"github.com/guilt/xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/xorbformat"
 )
 
 // buildXorb chunks payloads into an uncompressed xorb blob with NO footer
-// (mirroring a real client's actual wire upload — see the comment on
+// (mirroring a real client's actual wire upload - see the comment on
 // handleUploadXorb: xet-core sends xorbs without a footer and expects the
 // server to reconstruct it from chunk headers) and returns the blob, its
 // hash, and each chunk's hash.
@@ -154,8 +154,8 @@ func TestUploadXorb_RejectsMalformedBody(t *testing.T) {
 }
 
 // TestFullFileRoundtrip drives the complete real-client-shaped flow:
-// chunk → xorb → shard → upload both → GET reconstruction → GET xorb bytes
-// per term → reassemble → compare to the original file content. This is
+// chunk -> xorb -> shard -> upload both -> GET reconstruction -> GET xorb bytes
+// per term -> reassemble -> compare to the original file content. This is
 // the same sequence hf_xet performs, just constructed by hand here instead
 // of by the real client.
 func TestFullFileRoundtrip(t *testing.T) {
@@ -316,9 +316,9 @@ func TestXetHashForSHA256_UsesHexEncoding(t *testing.T) {
 	fileHash := merklehash.FileHash(chunkEntries)
 
 	// A real SHA-256 (of arbitrary content, unrelated to the xorb/chunk
-	// hashes above — this field is deliberately a different hash space).
+	// hashes above - this field is deliberately a different hash space).
 	// Real hf_xet clients write this field's wire bytes such that Hex()
-	// of those bytes equals the plain SHA-256's normal hex string — build
+	// of those bytes equals the plain SHA-256's normal hex string - build
 	// it the same way via FromHex, rather than a raw byte copy, to mirror
 	// what actually appears on the wire.
 	plainSHA256 := sha256.Sum256([]byte("plain sha256 of the uploaded file"))
@@ -408,7 +408,7 @@ func TestReconstructionV2_UnknownFileReturns404(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 (file does not exist — per spec, this is also the client's cue to fall back to V1 if it were probing for V2 support, though this server does support V2)", resp.StatusCode)
+		t.Errorf("status = %d, want 404 (file does not exist - per spec, this is also the client's cue to fall back to V1 if it were probing for V2 support, though this server does support V2)", resp.StatusCode)
 	}
 }
 
@@ -607,7 +607,7 @@ func TestChunkDedup_KnownChunkReturnsShardBytes(t *testing.T) {
 	}
 
 	// Querying dedup info for a chunk this shard's xorb-info section
-	// referenced must return that shard's raw bytes verbatim — the real
+	// referenced must return that shard's raw bytes verbatim - the real
 	// wire contract (client parses the returned shard itself).
 	dedupResp, err := http.Get(ts.URL + "/v1/chunks/default-merkledb/" + chunkHashes[0].Hex())
 	if err != nil {
@@ -700,7 +700,7 @@ func TestUploadXorb_RealHFXetCapture(t *testing.T) {
 // files by re-requesting /v1/reconstructions/{file_id} with successively
 // higher Range windows, and treats a Range whose start is >= file size as
 // the signal to stop (mapped from 416 Range Not Satisfiable). Returning an
-// empty 200 there instead — this server's original bug — left the client's
+// empty 200 there instead - this server's original bug - left the client's
 // sequential writer stuck waiting for a term that would never arrive.
 func TestReconstruction_RangePastEOFReturns416(t *testing.T) {
 	ts, _ := newTestServer(t)
@@ -766,7 +766,7 @@ func TestReconstruction_RangePastEOFReturns416(t *testing.T) {
 }
 
 // TestEvictionCandidates_ExcludesInFlightFetch confirms a xorb currently
-// being fetched never appears in EvictionCandidates — an eviction.Sweeper
+// being fetched never appears in EvictionCandidates - an eviction.Sweeper
 // consulting this mid-fetch must not be told it's safe to delete a blob a
 // client is actively reading.
 func TestEvictionCandidates_ExcludesInFlightFetch(t *testing.T) {
@@ -935,7 +935,7 @@ func TestUploadRateLimit_ConcurrentRequestsFromOneSourceGet429sOnceOverBudget(t 
 
 // TestUploadRateLimit_DoesNotAffectFetchOrReconstructionEndpoints confirms
 // the limiter only gates the two upload endpoints (the expensive
-// decompression/hashing paths), not fetch/reconstruction reads — an
+// decompression/hashing paths), not fetch/reconstruction reads - an
 // upload burst should never make an unrelated download start 429ing.
 func TestUploadRateLimit_DoesNotAffectFetchOrReconstructionEndpoints(t *testing.T) {
 	const burst = 1
@@ -960,7 +960,7 @@ func TestUploadRateLimit_DoesNotAffectFetchOrReconstructionEndpoints(t *testing.
 		}
 		getResp.Body.Close()
 		if getResp.StatusCode != http.StatusOK {
-			t.Errorf("GET xorb (iteration %d) status = %d, want 200 — fetch must not be rate-limited", i, getResp.StatusCode)
+			t.Errorf("GET xorb (iteration %d) status = %d, want 200 - fetch must not be rate-limited", i, getResp.StatusCode)
 		}
 	}
 }

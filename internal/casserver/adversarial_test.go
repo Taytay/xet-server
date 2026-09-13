@@ -6,7 +6,7 @@ package casserver
 // server in a state where a subsequent good request fails). This
 // complements the fuzz tests in fuzz_test.go/xorbformat/shardformat's own
 // fuzz_test.go, which exercise the parsers directly without HTTP in the
-// loop — these tests exercise the full request-handling path (routing,
+// loop - these tests exercise the full request-handling path (routing,
 // size caps, body streaming) that fuzzing the parsers alone doesn't touch.
 
 import (
@@ -18,13 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"xet-server/internal/merklehash"
-	"xet-server/internal/shardformat"
-	"xet-server/internal/xorbformat"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/xorbformat"
 )
 
 // assertServerStillHealthy performs a trivial valid request and fails the
-// test if the server doesn't answer correctly — the actual point of every
+// test if the server doesn't answer correctly - the actual point of every
 // adversarial test below, not just "did this one request 4xx."
 func assertServerStillHealthy(t *testing.T, ts *http.Client, baseURL string) {
 	t.Helper()
@@ -112,7 +112,7 @@ func TestAdversarial_UploadXorb(t *testing.T) {
 			resp, err := client.Post(ts.URL+"/v1/xorbs/"+tc.urlSuffix, "application/octet-stream", bytes.NewReader(tc.body))
 			if err != nil {
 				// A transport-level error (e.g. the URL itself was invalid
-				// for net/http to even send) is acceptable — the server
+				// for net/http to even send) is acceptable - the server
 				// was never reached, so it can't have misbehaved.
 				return
 			}
@@ -129,7 +129,7 @@ func TestAdversarial_UploadXorb(t *testing.T) {
 
 // buildHugeClaimChunkHeader builds a xorb body containing exactly one
 // chunk header claiming a near-maximum 24-bit CompressedLength (the wire
-// field's actual size limit — see xorbformat.ChunkHeader's doc comment),
+// field's actual size limit - see xorbformat.ChunkHeader's doc comment),
 // with zero payload bytes following. handleUploadXorb must reject this
 // via a read/seek failure while scanning, not attempt to honor the claim.
 func buildHugeClaimChunkHeader() []byte {
@@ -210,7 +210,7 @@ func TestAdversarial_UploadShard(t *testing.T) {
 
 // buildMaliciousShardNumEntries mirrors the exact payload shape of the
 // fixed allocation-size DoS (see shardformat/dos_test.go), submitted here
-// through the real HTTP handler rather than calling ReadShard directly —
+// through the real HTTP handler rather than calling ReadShard directly -
 // confirming handleUploadShard's whole request path stays safe, not just
 // the parser in isolation.
 func buildMaliciousShardNumEntries() []byte {
@@ -235,7 +235,7 @@ func buildMaliciousShardXorbNumEntries() []byte {
 }
 
 // buildTruncatedValidShard builds a structurally valid shard via
-// WriteShard and then chops it in half — a common real-world corruption
+// WriteShard and then chops it in half - a common real-world corruption
 // shape (a client's connection dropped mid-upload), distinct from a
 // deliberately hostile payload.
 func buildTruncatedValidShard(t *testing.T) []byte {
@@ -257,7 +257,7 @@ func TestAdversarial_MalformedRangeHeaders(t *testing.T) {
 	client := ts.Client()
 
 	// Upload one real xorb so there's something valid to request a range
-	// against — the point here is exercising the Range-parsing path with
+	// against - the point here is exercising the Range-parsing path with
 	// bad headers, not testing upload itself.
 	blob, xorbHash, _ := buildXorb(t, [][]byte{[]byte("range test content, long enough to slice")})
 	uploadResp, err := client.Post(ts.URL+"/v1/xorbs/default/"+xorbHash.Hex(), "application/octet-stream", bytes.NewReader(blob))
@@ -274,7 +274,7 @@ func TestAdversarial_MalformedRangeHeaders(t *testing.T) {
 		"bytes=-1--1",
 		"bytes=99999999999999999999999999999-",
 		"bytes=100-50", // reversed
-		"BYTES=0-10",   // wrong case — real Range headers are case-sensitive per RFC
+		"BYTES=0-10",   // wrong case - real Range headers are case-sensitive per RFC
 		"items=0-10",   // wrong unit
 		strings.Repeat("bytes=0-1,", 1000) + "bytes=0-1", // absurdly long multi-range
 	}
@@ -296,7 +296,7 @@ func TestAdversarial_MalformedRangeHeaders(t *testing.T) {
 			defer resp.Body.Close()
 			io.Copy(io.Discard, resp.Body)
 			// Either "ignored, serve full content" (200) or "rejected"
-			// (416) are acceptable — what's NOT acceptable is a 500 or a
+			// (416) are acceptable - what's NOT acceptable is a 500 or a
 			// hang, which would indicate parseByteRange let something
 			// malformed slip through to code that assumes valid input.
 			if resp.StatusCode == http.StatusInternalServerError {
@@ -350,7 +350,7 @@ func TestAdversarial_ConcurrentUploadsOfSameXorb(t *testing.T) {
 	defer getResp.Body.Close()
 	got, _ := io.ReadAll(getResp.Body)
 	if !bytes.Equal(got, blob) {
-		t.Error("stored xorb bytes differ from upload after concurrent duplicate uploads — possible corruption from the race")
+		t.Error("stored xorb bytes differ from upload after concurrent duplicate uploads - possible corruption from the race")
 	}
 
 	assertServerStillHealthy(t, client, ts.URL)
@@ -370,7 +370,7 @@ func TestAdversarial_ContentLengthMismatch(t *testing.T) {
 	// Claim a Content-Length far larger than the actual body; net/http's
 	// client will send this as stated, and the server's body-reading loop
 	// must not hang waiting for bytes that will never arrive (io.Copy off
-	// a real net.Conn just blocks until EOF/timeout — the meaningful
+	// a real net.Conn just blocks until EOF/timeout - the meaningful
 	// assertion here is that the request eventually completes/errors
 	// rather than the test itself timing out).
 	req.ContentLength = int64(len(body)) * 1000
@@ -380,7 +380,7 @@ func TestAdversarial_ContentLengthMismatch(t *testing.T) {
 	resp, err := client2.Do(req)
 	if err != nil {
 		// A client-side error (e.g. the transport refusing to send a
-		// mismatched Content-Length) is an acceptable outcome — the
+		// mismatched Content-Length) is an acceptable outcome - the
 		// server was never given a chance to misbehave.
 		return
 	}
@@ -393,13 +393,13 @@ func TestAdversarial_ContentLengthMismatch(t *testing.T) {
 // TestAdversarial_UploadXorb_LZ4AmplificationBomb posts a xorb whose one
 // chunk declares CompressionLZ4 and carries an LZ4 frame engineered to
 // decompress to hundreds of times its compressed size (a match-length
-// extension bomb — see internal/lz4/dos_test.go for the full story of the
+// extension bomb - see internal/lz4/dos_test.go for the full story of the
 // real, confirmed DoS this is a regression test for). The compressed
 // payload here is small (a few KB) specifically so this test itself stays
 // fast; internal/lz4's own dos_test.go carries the full ~16 MiB
 // real-world-shaped payload as a timed regression test. The point here is
-// confirming the *whole request path* — chunk header parsing through
-// decompressChunkPayload — rejects this quickly via the real HTTP
+// confirming the *whole request path* - chunk header parsing through
+// decompressChunkPayload - rejects this quickly via the real HTTP
 // endpoint, not just the lz4 package in isolation.
 func TestAdversarial_UploadXorb_LZ4AmplificationBomb(t *testing.T) {
 	ts, _ := newTestServer(t)

@@ -10,7 +10,7 @@ import (
 // bearer token, set at construction, grants full access (every scope) to
 // any request presenting it; any other token, or none, fails with
 // ErrUnauthenticated. This deliberately does not distinguish per-user
-// identity or partial scopes — it's a single gate for the whole server,
+// identity or partial scopes - it's a single gate for the whole server,
 // matching how this project's -auth-token flag is meant to be used (an
 // operator-chosen shared secret, not a multi-tenant credential system).
 // A deployment that needs real per-user scopes should implement its own
@@ -22,7 +22,7 @@ type StaticTokenAuth struct {
 }
 
 // NewStaticTokenAuth constructs a StaticTokenAuth requiring exactly
-// token. token must be non-empty — constructing this with an empty
+// token. token must be non-empty - constructing this with an empty
 // string would make every bearer-auth request (even one presenting an
 // empty token, which some malformed clients do) succeed, defeating the
 // point; use NoAuth{} directly if no enforcement is wanted.
@@ -49,7 +49,7 @@ func (a *StaticTokenAuth) Authenticate(r *http.Request) (Principal, error) {
 // bearerToken extracts the token from an "Authorization: Bearer <token>"
 // header, or "" if the header is absent or not in that exact form (case-
 // insensitive on the "Bearer" scheme name per RFC 6750, but nothing else
-// about the header is normalized — a token with leading/trailing
+// about the header is normalized - a token with leading/trailing
 // whitespace inside the header value is passed through as-is, matching
 // how a real HTTP client would send it).
 func bearerToken(r *http.Request) string {

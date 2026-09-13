@@ -4,7 +4,7 @@ package proxycas
 // its embedded *casserver.Server, fetch-and-ingest on a miss, and stay
 // fully offline-capable once cached? casserver's own test suite already
 // covers byte-range serving, reconstruction-response shape, footer/shard
-// indexing, and snapshotting in depth — these tests deliberately don't
+// indexing, and snapshotting in depth - these tests deliberately don't
 // re-verify any of that, only that THIS package's delegation logic is
 // correct.
 
@@ -16,12 +16,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"xet-server/internal/auth"
-	"xet-server/internal/hfclient"
-	"xet-server/internal/merklehash"
-	"xet-server/internal/reconwire"
-	"xet-server/internal/storage/fsstore"
-	"xet-server/internal/xorbformat"
+	"github.com/guilt/xet-server/internal/auth"
+	"github.com/guilt/xet-server/internal/hfclient"
+	"github.com/guilt/xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/reconwire"
+	"github.com/guilt/xet-server/internal/storage/fsstore"
+	"github.com/guilt/xet-server/internal/xorbformat"
 )
 
 func hashFromByte(b byte) merklehash.Hash {
@@ -34,7 +34,7 @@ func hashFromByte(b byte) merklehash.Hash {
 }
 
 // buildFooterlessXorb serializes payloads as consecutive uncompressed
-// chunks with no trailing footer — the real upload/download wire format,
+// chunks with no trailing footer - the real upload/download wire format,
 // and the shape this package's fetch-and-ingest path must be able to
 // hand to casserver.IngestXorb.
 func buildFooterlessXorb(t *testing.T, payloads [][]byte) (blob []byte, xorbHash merklehash.Hash) {
@@ -236,7 +236,7 @@ func TestFetchXorb_UpstreamForbiddenRelaysRealStatusNot502(t *testing.T) {
 	// Regression test: a 401/403 from the real upstream (the caller's own
 	// credential rejected) must relay as-is, matching
 	// proxyhub.writeUpstreamError's identical policy for the same class
-	// of failure — collapsing it to a blanket 502 would tell the caller
+	// of failure - collapsing it to a blanket 502 would tell the caller
 	// "the proxy is broken" when the real problem is "your token is bad."
 	casTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -295,7 +295,7 @@ func TestHeadXorb_UnknownHashReturns404(t *testing.T) {
 
 func TestHeadXorb_WrongPrefixReturns400(t *testing.T) {
 	// Regression test: handleHeadXorb must validate the prefix path
-	// segment same as handleFetchXorb does — a mismatched prefix must
+	// segment same as handleFetchXorb does - a mismatched prefix must
 	// never even reach ensureXorbCached (which hardcodes xorbPrefix
 	// itself), let alone trigger a real upstream fetch+ingest.
 	upstream := newFakeUpstreamCAS()
@@ -315,7 +315,7 @@ func TestHeadXorb_WrongPrefixReturns400(t *testing.T) {
 
 func TestHeadXorb_NoCacheRelaysLiveHeadNeverIngests(t *testing.T) {
 	// Regression test: handleHeadXorb must honor -no-cache exactly like
-	// handleFetchXorb does — never writing fetched bytes into the
+	// handleFetchXorb does - never writing fetched bytes into the
 	// embedded server's local storage, and never issuing a full GET to
 	// upstream just to report a size (a real upstream HEAD instead).
 	blob, xorbHash := buildFooterlessXorb(t, [][]byte{[]byte("twelve bytes")})
@@ -384,7 +384,7 @@ func TestReconstructionV2_MissFetchesAndServesLocally(t *testing.T) {
 
 	// ensureFileReconCached always fetches upstream's V1-shaped
 	// reconstruction internally regardless of which version the
-	// downstream caller requested (see its own doc comment) — so the
+	// downstream caller requested (see its own doc comment) - so the
 	// fake upstream only needs a V1 reconstruction path, even though
 	// this test drives a V2 request through the proxy.
 	upstream := newRecoUpstream(fileHash.Hex())
@@ -470,7 +470,7 @@ func TestReconstruction_MissFetchesWholeFileAndServesLocally(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if upstream.sawRangeHeader {
-		t.Error("upstream saw a Range header — reconstruction fetch must always be whole-file")
+		t.Error("upstream saw a Range header - reconstruction fetch must always be whole-file")
 	}
 	if !proxy.Embedded.HasFileRecon(fileHash) {
 		t.Error("embedded server does not have the file's reconstruction after a fetch-and-ingest")
@@ -485,7 +485,7 @@ func TestReconstruction_MissFetchesWholeFileAndServesLocally(t *testing.T) {
 		t.Fatalf("got %d fetch_info entries, want 1", len(entries))
 	}
 	// The embedded server's own reconstruction handler must have emitted
-	// a URL pointing at itself (this proxy), not the real upstream —
+	// a URL pointing at itself (this proxy), not the real upstream -
 	// this is the "for free" rewriting the package doc comment
 	// describes: casserver's own xorbFetchURL never knows about a
 	// presigned upstream URL at all.
@@ -664,12 +664,12 @@ func TestUploadShard_RelaysAndIngests(t *testing.T) {
 		t.Error("upstream did not receive the exact shard bytes sent")
 	}
 	// A malformed shard's ingest failure is swallowed (non-fatal, per
-	// the package's design) — the relay itself succeeding is what
+	// the package's design) - the relay itself succeeding is what
 	// matters here.
 }
 
 func TestAuth_DelegatesToEmbeddedServer(t *testing.T) {
-	// This package installs no auth layer of its own — SetAuthenticator
+	// This package installs no auth layer of its own - SetAuthenticator
 	// must actually reach the embedded server, which is what enforces
 	// every scope check.
 	upstream := newFakeUpstreamCAS()

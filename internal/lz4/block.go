@@ -5,7 +5,7 @@
 //
 // Written from these specifications rather than ported from any existing
 // implementation. xet-core (via the Rust lz4_flex crate's "frame" module)
-// always uses the LZ4 *frame* format on the wire, never raw blocks — so a
+// always uses the LZ4 *frame* format on the wire, never raw blocks - so a
 // CAS server that wants to independently verify chunk hashes for
 // LZ4-compressed chunks needs a frame-aware decoder, not just a block
 // decoder. Only decompression is implemented; this server never needs to

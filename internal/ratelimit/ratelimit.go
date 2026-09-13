@@ -1,6 +1,6 @@
 // Package ratelimit implements a hand-rolled per-source-IP token-bucket
 // rate limiter, used to blunt a single client hammering an expensive
-// endpoint without needing a new dependency — a token bucket is simple
+// endpoint without needing a new dependency - a token bucket is simple
 // enough to write directly and keeps the rest of this project's
 // zero-external-dependency posture for the main module.
 //
@@ -8,7 +8,7 @@
 // only its upload endpoints (uploads are the expensive local operation
 // there: chunk decompression + hashing), while proxycas.Server.
 // SetRateLimiter and proxyhub.Server.SetRateLimiter both gate EVERY
-// route — for a caching proxy, a read that misses cache costs a real
+// route - for a caching proxy, a read that misses cache costs a real
 // outbound call to the real upstream, not just a write.
 package ratelimit
 
@@ -43,7 +43,7 @@ type Limiter struct {
 	sinceGC int              // Allow calls since the last pruneStale sweep
 }
 
-// pruneEvery bounds how often Allow triggers a pruneStale sweep — a
+// pruneEvery bounds how often Allow triggers a pruneStale sweep - a
 // fixed call count rather than a background goroutine/ticker, so an
 // idle Limiter (no calls at all) costs nothing, matching bucket's own
 // lazy-refill design.
@@ -97,7 +97,7 @@ func (l *Limiter) Allow(key string) bool {
 // pruneStale removes every bucket that's been idle long enough to have
 // fully refilled (i.e. dropping it is behaviorally identical to keeping
 // it: the next Allow for that key just recreates it at full burst,
-// exactly what a fully-refilled bucket already holds) — without this, a
+// exactly what a fully-refilled bucket already holds) - without this, a
 // long-running process fielding traffic from many distinct source IPs
 // (e.g. cmd/xet-proxyd, an internet-facing proxy) would retain a bucket
 // per IP ever seen for its entire lifetime, an unbounded memory
@@ -145,7 +145,7 @@ func (l *Limiter) RetryAfterSeconds(key string) int {
 }
 
 // AllowRequest reports whether r's source IP may proceed right now
-// (consuming one token if so) — the same check Middleware applies
+// (consuming one token if so) - the same check Middleware applies
 // inline, exposed for a caller (proxyhub.Server.gate) that needs to gate
 // a request without wrapping it in an http.Handler.
 func (l *Limiter) AllowRequest(r *http.Request) bool {
@@ -153,7 +153,7 @@ func (l *Limiter) AllowRequest(r *http.Request) bool {
 }
 
 // RetryAfterSecondsForRequest is RetryAfterSeconds keyed by r's own
-// source IP — see AllowRequest's doc comment for why this exists
+// source IP - see AllowRequest's doc comment for why this exists
 // alongside Middleware.
 func (l *Limiter) RetryAfterSecondsForRequest(r *http.Request) int {
 	return l.RetryAfterSeconds(sourceIP(r))
@@ -163,7 +163,7 @@ func (l *Limiter) RetryAfterSecondsForRequest(r *http.Request) int {
 // get a 429 Too Many Requests with a Retry-After header instead of
 // reaching next. Rejections log at Debug, not Warn: a client retrying
 // after backing off is expected, well-behaved behavior under this limiter
-// — not a server-side fault worth surfacing louder (matches the 4xx-is-Debug
+// - not a server-side fault worth surfacing louder (matches the 4xx-is-Debug
 // convention used elsewhere in this codebase for client-caused responses).
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

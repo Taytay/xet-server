@@ -3,7 +3,7 @@ package shardformat
 import (
 	"io"
 
-	"xet-server/internal/merklehash"
+	"github.com/guilt/xet-server/internal/merklehash"
 )
 
 // FileEntry is one file's reconstruction sequence: a header plus its
@@ -146,11 +146,11 @@ func WriteShard(w io.Writer, files []FileEntry, xorbs []XorbEntry) (Footer, erro
 }
 
 // ReadShard parses a complete shard file from r, which must support
-// seeking. Real hf_xet clients upload a shard with its footer stripped —
+// seeking. Real hf_xet clients upload a shard with its footer stripped -
 // header.FooterSize reads as 0, and the byte stream ends right after the
 // xorb-info section's bookend header (see
 // read_shard_to_bytes_remove_footer in xet-core's
-// shard_interface/native.rs) — so this reads the two content sections
+// shard_interface/native.rs) - so this reads the two content sections
 // sequentially to EOF in that case, deriving the footer's offsets/counts
 // itself rather than trusting a footer that was never sent. If
 // header.FooterSize is nonzero (e.g. a shard this package wrote via

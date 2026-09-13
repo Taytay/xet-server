@@ -136,7 +136,7 @@ func TestStatusError_ErrorMessageOmitsErrorCodeWhenAbsent(t *testing.T) {
 
 func TestNew_ZeroValueClientUsesDefaultHTTPClient(t *testing.T) {
 	// A Client built directly (not via New) with HTTP left nil must still
-	// work — httpClient() falls back to http.DefaultClient.
+	// work - httpClient() falls back to http.DefaultClient.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(RepoInfo{ID: "a/b", SHA: "main"})
 	}))

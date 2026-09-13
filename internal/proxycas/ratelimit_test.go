@@ -1,9 +1,9 @@
 package proxycas
 
 // Tests for SetRateLimiter: does gate actually enforce it (burst
-// allowed, then 429 with Retry-After), and — since every route in this
+// allowed, then 429 with Retry-After), and - since every route in this
 // package can fall back to the embedded server's cached data on an
-// upstream failure (see the package doc comment) — does a configured
+// upstream failure (see the package doc comment) - does a configured
 // rate limiter leave that fallback path itself working for requests
 // still within budget, rather than accidentally interfering with it?
 
@@ -12,7 +12,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"xet-server/internal/ratelimit"
+	"github.com/guilt/xet-server/internal/ratelimit"
 )
 
 func TestRateLimit_BurstAllowedThenTooManyRequests(t *testing.T) {
