@@ -223,9 +223,9 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	shardBytes, known := s.shardForChunk(hash)
+	shardBytes, known := s.dedupAnswer(hash)
 	if !known && s.rescanOnMiss() {
-		shardBytes, known = s.shardForChunk(hash)
+		shardBytes, known = s.dedupAnswer(hash)
 	}
 	if !known || shardBytes == nil {
 		// !known: no uploaded shard has ever referenced this chunk.
@@ -240,17 +240,6 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(shardBytes)))
 	w.Write(shardBytes)
-}
-
-// shardForChunk returns the body of the shard indexed for chunk hash.
-func (s *Server) shardForChunk(hash merklehash.Hash) ([]byte, bool) {
-	s.chunkDedupMu.RLock()
-	defer s.chunkDedupMu.RUnlock()
-	shardHash, known := s.chunkHashToShard[hash]
-	if !known {
-		return nil, false
-	}
-	return s.shardBodies[shardHash], true
 }
 
 // handleTelemetry is a fire-and-forget ack: the real client never retries

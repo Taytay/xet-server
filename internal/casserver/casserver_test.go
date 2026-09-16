@@ -609,8 +609,11 @@ func TestChunkDedup_KnownChunkReturnsShardBytes(t *testing.T) {
 	}
 
 	// Querying dedup info for a chunk this shard's xorb-info section
-	// referenced must return that shard's raw bytes verbatim - the real
-	// wire contract (client parses the returned shard itself).
+	// referenced must return a shard the client can parse whose
+	// xorb-info describes that xorb - the real wire contract (the client
+	// parses the returned shard itself). The answer is assembled
+	// (dedupAnswer), so it is not the uploaded bytes verbatim: xorb-info
+	// only, and it may cover more xorbs than the upload did.
 	dedupResp, err := http.Get(ts.URL + "/v1/chunks/default-merkledb/" + chunkHashes[0].Hex())
 	if err != nil {
 		t.Fatalf("GET chunk dedup error = %v", err)
@@ -620,8 +623,17 @@ func TestChunkDedup_KnownChunkReturnsShardBytes(t *testing.T) {
 		t.Fatalf("chunk dedup status = %d, want 200 for a chunk referenced by an uploaded shard", dedupResp.StatusCode)
 	}
 	got, _ := io.ReadAll(dedupResp.Body)
-	if !bytes.Equal(got, shardBytes) {
-		t.Errorf("chunk dedup response (%d bytes) does not match the uploaded shard bytes (%d bytes)", len(got), len(shardBytes))
+	answer, err := shardformat.ReadShard(bytes.NewReader(got))
+	if err != nil {
+		t.Fatalf("chunk dedup response does not parse as a shard: %v", err)
+	}
+	if len(answer.Xorbs) != 1 || answer.Xorbs[0].Header.XorbHash != xorbHash || len(answer.Xorbs[0].Chunks) != len(chunkHashes) {
+		t.Errorf("chunk dedup response xorb-info = %d xorb(s), want the uploaded xorb %s with %d chunks", len(answer.Xorbs), xorbHash.Hex()[:8], len(chunkHashes))
+	}
+	for i, c := range answer.Xorbs[0].Chunks {
+		if c.ChunkHash != chunkHashes[i] {
+			t.Errorf("chunk dedup response chunk %d = %s, want %s", i, c.ChunkHash.Hex()[:8], chunkHashes[i].Hex()[:8])
+		}
 	}
 
 	// The second chunk from the SAME xorb must also resolve, since both

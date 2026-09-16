@@ -259,7 +259,7 @@ func TestFolder_ChunkDedupSeesOtherReplicasShards(t *testing.T) {
 	_, xorbHash, chunkHashes := buildXorb(t, [][]byte{[]byte("chunk one on A"), []byte("chunk two on A")})
 	_ = xorbHash
 
-	if _, known := b.shardForChunk(chunkHashes[0]); known {
+	if _, known := b.dedupAnswer(chunkHashes[0]); known {
 		t.Fatal("B knows A's chunk before sync")
 	}
 	syncDir(t, dirA, dirB, "shards", nil)
@@ -268,7 +268,7 @@ func TestFolder_ChunkDedupSeesOtherReplicasShards(t *testing.T) {
 	if !b.rescanOnMiss() {
 		t.Fatal("rescanOnMiss found nothing after sync")
 	}
-	if _, known := b.shardForChunk(chunkHashes[1]); !known {
+	if _, known := b.dedupAnswer(chunkHashes[1]); !known {
 		t.Fatal("B does not offer A's chunk for dedup after sync")
 	}
 }
@@ -308,7 +308,7 @@ func TestDedupResponseIsACompleteShardFile(t *testing.T) {
 		t.Fatal("persisted shard is not the raw upload")
 	}
 	// ...but the dedup response is a complete shard file.
-	served, known := srv.shardForChunk(chunkHashes[1])
+	served, known := srv.dedupAnswer(chunkHashes[1])
 	if !known {
 		t.Fatal("chunk not indexed")
 	}
@@ -316,13 +316,13 @@ func TestDedupResponseIsACompleteShardFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("served shard does not parse: %v", err)
 	}
-	if full.Header.FooterSize == 0 || full.Footer.Version != 1 || full.Footer.ChunkLookupNumEntry != 2 || len(full.Xorbs) != 1 || len(full.Files) != 1 {
+	if full.Header.FooterSize == 0 || full.Footer.Version != 1 || full.Footer.ChunkLookupNumEntry != 2 || len(full.Xorbs) != 1 || len(full.Files) != 0 {
 		t.Fatalf("served shard: footerSize=%d footer v%d chunkLookup=%d xorbs=%d files=%d", full.Header.FooterSize, full.Footer.Version, full.Footer.ChunkLookupNumEntry, len(full.Xorbs), len(full.Files))
 	}
 	// A restart that rescans the raw file serves the same complete form.
 	again := newFolderServer(t, filepath.Dir(srv.ShardDir()))
 	again.ScanShards(context.Background())
-	served2, _ := again.shardForChunk(chunkHashes[0])
+	served2, _ := again.dedupAnswer(chunkHashes[0])
 	if !bytes.Equal(served, served2) {
 		t.Fatal("rescanned shard serves different bytes")
 	}

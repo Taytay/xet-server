@@ -403,14 +403,24 @@ version 1, got 0". The rebuilt shard leaves the HMAC key zero, so the
 client matches raw chunk hashes. A chunk hash no uploaded shard has
 ever referenced returns `404`.
 
-One second-order consequence worth calling out: because the response is
-literally "hand back a shard someone already uploaded," a global dedup
-hit incidentally also teaches the querying client about every *other*
-chunk that shard's xorb-info section references, not just the one it
-queried for - this is inherent to the real protocol's design (the shard
-format has no way to return "just this one chunk's info" cheaper than
-returning the whole shard it lives in), not something this
-implementation added.
+What the answer covers matters as much as its format. A client queries
+the first chunk of every file and then at most once per 256 chunks
+(`min_spacing_between_global_dedup_queries`), so whatever the first
+answer describes is most of what it will ever learn about that file.
+An upload shard's xorb-info lists only the xorbs *that upload created*:
+after a file is re-uploaded with its first chunk edited, the edit's
+shard describes a xorb of one or two chunks, and handing that shard back
+for the first-chunk query told a second machine about two chunks while
+the file's other xorbs sat on the server; it re-uploaded the rest
+(caught by `integration-tests/multi_client_dedup_versions.sh`). The
+answer is therefore assembled (`casserver.dedupAnswer`), not looked up:
+xorb-info for the xorb the chunk lives in, then every xorb of every
+file that references that xorb, in term order, with no file entries -
+the same xorb-only shape xet-core's own reference client serves
+(`LocalClient::query_for_global_dedup_shard` writes an
+`MDBMinimalShard` xorb subset). It is capped at 65536 chunk entries
+(about 3 MB; the chunk's own xorb always fits) because the client caches
+every answer as a shard file.
 
 ## 10. V2 reconstruction is a response-shape optimization, not new data
 
