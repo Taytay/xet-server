@@ -118,6 +118,11 @@ type Server struct {
 	chunkDedupMu     sync.RWMutex
 	chunkHashToShard map[merklehash.Hash]merklehash.Hash
 	shardBodies      map[merklehash.Hash][]byte
+	// xorbToShard maps each xorb hash to the content hash of the shard
+	// whose xorb-info introduced it (guarded by chunkDedupMu too). It is
+	// derived, never snapshotted: LoadSnapshot rebuilds it from
+	// ShardBodies. dedupAnswer uses it to describe a file's other xorbs.
+	xorbToShard map[merklehash.Hash]merklehash.Hash
 
 	// evictionStats, if set via SetEvictionStats, backs GET
 	// /v1/storage-stats. nil (the default, when no eviction.Sweeper is
@@ -151,6 +156,7 @@ func New(xorbs storage.Store) *Server {
 		sha256ToXet:      make(map[string]merklehash.Hash),
 		chunkHashToShard: make(map[merklehash.Hash]merklehash.Hash),
 		shardBodies:      make(map[merklehash.Hash][]byte),
+		xorbToShard:      make(map[merklehash.Hash]merklehash.Hash),
 		authenticator:    auth.NoAuth{},
 	}
 	s.routes()

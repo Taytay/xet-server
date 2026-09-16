@@ -149,6 +149,9 @@ func (s *Server) IngestShard(body []byte) error {
 		s.shardBodies[shardHash] = served
 	}
 	for _, x := range shard.Xorbs {
+		if _, exists := s.xorbToShard[x.Header.XorbHash]; !exists {
+			s.xorbToShard[x.Header.XorbHash] = shardHash
+		}
 		for _, c := range x.Chunks {
 			// First shard to reference a given chunk hash wins; later
 			// shards referencing the same (already-deduplicated) chunk

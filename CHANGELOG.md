@@ -35,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   query. The client treats that as "not found", so a second machine
   uploading a near-identical copy of a file the server already had
   re-uploaded all of it. Both prefixes are now accepted.
+- **Global-dedup answers cover the file, not just the shard that
+  introduced the chunk.** An upload shard lists only the xorbs that
+  upload created, so a chunk born in a small edit mapped to a two-chunk
+  answer; a client queries a file's first chunk and then at most once
+  per 256 chunks, so a second machine editing a file with an edited
+  history learned two chunks and re-uploaded the rest (42 MB of a 40 MB
+  file). The answer is now assembled from the chunk's xorb plus every
+  xorb of every file referencing it (xorb-info only, like xet-core's
+  reference client; capped at 65536 chunk entries).
 
 ## [1.1.0] - 2026-09-15
 

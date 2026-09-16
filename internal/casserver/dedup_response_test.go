@@ -94,8 +94,10 @@ func TestChunkDedup_ResponseIsACompleteShardFile(t *testing.T) {
 	if shard.Footer.Version != 1 {
 		t.Fatalf("dedup response footer version = %d, want 1", shard.Footer.Version)
 	}
-	if shard.Footer.ChunkLookupNumEntry != 2 || len(shard.Xorbs) != 1 || len(shard.Files) != 1 {
-		t.Fatalf("dedup response: chunkLookup=%d xorbs=%d files=%d, want 2/1/1", shard.Footer.ChunkLookupNumEntry, len(shard.Xorbs), len(shard.Files))
+	// Xorb-info only, like xet-core's reference client answers: the
+	// querying client uses the chunk lookup, never the file entries.
+	if shard.Footer.ChunkLookupNumEntry != 2 || len(shard.Xorbs) != 1 || len(shard.Files) != 0 {
+		t.Fatalf("dedup response: chunkLookup=%d xorbs=%d files=%d, want 2/1/0", shard.Footer.ChunkLookupNumEntry, len(shard.Xorbs), len(shard.Files))
 	}
 	if !shard.Footer.ChunkHashHMACKey.IsZero() {
 		t.Fatalf("dedup response carries an HMAC key; the client would key its chunk hashes and never match")
