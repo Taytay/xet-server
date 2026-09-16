@@ -5,6 +5,20 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Global-dedup responses are complete shard files.** Clients upload
+  shards with the footer and lookup tables stripped, but load what they
+  download from `GET /v1/chunks/{prefix}/{hash}` with a reader that
+  requires footer version 1. Serving the uploaded bytes back unchanged
+  therefore failed on any client that had not produced them itself: with
+  git-xet 0.2.1 pushing from a second machine, every push that hit a
+  dedup match died with "Expected footer version 1, got 0". The server
+  now rebuilds a footer-carrying shard from the parsed upload, at ingest
+  and when loading a snapshot written by an earlier build.
+
 ## [1.1.0] - 2026-09-15
 
 ### Fixed

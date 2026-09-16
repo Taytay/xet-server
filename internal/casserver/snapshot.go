@@ -11,6 +11,7 @@
 package casserver
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -222,6 +223,17 @@ func (s *Server) LoadSnapshot(path string) error {
 		s.chunkHashToShard = snap.ChunkHashToShard
 	}
 	if snap.ShardBodies != nil {
+		// Bodies saved by a build that served uploads back raw are
+		// rebuilt into complete shard files (see dedupShardBody).
+		for hash, body := range snap.ShardBodies {
+			shard, err := shardformat.ReadShard(bytes.NewReader(body))
+			if err != nil {
+				continue
+			}
+			if served, err := dedupShardBody(shard, body); err == nil {
+				snap.ShardBodies[hash] = served
+			}
+		}
 		s.shardBodies = snap.ShardBodies
 	}
 	return nil
