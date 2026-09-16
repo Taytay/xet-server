@@ -34,9 +34,8 @@
   sets the lifetime.
 - **Newer xet-core clients**: `POST /shards` (unversioned, what git-xet
   0.2.1 and recent hf_xet actually call) is served alongside
-  `/v1/shards`, and the global-dedup endpoint accepts the `default`
-  prefix those clients send in addition to the documented
-  `default-merkledb`.
+  `/v1/shards`. (The global-dedup prefix those clients send is covered
+  under Fixed below.)
 
 
 All notable changes to Xet Server will be documented in this file.
@@ -45,6 +44,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+
+- **Multi-client integration tests.** `integration-tests/multi_client_*.sh`
+  run the real `hf` CLI as several machines (each with its own `HF_HOME`,
+  `HF_XET_CACHE` and token) against one `xetd`, and assert from the
+  server's DEBUG log and the client's own log that the cross-client path
+  ran: a stranger's upload deduplicated against another machine's file
+  (the two fixes below were invisible to every single-cache test),
+  identical bytes from a second machine stored nothing, and machines that
+  never uploaded downloading by name and as a whole repo. A script can
+  now declare its own budget with a `# XET_IT_TEST_TIMEOUT: N` header.
 
 ### Fixed
 
@@ -57,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedup match died with "Expected footer version 1, got 0". The server
   now rebuilds a footer-carrying shard from the parsed upload, at ingest
   and when loading a snapshot written by an earlier build.
+- **Global-dedup queries accept the prefix real clients send.**
+  `GET /v1/chunks/{prefix}/{hash}` only accepted the OpenAPI spec's
+  `default-merkledb`; xet-core >= 1.5 (hf_xet 1.6.0, git-xet 0.2.1)
+  queries with `default`, the xorb prefix, and was answered 400 on every
+  query. The client treats that as "not found", so a second machine
+  uploading a near-identical copy of a file the server already had
+  re-uploaded all of it. Both prefixes are now accepted.
 
 ## [1.1.0] - 2026-09-15
 

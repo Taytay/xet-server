@@ -15,7 +15,7 @@ import (
 // chunkDedupPrefix is the prefix xet-core's openapi spec documents for
 // GET /v1/chunks/{prefix}/{hash} (PrefixGlobalDedupeParam). Real clients
 // disagree with the spec: cas_client/src/remote_client.rs in xet-core
-// >= 1.5 (git-xet 0.2.1, recent hf_xet) queries with PREFIX_DEFAULT
+// >= 1.5 (git-xet 0.2.1, hf_xet 1.6.0) queries with PREFIX_DEFAULT
 // ("default", the same prefix as xorb uploads), so handleChunkDedup
 // accepts both - see isChunkDedupPrefix.
 const chunkDedupPrefix = "default-merkledb"

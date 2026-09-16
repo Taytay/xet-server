@@ -77,9 +77,9 @@ jobs:
         with:
           python-version: '3.14'
 
-      # Without pipenv + huggingface_hub/hf_xet, the two tests that drive
-      # the real `hf` CLI (hf_cli_roundtrip, xet_proxyd_offline_handoff)
-      # skip with exit 77 rather than fail - so CI would look green while
+      # Without pipenv + huggingface_hub/hf_xet, the tests that drive the
+      # real `hf` CLI (hf_cli_roundtrip, xet_proxyd_offline_handoff, the
+      # multi_client_* tests) skip with exit 77 rather than fail - so CI would look green while
       # silently covering none of the actual client-compatibility surface
       # this project exists to guarantee. Installing them is what makes
       # those two tests real.

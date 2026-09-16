@@ -636,8 +636,18 @@ with nothing but that directory:
 
 ```bash
 make install             # pipenv --python 3.14 && pipenv install
-make integration-test    # now includes hf_cli_roundtrip.sh and xet_proxyd_offline_handoff.sh
+make integration-test    # now includes hf_cli_roundtrip.sh, xet_proxyd_offline_handoff.sh, multi_client_*.sh
 ```
+
+`integration-tests/multi_client_*.sh` run that same real `hf` CLI as
+several **machines** - each with its own `HF_HOME`, `HF_XET_CACHE` and
+token - against one `xetd`. A xet client dedups against its own shard
+cache before it asks the server, so a single cache never parses the
+server's global-dedup answer; only these tests do. They assert the
+cross-client path from the server's DEBUG log and the client's log (a
+dedup query answered 200 and parsed as `found`, reconstructions served to
+a machine that never uploaded), so they cannot pass by uploading
+everything twice.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#2-running-tests) for the full test
 layer breakdown, including why several packages carry real-client
