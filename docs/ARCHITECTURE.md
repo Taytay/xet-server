@@ -307,7 +307,13 @@ PROTOCOL.md).
   a presigned S3/MinIO URL when the storage backend implements
   `storage.URLPresigner`, or fall back to the CAS server's own
   `/v1/xorbs/{prefix}/{hash}` byte-serving endpoint otherwise. Both are
-  spec-valid; production Xet always uses the presigned-URL path.
+  spec-valid; production Xet always uses the presigned-URL path. What
+  the client assumes either way is that the URL carries its own
+  credential: xet-core fetches it with no `Authorization` header. So
+  with auth on, the fallback URL is signed the way a presigned one is
+  (`casserver.SetFetchURLSigner`): a read token for the requesting
+  principal, expiring after `-token-ttl`, in the query string, accepted
+  only by the xorb GET/HEAD routes. With auth off nothing changes.
 - **In-memory indices, periodically checkpointed - not a live database.**
   `casserver.Server` and `hubserver.Server` hold their reconstruction/repo
   state in memory, each behind its own `sync.RWMutex` (one per index map in

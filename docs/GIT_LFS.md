@@ -48,7 +48,11 @@ git-xet in every batch response. With a secret set, both ports authenticate
 with `auth.SignedTokenAuth`: the secret itself (Bearer or Basic password),
 and short-lived HMAC-signed tokens the hub port mints for the CAS - scoped
 read or write, bound to the caller's user name, expiring after `-token-ttl`
-(default 1h). Clients never see the secret in a token.
+(default 1h). Clients never see the secret in a token. The xorb URLs in a
+reconstruction response carry such a read token in their query string,
+because xet-core fetches them with no Authorization header (on the real
+Hub they are presigned CDN URLs); only the xorb GET/HEAD routes accept a
+token from a URL.
 
 ## Repo setup
 

@@ -23,6 +23,18 @@ type TokenMinter interface {
 	MintToken(scope Scope, subject string, ttl time.Duration) (token string, exp time.Time, err error)
 }
 
+// URLTokenVerifier is implemented by an Authenticator that accepts a
+// minted token carried in a URL's query string instead of a header: the
+// credential of a presigned-style download URL. xet-core fetches the
+// xorb URLs in a reconstruction response with no Authorization header
+// (on the real Hub they are presigned CDN URLs), so a CAS whose storage
+// backend cannot presign signs its own byte-serving URLs this way. Only
+// casserver's xorb GET/HEAD routes consult it; nothing else accepts a
+// credential from a URL.
+type URLTokenVerifier interface {
+	VerifyURLToken(token string) (Principal, error)
+}
+
 // SignedTokenAuth is the Authenticator a deployment with one shared
 // secret should use when the Hub shim and the CAS run as a pair. It
 // accepts three credential shapes:
@@ -90,6 +102,13 @@ func (a *SignedTokenAuth) mac(payload string) []byte {
 	m := hmac.New(sha256.New, a.secret)
 	m.Write([]byte(payload))
 	return m.Sum(nil)
+}
+
+// VerifyURLToken implements URLTokenVerifier: a minted token is as good
+// in a URL as in a header, since it already carries its scope, subject
+// and expiry.
+func (a *SignedTokenAuth) VerifyURLToken(token string) (Principal, error) {
+	return a.verifyMinted(token)
 }
 
 // verifyMinted parses and checks a token produced by MintToken. Returns

@@ -90,6 +90,12 @@ func main() {
 	}
 	casSrv := casserver.New(casXorbStore)
 	casSrv.SetAuthenticator(authenticator)
+	if minter != nil {
+		// hf_xet fetches the xorb URLs in a reconstruction response with
+		// no Authorization header, so with auth on they carry their own
+		// read token, like the presigned URLs the real CAS hands out.
+		casSrv.SetFetchURLSigner(minter, *tokenTTL)
+	}
 
 	// Shard bodies are persisted as content-named files (a durable,
 	// append-only record the snapshot below is merely a cache of), and
