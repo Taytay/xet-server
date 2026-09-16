@@ -306,6 +306,27 @@ func TestLFSObject_RangeResumeHeadAndErrors(t *testing.T) {
 
 func TestLFSLocks_Lifecycle(t *testing.T) {
 	ts, _, _ := newLFSTestServer(t)
+	lockLifecycle(t, ts)
+}
+
+// The same lifecycle against locks stored as files in a directory (the
+// synced-folder store); the HTTP contract must not differ.
+func TestLFSLocks_LifecycleOnFolderStore(t *testing.T) {
+	cas := newFakeCAS()
+	a := auth.NewSignedTokenAuth(lfsFixtureSecret)
+	hubSrv := New("http://cas.example:8420", cas)
+	hubSrv.SetAuthenticator(a)
+	hubSrv.SetTokenMinter(a)
+	if err := hubSrv.SetLockDir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(hubSrv)
+	t.Cleanup(ts.Close)
+	lockLifecycle(t, ts)
+}
+
+func lockLifecycle(t *testing.T, ts *httptest.Server) {
+	t.Helper()
 	locks := "/team/game.git/info/lfs/locks"
 
 	// Alice locks a scene.
@@ -483,5 +504,48 @@ func TestParseLFSRange(t *testing.T) {
 		if (err != nil) != c.isErr || has != c.has || (has && (s != c.start || e != c.end)) {
 			t.Errorf("parseLFSRange(%q) = %d, %d, %v, %v; want %d, %d, %v, err=%v", c.header, s, e, has, err, c.start, c.end, c.has, c.isErr)
 		}
+	}
+}
+
+// On a synced folder a file's shard can arrive before its xorbs. The
+// batch answers 503 per object and the object route refuses before the
+// first byte, so git-lfs reports "retry later", not a checksum failure.
+func TestLFSDownload_UnavailableWhileXorbsSync(t *testing.T) {
+	ts, cas, _ := newLFSTestServer(t)
+	content := []byte("arrives later")
+	oid := cas.storeFile(content)
+	xet := cas.sha256ToXet[oid]
+	cas.missing[xet] = []merklehash.Hash{merklehash.ComputeDataHash([]byte("xorb"))}
+
+	resp, body := lfsDo(t, ts, http.MethodPost, batchPath, "bob",
+		`{"operation":"download","transfers":["basic"],"objects":[{"oid":"`+oid+`","size":13}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("batch status %d", resp.StatusCode)
+	}
+	var out lfsBatchResponse
+	json.Unmarshal(body, &out)
+	if len(out.Objects) != 1 || out.Objects[0].Error == nil || out.Objects[0].Error.Code != http.StatusServiceUnavailable || out.Objects[0].Actions != nil {
+		t.Fatalf("batch object = %s; want a 503 error and no download action", body)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/team/game.git/info/lfs/objects/"+oid, nil)
+	req.SetBasicAuth("bob", lfsFixtureSecret)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("object route: %d, Retry-After %q; want 503 with Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+
+	// Once the xorbs land, the same requests succeed.
+	delete(cas.missing, xet)
+	resp, body = lfsDo(t, ts, http.MethodPost, batchPath, "bob",
+		`{"operation":"download","transfers":["basic"],"objects":[{"oid":"`+oid+`","size":13}]}`)
+	var after lfsBatchResponse // fresh: Unmarshal into out would keep the old Error
+	json.Unmarshal(body, &after)
+	if after.Objects[0].Error != nil || after.Objects[0].Actions["download"] == nil {
+		t.Fatalf("after sync batch object = %s", body)
 	}
 }

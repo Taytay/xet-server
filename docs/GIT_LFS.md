@@ -79,7 +79,87 @@ before `.git` are the repo id (an optional type prefix such as
 | POST | `locks/verify` | write | `ours`/`theirs` split by the caller's user name. |
 | POST | `locks/{id}/unlock` | write | 403 unless owner or `force`. |
 
-Locks are persisted in the hub snapshot with everything else.
+Locks are persisted in the hub snapshot with everything else (or as
+claim files, in synced-folder mode below).
+
+## Synced-folder mode: no server, one Dropbox
+
+`-sync-folder` lets the data directory be a folder a sync tool carries
+between machines - Dropbox, Google Drive, Syncthing, a NAS mount - with
+every machine running its own xetd against its own copy:
+
+```
+ laptop A                            laptop B
+ ┌────────────────────────┐          ┌────────────────────────┐
+ │ git-lfs/git-xet        │          │ git-lfs/git-xet        │
+ │   └─► xetd (localhost) │          │   └─► xetd (localhost) │
+ │         └─► ~/Dropbox/team/xet ◄──sync──► ~/Dropbox/team/xet │
+ └────────────────────────┘          └────────────────────────┘
+```
+
+```bash
+XETD_AUTH_TOKEN=<secret> xetd -sync-folder -data ~/Dropbox/team/xet \
+    -addr 127.0.0.1:8420 -hub-addr 127.0.0.1:8421
+```
+
+Every repo's `.lfsconfig` then points at `http://127.0.0.1:8421/...` and is
+identical on every machine; the git side can be any host, or a
+[git-remote-dfs](https://github.com/Taytay/taytays_stuff/tree/main/experiments/git-remote-dfs)
+store in the same folder, so history and content ride one dumb folder
+with no server anywhere.
+
+What changes under the flag, and why it is safe on a folder two machines
+write to at once:
+
+- **Every authoritative file is write-once and named by its content.**
+  Xorbs already were (`xorbs/<hash>`). Shard bodies are now persisted the
+  same way (`shards/<hash>`, staged through a temp file and renamed), and
+  no snapshot is written or read. Two machines writing "the same" file
+  write identical bytes, so the sync tool never has anything to merge and
+  a "conflicted copy" cannot arise.
+- **The index is derived, not stored.** At startup the shard directory is
+  scanned and every shard re-indexed; a xorb's footer is derived from its
+  bytes the first time it is needed. A file is trusted only if its content
+  hashes to its name, so a half-delivered file is invisible until the
+  sync completes. The directory is rescanned every `-rescan-interval`
+  (default 10s) and, at once, whenever a lookup misses and the directory's
+  mtime has moved - so another machine's push is visible the first time a
+  client here asks for it, and its chunks take part in dedup on the next
+  push here.
+- **A file whose xorbs have not arrived yet is refused, not truncated.**
+  The batch answers a per-object 503 ("content not yet available on this
+  replica, N xorb(s) still syncing") and `objects/{oid}` answers 503 with
+  `Retry-After`; `git lfs pull` reports it and succeeds when run again
+  after the folder has synced.
+- **Locks are claims with an election** (`locks/<repo>/<id>.lock.json`,
+  released by a tombstone `<id>.unlock`; nothing is modified or deleted).
+  Two people can lock the same path while their folders are apart - each
+  replica must grant it, having no way to know better. Once the claims
+  meet, every replica computes the same holder: the earliest `locked_at`,
+  ties broken by id. The other claim is superseded (not listed, so that
+  person's next push is refused by lock verification exactly as if they
+  had never held it) and becomes the holder if the winner unlocks first.
+  This is the git-remote-dfs ref election applied to locks: no
+  compare-and-swap anywhere, and a race is a visible outcome rather than
+  corruption.
+
+Consequences to know about:
+
+- Dedup across machines is only as fresh as the sync. A push on B before
+  A's shard has arrived re-uploads chunks A already has; both copies are
+  kept (different xorbs, same bytes inside) and both are correct.
+- `-max-storage-bytes` is refused with `-sync-folder`: eviction deletes
+  files other replicas still reference.
+- The hub's repo/revision registry (`hf upload`/`hf download`, not
+  git-lfs) is in memory only in this mode.
+- Temp files (`*.tmp-*`) appear briefly next to the final files; a sync
+  tool with an ignore list can exclude that pattern. Dropbox and Syncthing
+  deliver files by staging and renaming, which is what the content-hash
+  check assumes; a tool that writes in place would show partial files,
+  which the check also catches.
+- Nothing here is Linux-specific: the binary cross-compiles for Windows
+  and macOS, and the on-disk operations are create-temp, rename, stat and
+  readdir. Windows has not been exercised end to end.
 
 ## Known limits
 

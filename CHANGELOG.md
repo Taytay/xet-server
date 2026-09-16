@@ -2,6 +2,26 @@
 
 ## Unreleased - Git LFS bridge
 
+- **Synced-folder mode (`-sync-folder`)**: the data directory can be a
+  folder shared through Dropbox, Syncthing or a mount, with one xetd per
+  machine. Shard bodies are persisted as content-named files, the index
+  is rebuilt from them (no snapshots), other replicas' uploads are picked
+  up by rescans (periodic, and on lookup misses when the directory's
+  mtime moved), files whose xorbs have not synced are refused with a 503
+  instead of served truncated, and git-lfs locks become write-once claim
+  files with a deterministic election. `docs/GIT_LFS.md` has the design.
+- **Shard bodies are always persisted** (`<data>/shards/<hash>`), also
+  without `-sync-folder`: an upload survives a crash before the next
+  snapshot, and startup re-indexes any shard the snapshot lacks. Xorb
+  footers missing from the index are derived from the stored bytes on
+  demand.
+- **Global dedup responses are complete shard files.** Clients upload
+  shards with the footer and lookup tables stripped, but load what they
+  download from `GET /v1/chunks/{prefix}/{hash}` with a reader that
+  requires footer version 1. Handing the uploaded bytes back unchanged
+  failed on any client that had not produced them itself ("Expected
+  footer version 1, got 0" from git-xet 0.2.1 on a second machine); the
+  server now rebuilds a footer-carrying shard from the parsed upload.
 - **Git LFS server** under `/{owner}/{name}.git/info/lfs` on the Hub port
   (`docs/GIT_LFS.md`): batch responses now carry the per-object `actions`
   the stock `git-lfs` client and `git-xet` need (`xet` transfer for

@@ -166,9 +166,7 @@ func (s *Server) handleReconstructionV2(w http.ResponseWriter, r *http.Request) 
 // Bumping here means eviction sees "about to be needed" even in the
 // presigned-URL case.
 func (s *Server) lookupXorbFooter(hash merklehash.Hash) (xorbformat.FooterV1, bool) {
-	s.xorbMu.RLock()
-	f, known := s.xorbFooters[hash]
-	s.xorbMu.RUnlock()
+	f, _, known := s.xorbMeta(context.Background(), hash)
 	if !known {
 		return xorbformat.FooterV1{}, false
 	}
@@ -225,13 +223,10 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.chunkDedupMu.RLock()
-	shardHash, known := s.chunkHashToShard[hash]
-	var shardBytes []byte
-	if known {
-		shardBytes = s.shardBodies[shardHash]
+	shardBytes, known := s.shardForChunk(hash)
+	if !known && s.rescanOnMiss() {
+		shardBytes, known = s.shardForChunk(hash)
 	}
-	s.chunkDedupMu.RUnlock()
 	if !known || shardBytes == nil {
 		// !known: no uploaded shard has ever referenced this chunk.
 		// shardBytes == nil: the shard's body was evicted or never
@@ -245,6 +240,17 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(shardBytes)))
 	w.Write(shardBytes)
+}
+
+// shardForChunk returns the body of the shard indexed for chunk hash.
+func (s *Server) shardForChunk(hash merklehash.Hash) ([]byte, bool) {
+	s.chunkDedupMu.RLock()
+	defer s.chunkDedupMu.RUnlock()
+	shardHash, known := s.chunkHashToShard[hash]
+	if !known {
+		return nil, false
+	}
+	return s.shardBodies[shardHash], true
 }
 
 // handleTelemetry is a fire-and-forget ack: the real client never retries

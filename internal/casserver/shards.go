@@ -3,6 +3,7 @@ package casserver
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -62,6 +63,28 @@ func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, uploadShardResponse{Result: 1})
 }
 
+// dedupShardBody returns the bytes GET /v1/chunks/{prefix}/{hash} hands a
+// client for shard: a complete shard FILE, with lookup tables and a
+// version-1 footer. Real clients upload shards with the footer and
+// lookup tables stripped (header.FooterSize == 0; see ReadShard), but
+// what they download from the global-dedup endpoint they load with
+// MDBShardInfo::load_from_reader, which seeks to a footer at EOF and
+// refuses anything but footer version 1 ("Expected footer version 1,
+// got 0"). Serving the uploaded bytes back unchanged therefore only ever
+// worked for a client that never needed them - one deduplicating against
+// its own local shard cache. A footer-carrying body is returned as is.
+// The HMAC key is left zero, so the client matches raw chunk hashes.
+func dedupShardBody(shard *shardformat.Shard, body []byte) ([]byte, error) {
+	if shard.Header.FooterSize != 0 {
+		return body, nil
+	}
+	var buf bytes.Buffer
+	if _, err := shardformat.WriteShard(&buf, shard.Files, shard.Xorbs); err != nil {
+		return nil, fmt.Errorf("rebuild shard with footer: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 // IngestShard parses body as a serialized shard and merges its
 // file-reconstruction entries into this server's in-memory fileRecon
 // index (keyed by file hash), and indexes every chunk hash referenced by
@@ -79,6 +102,25 @@ func (s *Server) handleUploadShard(w http.ResponseWriter, r *http.Request) {
 // also reflect it immediately) can feed it shard bytes through the
 // identical parsing/indexing path handleUploadShard uses.
 func (s *Server) IngestShard(body []byte) error {
+	// Parse first so a malformed body is rejected before anything is
+	// written; then persist before indexing, so a crash between the two
+	// leaves a file the next startup's ScanShards re-indexes rather
+	// than an index entry with no file behind it.
+	if _, err := shardformat.ReadShard(bytes.NewReader(body)); err != nil {
+		return err
+	}
+	shardHash := merklehash.ComputeDataHash(body)
+	if err := s.persistShard(shardHash, body); err != nil {
+		return fmt.Errorf("persist shard: %w", err)
+	}
+	return s.indexShard(body, shardHash)
+}
+
+// indexShard merges an already-validated shard body (content hash
+// shardHash) into the in-memory indices. Shared by IngestShard (an
+// upload) and ScanShards (a file another replica wrote to the shard
+// dir); idempotent for a body seen before.
+func (s *Server) indexShard(body []byte, shardHash merklehash.Hash) error {
 	shard, err := shardformat.ReadShard(bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -115,11 +157,14 @@ func (s *Server) IngestShard(body []byte) error {
 	// chunkHashToShard's doc comment). ComputeDataHash is content-addressed,
 	// so an identical shard body (same content, uploaded twice) resolves
 	// to the same entry with no duplication of storage.
-	shardHash := merklehash.ComputeDataHash(body)
+	served, err := dedupShardBody(shard, body)
+	if err != nil {
+		return err
+	}
 	var chunkCount int
 	s.chunkDedupMu.Lock()
 	if _, exists := s.shardBodies[shardHash]; !exists {
-		s.shardBodies[shardHash] = body
+		s.shardBodies[shardHash] = served
 	}
 	for _, x := range shard.Xorbs {
 		for _, c := range x.Chunks {

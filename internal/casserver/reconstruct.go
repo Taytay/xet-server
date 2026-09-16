@@ -17,6 +17,7 @@ import (
 
 	"github.com/guilt/xet-server/internal/merklehash"
 	"github.com/guilt/xet-server/internal/reconwire"
+	"github.com/guilt/xet-server/internal/storage"
 	"github.com/guilt/xet-server/internal/xorbformat"
 )
 
@@ -84,7 +85,9 @@ func (s *Server) ReconstructFile(ctx context.Context, fileHash merklehash.Hash, 
 func (s *Server) writeTerm(ctx context.Context, hash merklehash.Hash, chunkStart, chunkEnd, declaredBytes uint32, termStart, start, end int64, w io.Writer) error {
 	footer, known := s.lookupXorbFooter(hash)
 	if !known {
-		return &reconwire.ErrUnknownXorbFooter{Hash: hash}
+		// The shard names this xorb but the store has no (complete) copy:
+		// on a synced folder, a xorb the sync tool has not delivered yet.
+		return fmt.Errorf("%w: xorb %s", ErrContentUnavailable, hash.Hex())
 	}
 	chunkCount := uint32(len(footer.ChunkBoundaryOffsets))
 	if chunkStart > chunkEnd || chunkEnd == 0 || chunkEnd > chunkCount || uint32(len(footer.UnpackedChunkOffsets)) != chunkCount {
@@ -151,6 +154,9 @@ func (s *Server) writeTerm(ctx context.Context, hash merklehash.Hash, chunkStart
 
 	data, err := s.xorbs.GetRange(ctx, hash.Hex(), rangeStart, rangeEnd-rangeStart)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("%w: xorb %s", ErrContentUnavailable, hash.Hex())
+		}
 		return fmt.Errorf("read xorb %s: %w", hash.Hex(), err)
 	}
 	defer data.Close()

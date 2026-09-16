@@ -46,6 +46,15 @@ func (s *Server) handleLFSObject(w http.ResponseWriter, r *http.Request, repoID,
 		return
 	}
 
+	if missing, err := s.CAS.MissingXorbs(r.Context(), xetHash); err == nil && len(missing) > 0 {
+		// Refuse before the first byte rather than abort mid-stream: on a
+		// synced folder the xorbs are usually minutes away, and git-lfs
+		// reports a 503 per object instead of a checksum failure.
+		w.Header().Set("Retry-After", "15")
+		lfsError(w, "content not yet available on this replica ("+strconv.Itoa(len(missing))+" xorb(s) still syncing); retry once the folder has synced", http.StatusServiceUnavailable)
+		return
+	}
+
 	start, end, hasRange, err := parseLFSRange(r.Header.Get("Range"), size)
 	if err != nil {
 		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(size, 10))

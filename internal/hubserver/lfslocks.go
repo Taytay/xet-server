@@ -17,7 +17,6 @@ package hubserver
 import (
 	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -73,50 +72,31 @@ func (s *Server) handleLFSLockCreate(w http.ResponseWriter, r *http.Request, rep
 		return
 	}
 
-	rs := s.getOrCreateRepo("model", repoID)
-	rs.locksMu.Lock()
-	defer rs.locksMu.Unlock()
-	for _, existing := range rs.locks {
-		if existing.Path == req.Path {
-			writeLFSJSON(w, http.StatusConflict, struct {
-				Lock    *lfsLock `json:"lock"`
-				Message string   `json:"message"`
-			}{existing, "already created lock"})
-			return
-		}
-	}
 	id, err := randomToken()
 	if err != nil {
 		lfsError(w, "generate lock id: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	lock := &lfsLock{
+	lock, existing, err := s.locks.Create(repoID, lfsLock{
 		ID:       id,
 		Path:     req.Path,
 		LockedAt: time.Now().UTC().Format(time.RFC3339),
 		Owner:    lfsLockOwner{Name: principal.Subject()},
+	})
+	if err != nil {
+		lfsError(w, "create lock: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	rs.locks[id] = lock
+	if existing != nil {
+		writeLFSJSON(w, http.StatusConflict, struct {
+			Lock    *lfsLock `json:"lock"`
+			Message string   `json:"message"`
+		}{existing, "already created lock"})
+		return
+	}
 	writeLFSJSON(w, http.StatusCreated, struct {
 		Lock *lfsLock `json:"lock"`
 	}{lock})
-}
-
-// sortedLocks returns rs's locks in a stable order (creation time, then
-// id) so cursors - plain offsets into this order - stay meaningful
-// between pages. Caller holds rs.locksMu.
-func (rs *repoState) sortedLocks() []*lfsLock {
-	out := make([]*lfsLock, 0, len(rs.locks))
-	for _, l := range rs.locks {
-		out = append(out, l)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].LockedAt != out[j].LockedAt {
-			return out[i].LockedAt < out[j].LockedAt
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out
 }
 
 // page applies cursor/limit to locks and returns the page plus the next
@@ -154,10 +134,11 @@ func (s *Server) handleLFSLockList(w http.ResponseWriter, r *http.Request, repoI
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 
-	rs := s.getOrCreateRepo("model", repoID)
-	rs.locksMu.Lock()
-	all := rs.sortedLocks()
-	rs.locksMu.Unlock()
+	all, err := s.locks.List(repoID)
+	if err != nil {
+		lfsError(w, "list locks: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	filtered := make([]*lfsLock, 0, len(all))
 	for _, l := range all {
@@ -196,10 +177,11 @@ func (s *Server) handleLFSLocksVerify(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 
-	rs := s.getOrCreateRepo("model", repoID)
-	rs.locksMu.Lock()
-	all := rs.sortedLocks()
-	rs.locksMu.Unlock()
+	all, err := s.locks.List(repoID)
+	if err != nil {
+		lfsError(w, "list locks: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	locks, next := page(all, req.Cursor, req.Limit)
 	ours, theirs := []*lfsLock{}, []*lfsLock{}
@@ -235,11 +217,12 @@ func (s *Server) handleLFSUnlock(w http.ResponseWriter, r *http.Request, repoID,
 		return
 	}
 
-	rs := s.getOrCreateRepo("model", repoID)
-	rs.locksMu.Lock()
-	defer rs.locksMu.Unlock()
-	lock, exists := rs.locks[id]
-	if !exists {
+	lock, err := s.locks.Lookup(repoID, id)
+	if err != nil {
+		lfsError(w, "look up lock: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if lock == nil {
 		lfsError(w, "lock not found", http.StatusNotFound)
 		return
 	}
@@ -247,7 +230,10 @@ func (s *Server) handleLFSUnlock(w http.ResponseWriter, r *http.Request, repoID,
 		lfsError(w, "lock is owned by "+lock.Owner.Name+"; pass --force to remove another user's lock", http.StatusForbidden)
 		return
 	}
-	delete(rs.locks, id)
+	if err := s.locks.Remove(repoID, id); err != nil {
+		lfsError(w, "release lock: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeLFSJSON(w, http.StatusOK, struct {
 		Lock *lfsLock `json:"lock"`
 	}{lock})

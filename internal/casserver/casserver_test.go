@@ -2,6 +2,7 @@ package casserver
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/guilt/xet-server/internal/merklehash"
 	"github.com/guilt/xet-server/internal/ratelimit"
 	"github.com/guilt/xet-server/internal/shardformat"
+	"github.com/guilt/xet-server/internal/storage"
 	"github.com/guilt/xet-server/internal/storage/fsstore"
 	"github.com/guilt/xet-server/internal/xorbformat"
 )
@@ -829,6 +831,12 @@ func TestForgetKey_ClearsAllIndices(t *testing.T) {
 		t.Fatalf("upload xorb status = %d", resp.StatusCode)
 	}
 
+	// ForgetKey's contract (eviction.Registry) is "called after
+	// Store.Delete succeeded": with the bytes still in the store, a
+	// fetch would lazily re-derive the footer from them (folder.go).
+	if err := srv.xorbs.(storage.Deleter).Delete(context.Background(), xorbHash.Hex()); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
 	srv.ForgetKey(xorbHash.Hex())
 
 	getResp, err := http.Get(ts.URL + "/v1/xorbs/default/" + xorbHash.Hex())

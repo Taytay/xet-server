@@ -48,6 +48,8 @@ func main() {
 	snapshotInterval := flag.Duration("snapshot-interval", time.Minute, "how often to persist in-memory reconstruction/repo indices to -data as a durable checkpoint (0 disables periodic snapshotting; a final snapshot is still taken on graceful shutdown)")
 	tokenTTL := flag.Duration("token-ttl", time.Hour, "lifetime of the CAS access tokens the Hub shim mints for hf_xet, git-xet, and git-lfs download links; clients refresh through the xet-{read,write}-token routes when one nears expiry")
 	authToken := flag.String("auth-token", "None", "shared bearer token required on every request (CAS: read/write scope per endpoint; Hub: same). \"None\" (the default) disables auth enforcement entirely, matching this server's behavior prior to v0.8.0 - implement auth.Authenticator for anything beyond a single shared secret. Falls back to $XETD_AUTH_TOKEN, then $HF_TOKEN, if not passed; prefer an environment variable over this flag on any shared/multi-user machine, since flags are visible to other local users via `ps` and end up in shell history")
+	syncFolder := flag.Bool("sync-folder", false, "treat -data as a folder a sync tool (Dropbox, Syncthing, a NAS mount) shares with other xetd replicas: every authoritative file is write-once and content-named, no snapshot is written or read (the index is rebuilt from the shard files at startup), git-lfs locks are claim files with a deterministic election, and the shard directory is rescanned for other replicas' uploads; see docs/GIT_LFS.md")
+	rescanInterval := flag.Duration("rescan-interval", 10*time.Second, "with -sync-folder, how often to look for shards other replicas wrote (0: only at startup and when a lookup misses)")
 	flag.Parse()
 
 	if os.Getenv("DEBUG") != "" {
@@ -89,9 +91,28 @@ func main() {
 	casSrv := casserver.New(casXorbStore)
 	casSrv.SetAuthenticator(authenticator)
 
+	// Shard bodies are persisted as content-named files (a durable,
+	// append-only record the snapshot below is merely a cache of), and
+	// any shard the snapshot does not cover is re-indexed from them.
+	if err := casSrv.SetShardDir(filepath.Join(*dataDir, "shards")); err != nil {
+		log.Fatalf("init shard dir: %v", err)
+	}
 	casSnapshotPath := filepath.Join(*dataDir, "casserver-snapshot.json")
-	if err := casSrv.LoadSnapshot(casSnapshotPath); err != nil {
-		log.Fatalf("load CAS snapshot: %v", err)
+	if !*syncFolder {
+		if err := casSrv.LoadSnapshot(casSnapshotPath); err != nil {
+			log.Fatalf("load CAS snapshot: %v", err)
+		}
+	}
+	if added, err := casSrv.ScanShards(context.Background()); err != nil {
+		log.Fatalf("scan shard dir: %v", err)
+	} else if added > 0 {
+		slog.Info("indexed shards not covered by the snapshot", "added", added)
+	}
+	if *syncFolder {
+		slog.Info("synced-folder mode: no snapshots; state is derived from the files in -data", "dataDir", *dataDir, "rescanInterval", *rescanInterval)
+		if *maxStorageBytes > 0 {
+			log.Fatalf("-max-storage-bytes cannot be combined with -sync-folder: eviction deletes files other replicas still reference")
+		}
 	}
 
 	if *maxStorageBytes > 0 {
@@ -140,7 +161,9 @@ func main() {
 	// final snapshot (below) and the periodic snapshot loop cover
 	// whatever is actually running rather than hardcoding just one.
 	var snapshotTargets []snapshotTarget
-	snapshotTargets = append(snapshotTargets, snapshotTarget{"casserver", casSnapshotPath, casSrv})
+	if !*syncFolder {
+		snapshotTargets = append(snapshotTargets, snapshotTarget{"casserver", casSnapshotPath, casSrv})
+	}
 
 	// servers accumulates every http.Server this process starts, so
 	// shutdown (below) can gracefully drain all of them, not just the
@@ -162,10 +185,19 @@ func main() {
 		hubSrv.SetTokenTTL(*tokenTTL)
 
 		hubSnapshotPath := filepath.Join(*dataDir, "hubserver-snapshot.json")
-		if err := hubSrv.LoadSnapshot(hubSnapshotPath); err != nil {
-			log.Fatalf("load Hub snapshot: %v", err)
+		if *syncFolder {
+			// Locks become claim files in the folder; the Hub's own
+			// repo/revision registry (used by hf upload/download, not by
+			// git-lfs) stays in memory for this process only.
+			if err := hubSrv.SetLockDir(filepath.Join(*dataDir, "locks")); err != nil {
+				log.Fatalf("init lock dir: %v", err)
+			}
+		} else {
+			if err := hubSrv.LoadSnapshot(hubSnapshotPath); err != nil {
+				log.Fatalf("load Hub snapshot: %v", err)
+			}
+			snapshotTargets = append(snapshotTargets, snapshotTarget{"hubserver", hubSnapshotPath, hubSrv})
 		}
-		snapshotTargets = append(snapshotTargets, snapshotTarget{"hubserver", hubSnapshotPath, hubSrv})
 
 		// Serve the API docs on the Hub port as well as the CAS port. The
 		// spec's default server entry is a RELATIVE url ("/"), so it
@@ -197,8 +229,11 @@ func main() {
 		}()
 	}
 
-	if *snapshotInterval > 0 {
+	if *snapshotInterval > 0 && len(snapshotTargets) > 0 {
 		go runSnapshotLoop(ctx, *snapshotInterval, snapshotTargets)
+	}
+	if *syncFolder && *rescanInterval > 0 {
+		go casSrv.RunRescanLoop(ctx, *rescanInterval)
 	}
 
 	slog.Info("xetd listening", "addr", *addr, "dataDir", *dataDir, "apiDocsPath", "/api-docs/")
@@ -222,7 +257,7 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	slog.Info("shutting down: taking a final snapshot before exit")
+	slog.Info("shutting down")
 	// 10s is sufficient here (unlike cmd/xet-proxyd's 60s): every handler
 	// in this binary only ever touches local storage, never a slow real
 	// upstream with no overall request Timeout of its own.

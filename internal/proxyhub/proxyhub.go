@@ -210,6 +210,12 @@ func (s *Server) ReconstructFile(context.Context, merklehash.Hash, int64, int64,
 	return errors.New("proxyhub: git-lfs downloads are not served through the proxy; use a xetd instance")
 }
 
+// MissingXorbs completes casInfo alongside ReconstructFile; the proxy
+// holds no xorbs, so the answer is the same "not served here".
+func (s *Server) MissingXorbs(context.Context, merklehash.Hash) ([]merklehash.Hash, error) {
+	return nil, errors.New("proxyhub: git-lfs downloads are not served through the proxy; use a xetd instance")
+}
+
 // FileSize implements the other half of casInfo - answering, for a
 // given Xet hash, the file's verified size. Backed by
 // fileSizeByXetHash: never a fabricated or guessed value, just the

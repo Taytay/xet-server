@@ -1,6 +1,7 @@
 package hubserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -190,7 +191,7 @@ func (s *Server) handleLFSBatch(w http.ResponseWriter, r *http.Request, repoID s
 	case "upload":
 		s.fillUploadBatch(&resp, &req, repoID, base, principal.Subject())
 	case "download":
-		s.fillDownloadBatch(&resp, &req, repoID, base, principal.Subject())
+		s.fillDownloadBatch(r, &resp, &req, repoID, base, principal.Subject())
 	}
 	writeLFSJSON(w, http.StatusOK, resp)
 }
@@ -203,6 +204,21 @@ func (s *Server) objectStored(oid string) (size int64, ok bool) {
 		return 0, false
 	}
 	return s.CAS.FileSize(xetHash)
+}
+
+// missingXorbCount is how many of oid's xorbs this replica lacks; 0 for
+// a file that can be served now (or one the CAS cannot even find, which
+// objectStored already reported).
+func (s *Server) missingXorbCount(ctx context.Context, oid string) int {
+	xetHash, known := s.CAS.XetHashForSHA256(oid)
+	if !known {
+		return 0
+	}
+	missing, err := s.CAS.MissingXorbs(ctx, xetHash)
+	if err != nil {
+		return 0
+	}
+	return len(missing)
 }
 
 func offersTransfer(transfers []string, name string) bool {
@@ -282,7 +298,7 @@ func (s *Server) fillUploadBatch(resp *lfsBatchResponse, req *lfsBatchRequest, r
 	}
 }
 
-func (s *Server) fillDownloadBatch(resp *lfsBatchResponse, req *lfsBatchRequest, repoID, base, subject string) {
+func (s *Server) fillDownloadBatch(r *http.Request, resp *lfsBatchResponse, req *lfsBatchRequest, repoID, base, subject string) {
 	resp.Transfer = transferBasic
 
 	var token string
@@ -308,9 +324,16 @@ func (s *Server) fillDownloadBatch(resp *lfsBatchResponse, req *lfsBatchRequest,
 			continue
 		}
 		size, stored := s.objectStored(obj.OID)
+		var missing int
+		if stored {
+			missing = s.missingXorbCount(r.Context(), obj.OID)
+		}
 		switch {
 		case !stored:
 			out.Error = &lfsObjectError{Code: http.StatusNotFound, Message: "object not found on this server (was it pushed?)"}
+		case missing > 0:
+			out.Error = &lfsObjectError{Code: http.StatusServiceUnavailable,
+				Message: "content not yet available on this replica (" + strconv.Itoa(missing) + " xorb(s) still syncing); retry once the folder has synced"}
 		case obj.Size != 0 && obj.Size != size:
 			out.Error = &lfsObjectError{Code: http.StatusUnprocessableEntity,
 				Message: "pointer size " + strconv.FormatInt(obj.Size, 10) + " does not match stored size " + strconv.FormatInt(size, 10)}

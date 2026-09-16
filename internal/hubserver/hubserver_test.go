@@ -21,10 +21,11 @@ type fakeCAS struct {
 	// content backs ReconstructFile for the LFS download tests; a file in
 	// sizes but not here fails reconstruction like an evicted xorb would.
 	content map[merklehash.Hash][]byte
+	missing map[merklehash.Hash][]merklehash.Hash
 }
 
 func newFakeCAS() *fakeCAS {
-	return &fakeCAS{sha256ToXet: map[string]merklehash.Hash{}, sizes: map[merklehash.Hash]int64{}, content: map[merklehash.Hash][]byte{}}
+	return &fakeCAS{sha256ToXet: map[string]merklehash.Hash{}, sizes: map[merklehash.Hash]int64{}, content: map[merklehash.Hash][]byte{}, missing: map[merklehash.Hash][]merklehash.Hash{}}
 }
 
 func (f *fakeCAS) ReconstructFile(_ context.Context, fileHash merklehash.Hash, start, end int64, w io.Writer) error {
@@ -37,6 +38,15 @@ func (f *fakeCAS) ReconstructFile(_ context.Context, fileHash merklehash.Hash, s
 	}
 	_, err := w.Write(data[start : end+1])
 	return err
+}
+
+// missing, if set, makes MissingXorbs report those hashes for the file:
+// the "another replica's xorbs have not synced yet" state.
+func (f *fakeCAS) MissingXorbs(_ context.Context, fileHash merklehash.Hash) ([]merklehash.Hash, error) {
+	if _, ok := f.sizes[fileHash]; !ok {
+		return nil, errors.New("fakeCAS: unknown file")
+	}
+	return f.missing[fileHash], nil
 }
 
 func (f *fakeCAS) XetHashForSHA256(sha256Hex string) (merklehash.Hash, bool) {

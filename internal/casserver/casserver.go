@@ -137,6 +137,10 @@ type Server struct {
 	// pre-v0.8.0 behavior, unconditionally allowing every request - until
 	// SetAuthenticator is called with something else.
 	authenticator auth.Authenticator
+
+	// folder is the synced-folder support (shard dir, rescans); see
+	// folder.go. Zero value means shards live only in memory/snapshot.
+	folder folderState
 }
 
 func New(xorbs storage.Store) *Server {
@@ -287,8 +291,14 @@ func (s *Server) handleStorageStats(w http.ResponseWriter, r *http.Request) {
 // indexes reconstructions under.
 func (s *Server) XetHashForSHA256(sha256Hex string) (merklehash.Hash, bool) {
 	s.sha256Mu.RLock()
-	defer s.sha256Mu.RUnlock()
 	h, ok := s.sha256ToXet[sha256Hex]
+	s.sha256Mu.RUnlock()
+	if !ok && s.rescanOnMiss() {
+		// A shard another replica wrote may have just synced in.
+		s.sha256Mu.RLock()
+		h, ok = s.sha256ToXet[sha256Hex]
+		s.sha256Mu.RUnlock()
+	}
 	return h, ok
 }
 

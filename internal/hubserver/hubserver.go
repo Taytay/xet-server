@@ -54,6 +54,10 @@ type casInfo interface {
 	// to w - the git-lfs download bridge (see lfsobjects.go) is the one
 	// caller; real Xet clients reconstruct client-side instead.
 	ReconstructFile(ctx context.Context, fileHash merklehash.Hash, start, end int64, w io.Writer) error
+	// MissingXorbs lists the xorbs of the file this CAS does not hold
+	// (yet - on a synced folder they may still be in transit). The LFS
+	// bridge refuses to start a download it could not finish.
+	MissingXorbs(ctx context.Context, fileHash merklehash.Hash) ([]merklehash.Hash, error)
 }
 
 // Server implements the Hub API shim. CASBaseURL is the base URL of the
@@ -88,6 +92,11 @@ type Server struct {
 	// it also gave the CAS, so the tokens verify there.
 	minter   auth.TokenMinter
 	tokenTTL time.Duration
+
+	// locks is where git-lfs file locks live (lockstore.go). Defaults to
+	// the in-memory, snapshotted store; SetLockDir switches to files in
+	// a directory for a synced-folder deployment.
+	locks lockStore
 }
 
 type repoKey struct {
@@ -145,8 +154,21 @@ func New(casBaseURL string, cas casInfo) *Server {
 		minter:        randomTokenMinter{},
 		tokenTTL:      defaultTokenTTL,
 	}
+	s.locks = memoryLockStore{s}
 	s.routes()
 	return s
+}
+
+// SetLockDir stores git-lfs locks as write-once files under dir instead
+// of in memory, so several replicas sharing a synced folder agree on
+// who holds what (see lockstore.go). Call before serving.
+func (s *Server) SetLockDir(dir string) error {
+	store, err := newFolderLockStore(dir)
+	if err != nil {
+		return err
+	}
+	s.locks = store
+	return nil
 }
 
 // defaultTokenTTL is how long a minted CAS token stays valid - long
