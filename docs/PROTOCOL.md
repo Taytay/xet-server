@@ -368,8 +368,10 @@ format's own spec was trying to prevent.
 ## 9. The global chunk-dedup endpoint returns a shard, not a boolean
 
 `GET /v1/chunks/{prefix}/{hash}` (the "does this chunk already exist
-anywhere on the server" query - `prefix` must be exactly
-`default-merkledb`, per the OpenAPI spec's `PrefixGlobalDedupeParam`) is
+anywhere on the server" query - the OpenAPI spec's
+`PrefixGlobalDedupeParam` says `prefix` is `default-merkledb`, but the
+clients people run send `default`, the xorb prefix, so the server accepts
+either) is
 easy to misread as a simple existence check returning some JSON boolean
 or a `200`/`404` with no body. It isn't - per xet-core's own OpenAPI spec
 and its real client implementation

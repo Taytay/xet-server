@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedup match died with "Expected footer version 1, got 0". The server
   now rebuilds a footer-carrying shard from the parsed upload, at ingest
   and when loading a snapshot written by an earlier build.
+- **Global-dedup queries accept the prefix real clients send.**
+  `GET /v1/chunks/{prefix}/{hash}` only accepted the OpenAPI spec's
+  `default-merkledb`; xet-core >= 1.5 (hf_xet 1.6.0, git-xet 0.2.1)
+  queries with `default`, the xorb prefix, and was answered 400 on every
+  query. The client treats that as "not found", so a second machine
+  uploading a near-identical copy of a file the server already had
+  re-uploaded all of it. Both prefixes are now accepted.
 
 ## [1.1.0] - 2026-09-15
 
