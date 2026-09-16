@@ -40,6 +40,10 @@ type repoSnapshot struct {
 	RepoType  string                      `json:"repo_type"`
 	RepoID    string                      `json:"repo_id"`
 	Revisions map[string]revisionSnapshot `json:"revisions"`
+	// Locks is the repo's git-lfs file locks (lfslocks.go). Additive:
+	// a snapshot from before locks existed simply has none, and this
+	// build reads it fine, so snapshotVersion stays at 1.
+	Locks []lfsLock `json:"locks,omitempty"`
 }
 
 type snapshot struct {
@@ -110,6 +114,11 @@ func (s *Server) Snapshot(path string) error {
 			}
 			vs.mu.RUnlock()
 		}
+		rs.locksMu.Lock()
+		for _, l := range rs.sortedLocks() {
+			repoSnap.Locks = append(repoSnap.Locks, *l)
+		}
+		rs.locksMu.Unlock()
 		snap.Repos = append(snap.Repos, repoSnap)
 	}
 
@@ -163,7 +172,14 @@ func (s *Server) LoadSnapshot(path string) error {
 
 	for _, repoSnap := range snap.Repos {
 		key := repoKey{repoType: repoSnap.RepoType, repoID: repoSnap.RepoID}
-		rs := &repoState{revisions: make(map[string]*revisionState, len(repoSnap.Revisions))}
+		rs := &repoState{
+			revisions: make(map[string]*revisionState, len(repoSnap.Revisions)),
+			locks:     make(map[string]*lfsLock, len(repoSnap.Locks)),
+		}
+		for _, l := range repoSnap.Locks {
+			lock := l
+			rs.locks[lock.ID] = &lock
+		}
 		for name, revSnap := range repoSnap.Revisions {
 			vs := &revisionState{
 				files:      make(map[string]*fileRef, len(revSnap.Files)),

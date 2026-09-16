@@ -102,6 +102,25 @@ func dedupShardBody(shard *shardformat.Shard, body []byte) ([]byte, error) {
 // also reflect it immediately) can feed it shard bytes through the
 // identical parsing/indexing path handleUploadShard uses.
 func (s *Server) IngestShard(body []byte) error {
+	// Parse first so a malformed body is rejected before anything is
+	// written; then persist before indexing, so a crash between the two
+	// leaves a file the next startup's ScanShards re-indexes rather
+	// than an index entry with no file behind it.
+	if _, err := shardformat.ReadShard(bytes.NewReader(body)); err != nil {
+		return err
+	}
+	shardHash := merklehash.ComputeDataHash(body)
+	if err := s.persistShard(shardHash, body); err != nil {
+		return fmt.Errorf("persist shard: %w", err)
+	}
+	return s.indexShard(body, shardHash)
+}
+
+// indexShard merges an already-validated shard body (content hash
+// shardHash) into the in-memory indices. Shared by IngestShard (an
+// upload) and ScanShards (a file another replica wrote to the shard
+// dir); idempotent for a body seen before.
+func (s *Server) indexShard(body []byte, shardHash merklehash.Hash) error {
 	shard, err := shardformat.ReadShard(bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -138,7 +157,6 @@ func (s *Server) IngestShard(body []byte) error {
 	// chunkHashToShard's doc comment). ComputeDataHash is content-addressed,
 	// so an identical shard body (same content, uploaded twice) resolves
 	// to the same entry with no duplication of storage.
-	shardHash := merklehash.ComputeDataHash(body)
 	served, err := dedupShardBody(shard, body)
 	if err != nil {
 		return err

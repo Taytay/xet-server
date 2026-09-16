@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased - Git LFS bridge
+
+- **Synced-folder mode (`-sync-folder`)**: the data directory can be a
+  folder shared through Dropbox, Syncthing or a mount, with one xetd per
+  machine. Shard bodies are persisted as content-named files, the index
+  is rebuilt from them (no snapshots), other replicas' uploads are picked
+  up by rescans (periodic, and on lookup misses when the directory's
+  mtime moved), files whose xorbs have not synced are refused with a 503
+  instead of served truncated, and git-lfs locks become write-once claim
+  files with a deterministic election. `docs/GIT_LFS.md` has the design.
+- **Shard bodies are always persisted** (`<data>/shards/<hash>`), also
+  without `-sync-folder`: an upload survives a crash before the next
+  snapshot, and startup re-indexes any shard the snapshot lacks. Xorb
+  footers missing from the index are derived from the stored bytes on
+  demand.
+- **Git LFS server** under `/{owner}/{name}.git/info/lfs` on the Hub port
+  (`docs/GIT_LFS.md`): batch responses now carry the per-object `actions`
+  the stock `git-lfs` client and `git-xet` need (`xet` transfer for
+  uploads, `basic` hrefs for downloads), `GET objects/{oid}` streams a file
+  reconstructed from xorbs with `Range` support, and the File Locking API
+  (`locks`, `locks/verify`, `locks/{id}/unlock`) is implemented and
+  persisted in the hub snapshot.
+- **`casserver.ReconstructFile`**: server-side reconstruction of a file
+  (or byte range) from its shard terms and xorb chunks, decompressing
+  LZ4/BG4 chunks on the way out. Only the LFS bridge uses it; real Xet
+  clients still reconstruct client-side.
+- **`auth.SignedTokenAuth`**: with a shared secret, the Hub shim now mints
+  HMAC-signed, scoped, expiring CAS tokens instead of random strings the
+  CAS could not accept when auth was on. Also accepts the secret as an
+  HTTP Basic password (the only shape git-lfs can send); the user name
+  becomes the Principal's subject and the owner of locks. `-token-ttl`
+  sets the lifetime.
+- **Newer xet-core clients**: `POST /shards` (unversioned, what git-xet
+  0.2.1 and recent hf_xet actually call) is served alongside
+  `/v1/shards`. (The global-dedup prefix those clients send is covered
+  under Fixed below.)
+
+
 All notable changes to Xet Server will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -18,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identical bytes from a second machine stored nothing, and machines that
   never uploaded downloading by name and as a whole repo. A script can
   now declare its own budget with a `# XET_IT_TEST_TIMEOUT: N` header.
+
+### Fixed
 
 - **Global-dedup responses are complete shard files.** Clients upload
   shards with the footer and lookup tables stripped, but load what they

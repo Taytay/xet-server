@@ -49,6 +49,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -208,6 +209,21 @@ func (s *Server) callContext(r *http.Request) (context.Context, context.CancelFu
 // exercised, by this package) zero-XetHash case, correctly reporting
 // "unknown" rather than fabricate an answer.
 func (s *Server) XetHashForSHA256(string) (merklehash.Hash, bool) { return merklehash.Hash{}, false }
+
+// ReconstructFile completes casInfo for hubserver's git-lfs download
+// bridge, which needs a CAS that can assemble a file from xorbs. This
+// proxy holds no xorbs of its own (its CAS side is a pass-through cache,
+// see internal/proxycas), so the bridge is not available through it:
+// point git-lfs at a real xetd instead.
+func (s *Server) ReconstructFile(context.Context, merklehash.Hash, int64, int64, io.Writer) error {
+	return errors.New("proxyhub: git-lfs downloads are not served through the proxy; use a xetd instance")
+}
+
+// MissingXorbs completes casInfo alongside ReconstructFile; the proxy
+// holds no xorbs, so the answer is the same "not served here".
+func (s *Server) MissingXorbs(context.Context, merklehash.Hash) ([]merklehash.Hash, error) {
+	return nil, errors.New("proxyhub: git-lfs downloads are not served through the proxy; use a xetd instance")
+}
 
 // FileSize implements the other half of casInfo - answering, for a
 // given Xet hash, the file's verified size. Backed by

@@ -166,9 +166,7 @@ func (s *Server) handleReconstructionV2(w http.ResponseWriter, r *http.Request) 
 // Bumping here means eviction sees "about to be needed" even in the
 // presigned-URL case.
 func (s *Server) lookupXorbFooter(hash merklehash.Hash) (xorbformat.FooterV1, bool) {
-	s.xorbMu.RLock()
-	f, known := s.xorbFooters[hash]
-	s.xorbMu.RUnlock()
+	f, _, known := s.xorbMeta(context.Background(), hash)
 	if !known {
 		return xorbformat.FooterV1{}, false
 	}
@@ -226,6 +224,9 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	shardBytes, known := s.dedupAnswer(hash)
+	if !known && s.rescanOnMiss() {
+		shardBytes, known = s.dedupAnswer(hash)
+	}
 	if !known || shardBytes == nil {
 		// !known: no uploaded shard has ever referenced this chunk.
 		// shardBytes == nil: the shard's body was evicted or never

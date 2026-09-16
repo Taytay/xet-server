@@ -142,6 +142,10 @@ type Server struct {
 	// pre-v0.8.0 behavior, unconditionally allowing every request - until
 	// SetAuthenticator is called with something else.
 	authenticator auth.Authenticator
+
+	// folder is the synced-folder support (shard dir, rescans); see
+	// folder.go. Zero value means shards live only in memory/snapshot.
+	folder folderState
 }
 
 func New(xorbs storage.Store) *Server {
@@ -293,8 +297,14 @@ func (s *Server) handleStorageStats(w http.ResponseWriter, r *http.Request) {
 // indexes reconstructions under.
 func (s *Server) XetHashForSHA256(sha256Hex string) (merklehash.Hash, bool) {
 	s.sha256Mu.RLock()
-	defer s.sha256Mu.RUnlock()
 	h, ok := s.sha256ToXet[sha256Hex]
+	s.sha256Mu.RUnlock()
+	if !ok && s.rescanOnMiss() {
+		// A shard another replica wrote may have just synced in.
+		s.sha256Mu.RLock()
+		h, ok = s.sha256ToXet[sha256Hex]
+		s.sha256Mu.RUnlock()
+	}
 	return h, ok
 }
 
@@ -333,8 +343,20 @@ const (
 	V1 = "/v1"
 	V2 = "/v2"
 
-	XorbsPath             = V1 + "/xorbs/{prefix}/{hash}"
-	ShardsPath            = V1 + "/shards"
+	XorbsPath  = V1 + "/xorbs/{prefix}/{hash}"
+	ShardsPath = V1 + "/shards"
+	// ShardsPathUnversioned is where xet-core >= 1.5 (git-xet 0.2, recent
+	// hf_xet) POSTs shards: cas_client/src/remote_client.rs builds
+	// "{endpoint}/shards" with no version segment, while the openapi
+	// spec still documents /v1/shards. Both are served identically;
+	// cmd/xetd mounts this one at the root of the CAS mux.
+	ShardsPathUnversioned = "/shards"
+	// Deliberately NOT served: POST /v2/shards. Current hf_xet tries it
+	// first, but v2 is a different protocol - the response is a stream
+	// of newline-delimited JSON progress frames with a "type" field, and
+	// the v1 body {"result":1} makes the client fail with "failed to
+	// parse shard upload progress frame". A 404 there makes it fall back
+	// to the v1 path, which is what this server speaks (PROTOCOL.md #16).
 	ReconstructionsPath   = V1 + "/reconstructions/{file_id}"
 	ReconstructionsPathV2 = V2 + "/reconstructions/{file_id}"
 	ChunksPath            = V1 + "/chunks/{prefix}/{hash}"
@@ -352,6 +374,7 @@ func (s *Server) routes() {
 	routing.Apply(s.mux, []routing.Route{
 		routing.Mount("POST", XorbsPath, uploadXorb),
 		routing.Mount("POST", ShardsPath, uploadShard),
+		routing.Mount("POST", ShardsPathUnversioned, uploadShard),
 		routing.Mount("GET", XorbsPath, s.requireScope(auth.ScopeRead, s.handleFetchXorb)),
 		routing.Mount("HEAD", XorbsPath, s.requireScope(auth.ScopeRead, s.handleHeadXorb)),
 		routing.Mount("GET", ReconstructionsPath, s.requireScope(auth.ScopeRead, s.handleReconstructionV1)),

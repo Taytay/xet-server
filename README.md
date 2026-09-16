@@ -139,6 +139,16 @@ and the key design decisions). Short version:
 
 # Installation
 
+## Git LFS
+
+With `-hub-addr` set, xetd is also a Git LFS server: set a repo's `lfs.url`
+to `http://<hub>/{owner}/{name}.git/info/lfs` and the stock `git-lfs`
+client plus `git-xet` push LFS objects into the Xet CAS with chunk-level
+dedup, pull them back over the basic transfer, and use `git lfs lock`.
+With `-sync-folder` the data directory can be a Dropbox/Syncthing folder
+shared by one xetd per machine, no server anywhere. See
+[docs/GIT_LFS.md](docs/GIT_LFS.md).
+
 ## Prerequisites
 
 - Go 1.27 or later

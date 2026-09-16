@@ -188,17 +188,15 @@ func (s *Server) handleFetchXorb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.xorbMu.Lock()
-	total, known := s.xorbRawLength[hash]
-	if known {
-		s.xorbLastAccess[hash] = time.Now()
-		s.xorbInFlight[hash]++
-	}
-	s.xorbMu.Unlock()
+	_, total, known := s.xorbMeta(r.Context(), hash)
 	if !known {
 		http.NotFound(w, r)
 		return
 	}
+	s.xorbMu.Lock()
+	s.xorbLastAccess[hash] = time.Now()
+	s.xorbInFlight[hash]++
+	s.xorbMu.Unlock()
 	defer func() {
 		s.xorbMu.Lock()
 		s.xorbInFlight[hash]--
@@ -248,9 +246,7 @@ func (s *Server) handleHeadXorb(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "invalid hash", http.StatusBadRequest)
 		return
 	}
-	s.xorbMu.RLock()
-	total, known := s.xorbRawLength[hash]
-	s.xorbMu.RUnlock()
+	_, total, known := s.xorbMeta(r.Context(), hash)
 	if !known {
 		http.NotFound(w, r)
 		return
