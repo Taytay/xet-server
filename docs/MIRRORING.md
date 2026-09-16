@@ -156,6 +156,16 @@ server.
 `$XETD_AUTH_TOKEN` set but `$HF_TOKEN` on the client side is missing,
 empty, or doesn't match. Confirm both sides have the exact same value.
 
+**Intermittent `401` near the end of a long download through `xet-proxyd`.**
+This is the real Xet CAS rejecting a short-lived xet access token that
+expired mid-run (a repo you're otherwise downloading from successfully),
+not a proxy auth problem. Since v1.1.0 `xet-proxyd` detects that 401 on the
+CAS-facing port, mints a fresh replacement token from the real Hub with the
+same client credential, and retries the request once - the download no
+longer aborts, and no cached xet token past its `exp` is ever handed out.
+If you still see it on an older build, upgrade; re-running `hf download`
+always resumes via the `.incomplete` mechanism regardless.
+
 **Uploaded a file, but `hf download` can't find it on a different
 machine.** Confirm `HF_ENDPOINT` is set to the same value on both
 machines, and that the upload actually succeeded (check the command's own

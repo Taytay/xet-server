@@ -278,6 +278,12 @@ func withUpstreamCASClient(hub *proxyhub.Server, next http.Handler) http.Handler
 			return
 		}
 		ctx := proxycas.WithCASClient(r.Context(), hfclient.NewCASClient(casURL))
+		// Also wire in the Hub-facing proxy as a token refresher, so the
+		// CAS-facing proxy can transparently heal a 401 the real CAS
+		// returns for a client's expired xet access token by minting a
+		// fresh one with that same client's credential (see
+		// proxycas.fetchCASWithHeal).
+		ctx = proxycas.WithTokenRefresher(ctx, hub)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

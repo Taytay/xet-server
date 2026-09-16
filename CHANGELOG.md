@@ -5,6 +5,50 @@ All notable changes to Xet Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-15
+
+### Fixed
+
+- **`xet-proxyd`: expired Xet access tokens no longer abort long downloads
+  with a baffling `401`.** Xet's per-repo access tokens are short-lived,
+  and on a long, high-concurrency download (e.g. `hf download` of a
+  900+-file dataset) a token can expire between the client's refresh and
+  the moment a file's reconstruction is requested from the real CAS, which
+  answers `401 Unauthorized` for a repo the client was just downloading
+  from successfully. The proxy previously relayed that 401 verbatim (its
+  documented relay-4xx-as-is policy), failing the whole download. It now
+  detects the 401 on the CAS-facing port, mints a fresh replacement token
+  from the real Hub using the **same credential the client already
+  presented** (never a secret the proxy holds itself, and scoped to the
+  same repo/ref/read-vs-write kind - so it can only restore access the
+  client already had), and retries the request once. The heal covers every
+  upstream CAS fetch: reconstruction (`v1`/`v2`), xorb GET and HEAD, and
+  chunk-dedup lookup - see `internal/proxycas`'s `fetchCASWithHeal` and
+  `internal/proxyhub`'s `FreshXetTokenFor`. Backward compatible: without a
+  token refresher wired in (any non-`xet-proxyd` caller of
+  `internal/proxycas`), an upstream 401 is still relayed unchanged.
+
+- **`xet-proxyd`: a cached xet token past its `exp` is never served.** The
+  stale-fallback for `xet-{read,write}-token` responses previously served
+  whatever was cached when a live refresh failed, regardless of the cached
+  token's expiry - so one transient upstream failure at token-rollover time
+  handed the client a token that was dead on arrival (guaranteeing the 401
+  above). The fallback now refuses to serve a cached token whose `exp` is
+  within 60 seconds of now or already past, surfacing the upstream error
+  instead - a clean, retryable failure. See `internal/proxyhub`'s
+  `tokenSafetyMargin`.
+
+### Added
+
+- **`internal/proxyhub.Server.FreshXetTokenFor` and
+  `internal/proxycas.WithTokenRefresher`** - the two surfaces the 401 heal
+  is built on. The Hub-facing proxy records each relayed xet access token
+  alongside the exact Hub call parameters and the caller's credential that
+  minted it (a bounded index, so it can mint a fresh replacement on demand
+  without ever holding a credential of its own); `cmd/xet-proxyd`'s
+  CAS-facing middleware installs that refresher into the request context so
+  `fetchCASWithHeal` can retry a rejected fetch.
+
 ## [1.0.0] - 2026-09-12
 
 The first tagged release with a proper distribution story - the Go module

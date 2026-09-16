@@ -45,6 +45,10 @@ func WithCASClient(ctx context.Context, casClient *hfclient.CASClient) context.C
     (after resolving the repo's CAS endpoint via a Hub xet-token request) before
     forwarding a request into this server's ServeHTTP.
 
+func WithTokenRefresher(ctx context.Context, refresher TokenRefresher) context.Context
+    WithTokenRefresher returns a copy of ctx carrying refresher, for handlers in
+    this package to read via tokenRefresherFromContext.
+
 
 TYPES
 
@@ -88,4 +92,13 @@ func (s *Server) SetRateLimiter(l *ratelimit.Limiter)
     rate limiter is a distinct, narrower concern (guarding its own local
     CPU cost) that a caller wanting both should configure separately via
     s.Embedded.SetUploadRateLimiter.
+
+type TokenRefresher interface {
+	FreshXetTokenFor(ctx context.Context, presentedToken string) (freshToken string, ok bool)
+}
+    TokenRefresher mints a fresh replacement for an upstream xet access
+    token the real CAS rejected. Implemented by internal/proxyhub.Server
+    (FreshXetTokenFor) and installed into the request context by
+    cmd/xet-proxyd's withUpstreamCASClient middleware; proxycas itself never
+    constructs one, and never heals a 401 when none is wired in.
 ```

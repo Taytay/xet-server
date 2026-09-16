@@ -232,6 +232,35 @@ func casClientFromContext(r *http.Request) (*hfclient.CASClient, error) {
 	return c, nil
 }
 
+// tokenRefresherContextKey is how cmd/xet-proxyd hands this request's
+// upstream xet-token refresher (internal/proxyhub.Server) down to this
+// package's handlers, so a fetch the real CAS rejects with 401 can be
+// retried with a freshly-minted token - see fetchCASWithHeal.
+type tokenRefresherContextKey struct{}
+
+// TokenRefresher mints a fresh replacement for an upstream xet access
+// token the real CAS rejected. Implemented by internal/proxyhub.Server
+// (FreshXetTokenFor) and installed into the request context by
+// cmd/xet-proxyd's withUpstreamCASClient middleware; proxycas itself never
+// constructs one, and never heals a 401 when none is wired in.
+type TokenRefresher interface {
+	FreshXetTokenFor(ctx context.Context, presentedToken string) (freshToken string, ok bool)
+}
+
+// WithTokenRefresher returns a copy of ctx carrying refresher, for
+// handlers in this package to read via tokenRefresherFromContext.
+func WithTokenRefresher(ctx context.Context, refresher TokenRefresher) context.Context {
+	return context.WithValue(ctx, tokenRefresherContextKey{}, refresher)
+}
+
+func tokenRefresherFromContext(r *http.Request) (TokenRefresher, error) {
+	c, ok := r.Context().Value(tokenRefresherContextKey{}).(TokenRefresher)
+	if !ok || c == nil {
+		return nil, fmt.Errorf("proxycas: no token refresher in request context (caller must set one via WithTokenRefresher)")
+	}
+	return c, nil
+}
+
 // httpError writes a plain-text HTTP error, logging it at a level
 // matching its cause - same convention as casserver's own httpError: a
 // 5xx (this proxy's own fault, or an upstream failure it's relaying) is
@@ -294,6 +323,48 @@ func relayResponse(w http.ResponseWriter, resp *http.Response) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// fetchCASWithHeal runs fetch with the request's presented credential and,
+// when the upstream response is a 401, transparently mints a fresh
+// replacement xet access token (via the TokenRefresher the caller wired in -
+// cmd/xet-proxyd's proxyhub) and retries fetch once with it. A client whose
+// short-lived xet token expired mid-download otherwise sees a baffling "401
+// Unauthorized" from the real CAS for a repo it just successfully downloaded
+// other files from; the replacement is minted with the client's OWN
+// credential for the same repo/ref, so this only restores access the client
+// already had. Returns the final response (the caller must close it) - the
+// original 401 response when there is nothing to heal with or the heal fails,
+// or the retried response when it succeeds. err is only ever the first
+// fetch's error: a failed heal retry falls back to relaying the original 401
+// rather than substituting a proxy-synthesized 502 for a real upstream
+// status.
+func (s *Server) fetchCASWithHeal(r *http.Request, fetch func(cred auth.CredentialHelper) (*http.Response, error)) (*http.Response, error) {
+	resp, err := fetch(auth.CredentialFromRequest(r))
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+	refresher, rerr := tokenRefresherFromContext(r)
+	if rerr != nil {
+		return resp, nil
+	}
+	fresh, ok := refresher.FreshXetTokenFor(r.Context(), auth.BearerToken(r))
+	if !ok || fresh == "" {
+		return resp, nil
+	}
+	// Keep the original 401's body open as a fallback: if the heal retry
+	// errors, the caller relays the original upstream 401 (the truthful
+	// status) rather than a 502 synthesized by this proxy.
+	retry, retryErr := fetch(auth.NewBearerCredentialHelper(fresh))
+	if retryErr != nil {
+		slog.Warn("proxycas: token-heal retry failed, relaying original 401", "error", retryErr)
+		return resp, nil
+	}
+	if retry.StatusCode == http.StatusUnauthorized {
+		slog.Warn("proxycas: upstream still rejected freshly minted replacement token", "status", retry.StatusCode)
+	}
+	resp.Body.Close()
+	return retry, nil
 }
 
 // --- xorb byte serving -------------------------------------------------
@@ -433,7 +504,9 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp, err := cas.FetchChunkDedup(r.Context(), auth.CredentialFromRequest(r), prefix, hexHash)
+	resp, err := s.fetchCASWithHeal(r, func(cred auth.CredentialHelper) (*http.Response, error) {
+		return cas.FetchChunkDedup(r.Context(), cred, prefix, hexHash)
+	})
 	if err != nil {
 		httpError(w, "fetch chunk-dedup from upstream: "+err.Error(), http.StatusBadGateway)
 		return
@@ -450,7 +523,9 @@ func (s *Server) relayXorbLive(w http.ResponseWriter, r *http.Request, prefix, h
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp, err := cas.FetchXorb(r.Context(), auth.CredentialFromRequest(r), prefix, hexHash, r.Header.Get("Range"))
+	resp, err := s.fetchCASWithHeal(r, func(cred auth.CredentialHelper) (*http.Response, error) {
+		return cas.FetchXorb(r.Context(), cred, prefix, hexHash, r.Header.Get("Range"))
+	})
 	if err != nil {
 		httpError(w, "fetch xorb from upstream: "+err.Error(), http.StatusBadGateway)
 		return
@@ -468,7 +543,9 @@ func (s *Server) relayHeadXorbLive(w http.ResponseWriter, r *http.Request, prefi
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp, err := cas.HeadXorb(r.Context(), auth.CredentialFromRequest(r), prefix, hexHash)
+	resp, err := s.fetchCASWithHeal(r, func(cred auth.CredentialHelper) (*http.Response, error) {
+		return cas.HeadXorb(r.Context(), cred, prefix, hexHash)
+	})
 	if err != nil {
 		httpError(w, "head xorb from upstream: "+err.Error(), http.StatusBadGateway)
 		return
@@ -489,11 +566,13 @@ func (s *Server) ensureXorbCached(r *http.Request, hash merklehash.Hash) error {
 	if err != nil {
 		return err
 	}
-	return s.fetchAndIngestXorb(r.Context(), cas, auth.CredentialFromRequest(r), hash)
+	return s.fetchAndIngestXorb(r, cas, hash)
 }
 
-func (s *Server) fetchAndIngestXorb(ctx context.Context, cas *hfclient.CASClient, cred auth.CredentialHelper, hash merklehash.Hash) error {
-	resp, err := cas.FetchXorb(ctx, cred, xorbPrefix, hash.Hex(), "")
+func (s *Server) fetchAndIngestXorb(r *http.Request, cas *hfclient.CASClient, hash merklehash.Hash) error {
+	resp, err := s.fetchCASWithHeal(r, func(cred auth.CredentialHelper) (*http.Response, error) {
+		return cas.FetchXorb(r.Context(), cred, xorbPrefix, hash.Hex(), "")
+	})
 	if err != nil {
 		return fmt.Errorf("fetch xorb %s from upstream: %w", hash.Hex(), err)
 	}
@@ -502,7 +581,7 @@ func (s *Server) fetchAndIngestXorb(ctx context.Context, cas *hfclient.CASClient
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return &upstreamStatusError{Status: resp.StatusCode, Body: string(body)}
 	}
-	if _, err := s.Embedded.IngestXorb(ctx, hash, resp.Body); err != nil {
+	if _, err := s.Embedded.IngestXorb(r.Context(), hash, resp.Body); err != nil {
 		return fmt.Errorf("ingest xorb %s: %w", hash.Hex(), err)
 	}
 	return nil
@@ -731,7 +810,9 @@ func (s *Server) relayReconstructionLive(w http.ResponseWriter, r *http.Request,
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp, err := cas.FetchReconstruction(r.Context(), auth.CredentialFromRequest(r), fileIDHex, r.Header.Get("Range"), v2)
+	resp, err := s.fetchCASWithHeal(r, func(cred auth.CredentialHelper) (*http.Response, error) {
+		return cas.FetchReconstruction(r.Context(), cred, fileIDHex, r.Header.Get("Range"), v2)
+	})
 	if err != nil {
 		httpError(w, "fetch reconstruction from upstream: "+err.Error(), http.StatusBadGateway)
 		return
@@ -769,10 +850,11 @@ func (s *Server) ensureFileReconCached(r *http.Request, fileID merklehash.Hash) 
 	if err != nil {
 		return false, err
 	}
-	cred := auth.CredentialFromRequest(r)
 
 	fileIDHex := fileID.Hex()
-	resp, err := cas.FetchReconstruction(r.Context(), cred, fileIDHex, "", false)
+	resp, err := s.fetchCASWithHeal(r, func(cred auth.CredentialHelper) (*http.Response, error) {
+		return cas.FetchReconstruction(r.Context(), cred, fileIDHex, "", false)
+	})
 	if err != nil {
 		return false, fmt.Errorf("fetch reconstruction for %s from upstream: %w", fileIDHex, err)
 	}

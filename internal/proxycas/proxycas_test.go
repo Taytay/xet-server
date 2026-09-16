@@ -10,10 +10,13 @@ package proxycas
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/guilt/xet-server/internal/auth"
@@ -686,5 +689,125 @@ func TestAuth_DelegatesToEmbeddedServer(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 (embedded server's auth must be enforced)", resp.StatusCode)
+	}
+}
+
+// withCASClientAndRefresher wires both the upstream CAS client and a token
+// refresher into the request context, mirroring cmd/xet-proxyd's
+// withUpstreamCASClient middleware.
+func withCASClientAndRefresher(next http.Handler, casClient *hfclient.CASClient, refresher TokenRefresher) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := WithTokenRefresher(WithCASClient(r.Context(), casClient), refresher)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// fakeTokenRefresher mints the token the test's mint callback returns.
+type fakeTokenRefresher struct {
+	mint func(presented string) (string, bool)
+}
+
+func (f *fakeTokenRefresher) FreshXetTokenFor(ctx context.Context, presented string) (string, bool) {
+	if f.mint == nil {
+		return "", false
+	}
+	return f.mint(presented)
+}
+
+// TestReconstruction_Upstream401HealedWithFreshToken pins the transparent
+// 401 heal: when the real CAS rejects a reconstruction fetch with 401 (an
+// expired xet access token), the proxy mints a fresh replacement and retries
+// instead of relaying the baffling 401 to the client.
+func TestReconstruction_Upstream401HealedWithFreshToken(t *testing.T) {
+	blob, xorbHash := buildFooterlessXorb(t, [][]byte{[]byte("xorb bytes")})
+	fileHash := hashFromByte(0xE4)
+
+	var (
+		mu        sync.Mutex
+		reconAuth []string // Authorization header per reconstruction request
+	)
+	recon := reconwire.ResponseV1{
+		Terms: []reconwire.Term{
+			{Hash: xorbHash.Hex(), Range: reconwire.IndexRange{Start: 0, End: 1}, UnpackedLength: uint32(len(blob))},
+		},
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.URL.Path == "/v1/reconstructions/"+fileHash.Hex():
+			reconAuth = append(reconAuth, r.Header.Get("Authorization"))
+			if len(reconAuth) == 1 {
+				http.Error(w, "token expired", http.StatusUnauthorized)
+				return
+			}
+			json.NewEncoder(w).Encode(recon)
+		case strings.HasPrefix(r.URL.Path, "/v1/xorbs/default/"):
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(blob)))
+			w.Write(blob)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store, err := fsstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("fsstore.New() error = %v", err)
+	}
+	proxy := New(store)
+	casClient := hfclient.NewCASClient(upstream.URL)
+	refresher := &fakeTokenRefresher{mint: func(presented string) (string, bool) {
+		return "fresh-token-for-" + presented, true
+	}}
+	mux := http.NewServeMux()
+	mux.Handle("/", withCASClientAndRefresher(proxy, casClient, refresher))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/reconstructions/"+fileHash.Hex(), nil)
+	req.Header.Set("Authorization", "Bearer expired-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (401 must be healed with a fresh token)", resp.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reconAuth) != 2 {
+		t.Fatalf("upstream saw %d reconstruction requests, want 2 (original + healed retry)", len(reconAuth))
+	}
+	if reconAuth[0] != "Bearer expired-token" {
+		t.Errorf("first reconstruction Authorization = %q, want the client's expired token relayed", reconAuth[0])
+	}
+	if reconAuth[1] != "Bearer fresh-token-for-expired-token" {
+		t.Errorf("retried reconstruction Authorization = %q, want the freshly minted token", reconAuth[1])
+	}
+}
+
+// TestReconstruction_Upstream401RelayedWhenNoRefresherWired pins that the
+// heal is strictly opt-in: without a TokenRefresher in the request context
+// (the plain newTestServer path, and any non-xet-proxyd caller of this
+// package), an upstream 401 is relayed unchanged rather than healed or
+// rewritten.
+func TestReconstruction_Upstream401RelayedWhenNoRefresherWired(t *testing.T) {
+	fileHash := hashFromByte(0xE5)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "token expired", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	ts, _ := newTestServer(t, upstream)
+	resp, err := http.Get(ts.URL + "/v1/reconstructions/" + fileHash.Hex())
+	if err != nil {
+		t.Fatalf("GET error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 relayed unchanged when no refresher is wired", resp.StatusCode)
 	}
 }

@@ -120,6 +120,14 @@ type Server struct {
 	xetTokenCache *ttlCache[*hfclient.XetToken]
 	casURLCache   *ttlCache[string]
 
+	// accessTokenIndex maps a relayed xet access token back to the Hub
+	// call parameters (and the caller's credential) that minted it, so a
+	// CAS-port 401 presenting that token can be healed transparently with
+	// a fresh replacement - see token.go's FreshXetTokenFor. Guarded by
+	// accessTokenMu.
+	accessTokenMu    sync.Mutex
+	accessTokenIndex map[string]tokenRecord
+
 	// fileSizeByXetHash records the size upstream itself declared for a
 	// given Xet hash (via a resolve or tree-listing response, both of
 	// which carry it directly) - read back by FileSize below to answer
@@ -166,6 +174,7 @@ func New(hubBaseURL, casBaseURL string) *Server {
 		resolveFreshness:    newTTLCache[struct{}](),
 		xetTokenCache:       newTTLCache[*hfclient.XetToken](),
 		casURLCache:         newTTLCache[string](),
+		accessTokenIndex:    make(map[string]tokenRecord),
 		fileSizeByXetHash:   make(map[merklehash.Hash]int64),
 		authenticator:       auth.NoAuth{},
 	}
