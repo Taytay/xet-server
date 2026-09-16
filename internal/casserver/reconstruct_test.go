@@ -180,12 +180,24 @@ func TestNewerClientPaths_DefaultDedupPrefixAndUnversionedShards(t *testing.T) {
 			t.Errorf("prefix %q: status %d, want 404 (accepted prefix, unknown chunk)", prefix, resp.StatusCode)
 		}
 	}
-	resp, err := http.Post(ts.URL+"/shards", "application/octet-stream", bytes.NewReader([]byte("not a shard")))
+	for _, path := range []string{"/shards", "/v1/shards"} {
+		resp, err := http.Post(ts.URL+path, "application/octet-stream", bytes.NewReader([]byte("not a shard")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST %s: status %d, want 400 (route exists, body malformed)", path, resp.StatusCode)
+		}
+	}
+	// /v2/shards must stay a 404 so a client that tries it first falls
+	// back to v1 - see the comment next to ShardsPathUnversioned.
+	resp, err := http.Post(ts.URL+"/v2/shards", "application/octet-stream", bytes.NewReader([]byte("x")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("POST /shards: status %d, want 400 (route exists, body malformed)", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /v2/shards: status %d, want 404 (v2 protocol not implemented; client falls back)", resp.StatusCode)
 	}
 }

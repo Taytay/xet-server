@@ -335,6 +335,12 @@ const (
 	// spec still documents /v1/shards. Both are served identically;
 	// cmd/xetd mounts this one at the root of the CAS mux.
 	ShardsPathUnversioned = "/shards"
+	// Deliberately NOT served: POST /v2/shards. Current hf_xet tries it
+	// first, but v2 is a different protocol - the response is a stream
+	// of newline-delimited JSON progress frames with a "type" field, and
+	// the v1 body {"result":1} makes the client fail with "failed to
+	// parse shard upload progress frame". A 404 there makes it fall back
+	// to the v1 path, which is what this server speaks (PROTOCOL.md #16).
 	ReconstructionsPath   = V1 + "/reconstructions/{file_id}"
 	ReconstructionsPathV2 = V2 + "/reconstructions/{file_id}"
 	ChunksPath            = V1 + "/chunks/{prefix}/{hash}"

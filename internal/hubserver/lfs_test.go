@@ -137,8 +137,8 @@ func TestLFSBatch_UploadWithXetReturnsTokenActions(t *testing.T) {
 	if up.Header[headerXetSessionID] == "" || up.Header[headerXetTokenExpiration] == "" {
 		t.Error("session id / expiration headers missing")
 	}
-	if up.ExpiresIn <= 0 {
-		t.Error("expires_in missing")
+	if up.ExpiresIn != 0 {
+		t.Error("xet upload action must not carry expires_in (git-xet refreshes its own token)")
 	}
 	// The minted token must verify as a write token for alice on the CAS side.
 	r, _ := http.NewRequest(http.MethodGet, "http://cas/", nil)

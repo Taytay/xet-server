@@ -248,6 +248,11 @@ func (s *Server) fillUploadBatch(resp *lfsBatchResponse, req *lfsBatchRequest, r
 			return
 		}
 		session, _ := randomToken()
+		// No expires_in on the xet action: git-lfs refuses to start a
+		// transfer whose action has expired, but the token inside is
+		// git-xet's business - it refreshes through href on its own when
+		// X-Xet-Token-Expiration nears, so a short -token-ttl must not
+		// make git-lfs give up before the agent even starts.
 		upload = &lfsAction{
 			Href: base + "/api/models/" + repoID + "/xet-write-token/" + branchFromRef(req.Ref.Name),
 			Header: map[string]string{
@@ -256,7 +261,6 @@ func (s *Server) fillUploadBatch(resp *lfsBatchResponse, req *lfsBatchRequest, r
 				headerXetTokenExpiration: strconv.FormatInt(exp.Unix(), 10),
 				headerXetSessionID:       session,
 			},
-			ExpiresIn: int64(s.tokenTTL.Seconds()),
 		}
 	}
 
