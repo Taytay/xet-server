@@ -314,6 +314,25 @@ PROTOCOL.md).
   (`casserver.SetFetchURLSigner`): a read token for the requesting
   principal, expiring after `-token-ttl`, in the query string, accepted
   only by the xorb GET/HEAD routes. With auth off nothing changes.
+- **Deleting is the operator's call, and the tool depends on the role.**
+  `xet-proxyd` is a cache, so LRU eviction (`internal/eviction`) is the
+  right way to bound it: anything it drops can be fetched again. A
+  standalone `xetd` is the only copy, and it cannot know which files
+  are still wanted (a git-lfs object is live while a git ref reaches
+  its pointer; only git knows). So it has keep-set garbage collection
+  instead (`casserver.Collect`, `POST /v1/gc`, `xetd gc`): the operator
+  lists the OIDs to keep, the Hub shim's registry adds the files it
+  committed, and everything unreachable is dropped from the shards and
+  the store. The route is mounted by `cmd/xetd` only, never by
+  `casserver.Server.routes`, so the proxy's embedded server cannot
+  acquire it, and it needs the `admin` scope that only the shared
+  secret holds. What makes it safe rather than merely correct is the
+  grace period: xet clients hold references to xorbs for up to three
+  weeks without asking (their own shard cache, and dedup answers, which
+  this server now writes to expire after the same three weeks), so a
+  xorb accessed within the grace is never deleted and a shard that
+  arrived within it keeps its files. Not offered in synced-folder mode,
+  where other replicas may still reference what one deletes.
 - **In-memory indices, periodically checkpointed - not a live database.**
   `casserver.Server` and `hubserver.Server` hold their reconstruction/repo
   state in memory, each behind its own `sync.RWMutex` (one per index map in

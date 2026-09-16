@@ -165,6 +165,34 @@ Consequences to know about:
   and macOS, and the on-disk operations are create-temp, rename, stat and
   readdir. Windows has not been exercised end to end.
 
+## Reclaiming space
+
+Nothing is deleted on its own. When history is rewritten or a branch
+with large files is dropped, the objects stay until you tell the server
+which ones are still reachable:
+
+```bash
+: > keep.txt
+for r in /srv/git/*/*.git; do git -C "$r" lfs ls-files --all --long >> keep.txt; done
+xetd gc -server http://server:8420 -auth-token "$XETD_AUTH_TOKEN" -keep keep.txt -dry-run
+xetd gc -server http://server:8420 -auth-token "$XETD_AUTH_TOKEN" -keep keep.txt
+```
+
+`--all` lists the objects of every reachable commit, not just the
+checkout; without it a run deletes every older version of every file.
+The first token of each line is the OID, so the output needs no
+massaging (a bare list of OIDs or pointer files work too). Files
+uploaded with `hf upload` are kept without being listed. What the run
+deletes, and what it deferred because of the grace period, is in its
+report. The README's "Reclaiming space" section explains the grace
+period (22 days by default: a xet client dedups from its own cache for
+three weeks without asking the server) and why lowering it is a
+decision, not a tuning.
+
+A cron job on the git host is the natural place for this; the keep list
+is the union across every repo the server backs, since a xorb can be
+shared by files in different repos.
+
 ## Known limits
 
 - Uploads require git-xet. A `basic`-only client cannot push (its objects
@@ -182,4 +210,5 @@ Consequences to know about:
   (a file from `hf upload` is downloadable through the LFS bridge by its
   SHA-256, since the shard carries it).
 - `-max-storage-bytes` eviction treats the store as a cache. For an LFS
-  source of truth leave it off.
+  source of truth leave it off and use `xetd gc` (above). GC is not
+  available in synced-folder mode.

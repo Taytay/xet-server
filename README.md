@@ -602,6 +602,56 @@ All off/on-defaults below; opt in or tune via `xetd` flags:
   (a final snapshot is still taken on graceful shutdown). Defaults to 1
   minute.
 
+## Reclaiming space: the standalone server versus the proxy
+
+The two binaries play different roles, and each has its own tool for a
+store that must not grow without bound:
+
+- **`xet-proxyd` is a cache** in front of huggingface.co. Every xorb it
+  holds can be fetched again, so deleting the least-recently-used ones
+  is always safe; that is what `-max-storage-bytes` eviction is for.
+- **`xetd` is the only copy** of what was pushed to it. Eviction there
+  deletes xorbs that files still reference (leave `-max-storage-bytes`
+  off), and the server cannot tell on its own which files are still
+  wanted: a file pushed through git-lfs is live as long as some git ref
+  reaches its pointer, and only git knows that. So the operator says
+  what to keep and `xetd gc` deletes the rest:
+
+  ```bash
+  # on the git host, for every repo the server backs
+  git -C /srv/git/team/game.git lfs ls-files --all --long > /tmp/keep.txt
+  # against the running server, with the shared secret
+  xetd gc -server http://xet:8420 -auth-token "$XETD_AUTH_TOKEN" -keep /tmp/keep.txt -dry-run
+  xetd gc -server http://xet:8420 -auth-token "$XETD_AUTH_TOKEN" -keep /tmp/keep.txt
+  ```
+
+  Files committed through the Hub shim (`hf upload`) are kept without
+  being listed; the shim's registry is the record that they are wanted.
+  Everything else is dropped from the index, the affected shards are
+  rewritten, unreferenced xorbs are deleted from the store, and a
+  snapshot is taken. The report says what happened (`-json` for the raw
+  form). Only the shared secret may run it (`POST /v1/gc` needs the
+  `admin` scope, which no minted token carries); with no auth
+  configured anyone can, like everything else.
+
+  **The grace period is the part to understand before lowering it.** A
+  xet client keeps the shards of its own uploads for three weeks and
+  deduplicates against them without asking the server, and it caches
+  every dedup answer the server gave it for the same three weeks. A
+  shard it uploads later may therefore reference a xorb the server has
+  not heard about since; delete that xorb and the new file cannot be
+  downloaded, and nothing says so at push time. `xetd gc` therefore
+  never deletes a xorb uploaded, fetched or advertised in a dedup
+  answer within the grace (`-gc-grace` on the server, `-grace` per run;
+  default 22 days), and it keeps every file whose shard arrived within
+  the grace even if the keep list does not name it yet (a push whose
+  git ref has not moved). Growth is bounded by live content plus three
+  weeks of churn. `-grace 0` is for a store whose clients you control
+  (the integration tests, a single machine whose cache you cleared).
+
+  Not available with `-sync-folder`: other replicas may still be
+  advertising or indexing what one replica deletes.
+
 # Testing
 
 ```bash
