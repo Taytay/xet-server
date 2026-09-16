@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
+
+- **Multi-client integration tests.** `integration-tests/multi_client_*.sh`
+  run the real `hf` CLI as several machines (each with its own `HF_HOME`,
+  `HF_XET_CACHE` and token) against one `xetd`, and assert from the
+  server's DEBUG log and the client's own log that the cross-client path
+  ran: a stranger's upload deduplicated against another machine's file
+  (the two fixes below were invisible to every single-cache test),
+  identical bytes from a second machine stored nothing, and machines that
+  never uploaded downloading by name and as a whole repo. A script can
+  now declare its own budget with a `# XET_IT_TEST_TIMEOUT: N` header.
 
 - **Global-dedup responses are complete shard files.** Clients upload
   shards with the footer and lookup tables stripped, but load what they
