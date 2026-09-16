@@ -11,9 +11,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/guilt/xet-server/internal/auth"
 	"github.com/guilt/xet-server/internal/merklehash"
 	"github.com/guilt/xet-server/internal/reconwire"
 	"github.com/guilt/xet-server/internal/shardformat"
@@ -188,12 +190,24 @@ func (s *Server) xorbFetchURLFor(ctx context.Context, baseURL string) reconwire.
 
 // xorbFetchURL returns a presigned URL if the storage backend supports it
 // (storage.URLPresigner - e.g. S3/MinIO), otherwise a URL pointing back at
-// this server's own byte-serving endpoint.
+// this server's own byte-serving endpoint - signed with a read token for
+// the requesting principal when SetFetchURLSigner is configured, since
+// the client fetches it with no Authorization header.
 func (s *Server) xorbFetchURL(ctx context.Context, xorbHash merklehash.Hash, baseURL string) (string, error) {
 	if presigner, ok := s.xorbs.(storage.URLPresigner); ok {
 		return presigner.PresignGet(ctx, xorbHash.Hex(), 3600)
 	}
-	return fmt.Sprintf("%s/v1/xorbs/%s/%s", baseURL, xorbPrefix, xorbHash.Hex()), nil
+	u := fmt.Sprintf("%s/v1/xorbs/%s/%s", baseURL, xorbPrefix, xorbHash.Hex())
+	if s.urlTokenMinter != nil {
+		if principal, ok := ctx.Value(principalKey{}).(auth.Principal); ok {
+			token, _, err := s.urlTokenMinter.MintToken(auth.ScopeRead, principal.Subject(), s.urlTokenTTL)
+			if err != nil {
+				return "", fmt.Errorf("sign xorb fetch url: %w", err)
+			}
+			u += "?" + urlTokenParam + "=" + url.QueryEscape(token)
+		}
+	}
+	return u, nil
 }
 
 func baseURLFromRequest(r *http.Request) string {

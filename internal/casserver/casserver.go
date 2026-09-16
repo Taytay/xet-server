@@ -43,6 +43,7 @@
 package casserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -142,6 +143,16 @@ type Server struct {
 	// pre-v0.8.0 behavior, unconditionally allowing every request - until
 	// SetAuthenticator is called with something else.
 	authenticator auth.Authenticator
+
+	// urlTokenMinter, when set (SetFetchURLSigner), signs the xorb fetch
+	// URLs a reconstruction response hands out when the storage backend
+	// cannot presign: xet-core fetches those URLs with no Authorization
+	// header, so with auth on they must carry their own credential. The
+	// token is read-scoped, bound to the requesting principal's subject,
+	// and expires after urlTokenTTL - the same token the Hub shim puts on
+	// a git-lfs download href, in the query string instead of a header.
+	urlTokenMinter auth.TokenMinter
+	urlTokenTTL    time.Duration
 
 	// folder is the synced-folder support (shard dir, rescans); see
 	// folder.go. Zero value means shards live only in memory/snapshot.
@@ -248,8 +259,37 @@ func (s *Server) SetAuthenticator(a auth.Authenticator) {
 // token, or with the wrong one, is expected/routine traffic to log
 // quietly, not a server-side fault.
 func (s *Server) requireScope(scope auth.Scope, next http.HandlerFunc) http.HandlerFunc {
+	return s.gate(scope, false, next)
+}
+
+// requireScopeOrURLToken is requireScope for the xorb byte-serving
+// routes: a request with no header credential may instead carry a
+// minted token in its query string (urlTokenParam), the way a presigned
+// URL carries its signature. Only these routes accept it - see
+// SetFetchURLSigner.
+func (s *Server) requireScopeOrURLToken(scope auth.Scope, next http.HandlerFunc) http.HandlerFunc {
+	return s.gate(scope, true, next)
+}
+
+// urlTokenParam is the query parameter that carries a signed fetch
+// URL's token.
+const urlTokenParam = "token"
+
+// principalKey is the context key under which gate stores the
+// authenticated Principal for handlers that need it (xorbFetchURL, to
+// bind a signed URL to the caller).
+type principalKey struct{}
+
+func (s *Server) gate(scope auth.Scope, allowURLToken bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, err := s.authenticator.Authenticate(r)
+		if allowURLToken && errors.Is(err, auth.ErrUnauthenticated) {
+			if v, ok := s.authenticator.(auth.URLTokenVerifier); ok {
+				if token := r.URL.Query().Get(urlTokenParam); token != "" {
+					principal, err = v.VerifyURLToken(token)
+				}
+			}
+		}
 		if err != nil {
 			if errors.Is(err, auth.ErrUnauthenticated) {
 				httpError(w, "unauthenticated: "+err.Error(), http.StatusUnauthorized)
@@ -262,8 +302,21 @@ func (s *Server) requireScope(scope auth.Scope, next http.HandlerFunc) http.Hand
 			httpError(w, "principal lacks required scope: "+string(scope), http.StatusForbidden)
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal)))
 	}
+}
+
+// SetFetchURLSigner makes the xorb fetch URLs in reconstruction
+// responses carry a read token minted by m for the requesting principal,
+// valid for ttl, whenever the storage backend cannot presign. Needed as
+// soon as auth is on: xet-core fetches those URLs with no Authorization
+// header (the real CAS hands out presigned CDN URLs), so without a
+// credential in the URL every hf download failed with 401 while git-lfs
+// downloads, whose batch actions carry a header, worked. The same
+// SignedTokenAuth that authenticates requests serves as m.
+func (s *Server) SetFetchURLSigner(m auth.TokenMinter, ttl time.Duration) {
+	s.urlTokenMinter = m
+	s.urlTokenTTL = ttl
 }
 
 // storageStatsResponse is GET /v1/storage-stats's body - not part of the
@@ -375,8 +428,8 @@ func (s *Server) routes() {
 		routing.Mount("POST", XorbsPath, uploadXorb),
 		routing.Mount("POST", ShardsPath, uploadShard),
 		routing.Mount("POST", ShardsPathUnversioned, uploadShard),
-		routing.Mount("GET", XorbsPath, s.requireScope(auth.ScopeRead, s.handleFetchXorb)),
-		routing.Mount("HEAD", XorbsPath, s.requireScope(auth.ScopeRead, s.handleHeadXorb)),
+		routing.Mount("GET", XorbsPath, s.requireScopeOrURLToken(auth.ScopeRead, s.handleFetchXorb)),
+		routing.Mount("HEAD", XorbsPath, s.requireScopeOrURLToken(auth.ScopeRead, s.handleHeadXorb)),
 		routing.Mount("GET", ReconstructionsPath, s.requireScope(auth.ScopeRead, s.handleReconstructionV1)),
 		routing.Mount("GET", ReconstructionsPathV2, s.requireScope(auth.ScopeRead, s.handleReconstructionV2)),
 		routing.Mount("GET", ChunksPath, s.requireScope(auth.ScopeRead, s.handleChunkDedup)),

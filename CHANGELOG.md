@@ -26,6 +26,14 @@
   (or byte range) from its shard terms and xorb chunks, decompressing
   LZ4/BG4 chunks on the way out. Only the LFS bridge uses it; real Xet
   clients still reconstruct client-side.
+- **Signed xorb fetch URLs**: with auth on, the URLs a reconstruction
+  response hands out for the CAS's own byte-serving endpoint carry a
+  read token for the caller in the query string, since xet-core fetches
+  them with no Authorization header (the real CAS hands out presigned
+  CDN URLs). Before this every `hf download` against an auth-gated
+  server failed with 401 on `GET /v1/xorbs/...` while uploads and
+  git-lfs downloads worked. Only the xorb GET/HEAD routes accept a token
+  from a URL (`integration-tests/multi_client_auth_gated.sh`).
 - **`auth.SignedTokenAuth`**: with a shared secret, the Hub shim now mints
   HMAC-signed, scoped, expiring CAS tokens instead of random strings the
   CAS could not accept when auth was on. Also accepts the secret as an
