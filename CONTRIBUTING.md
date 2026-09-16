@@ -61,7 +61,8 @@ make integration-test TEST=integration-tests/push_pull_roundtrip.sh
 
 `integrationTests.sh` starts one `xetd` instance (both the CAS server and
 the Hub API shim) and runs every `integration-tests/*.sh` script against
-it, with a per-test timeout (`XET_IT_TEST_TIMEOUT`, default 10s) so a
+it, with a per-test timeout (`XET_IT_TEST_TIMEOUT`, default 10s; a script
+that needs longer declares `# XET_IT_TEST_TIMEOUT: N` in its header) so a
 single hanging test doesn't block the whole suite. Scripts receive `$XET`,
 `$XETD`, `$XET_PROXYD` (the built `xet-proxyd` binary, for tests that
 start their own proxy instance rather than using the shared `xetd`),
@@ -90,6 +91,24 @@ If it hangs or times out in a sandboxed/proxied network environment, that's
 a known environment limitation (`hf_xet`'s Rust HTTP client doesn't always
 honor `NO_PROXY` for localhost), not a protocol bug - see the script's
 header comment and [docs/PROTOCOL.md](docs/PROTOCOL.md) for details.
+
+### Several machines against one server
+
+`integration-tests/multi_client_*.sh` (sharing
+`integration-tests/lib/multi_client.bash`) run the real `hf` CLI as named
+clients, each with its own `HF_HOME`, `HF_XET_CACHE` and token, against a
+private `xetd` started with `DEBUG=1`. The point: a xet client dedups a
+new upload against its own shard cache before asking the server, so with
+one cache the server's answer to `GET /v1/chunks/{prefix}/{hash}` is
+never parsed by anyone. Two bugs in that answer (the prefix real clients
+send was rejected; the bytes returned had no footer and could not be
+loaded) passed every single-client test and surfaced only when git-xet
+pushed from a second machine. Each of these tests asserts the cross-client
+path it names from the server's request log and the client's hf_xet log
+(`$HF_XET_CACHE/logs/`), not just from the bytes coming back, so it cannot
+pass vacuously. When adding a case where a second person uploads or
+downloads, give them a fresh client name; sharing a cache tests the
+cache, not the server.
 
 `integration-tests/xet_proxyd_offline_handoff.sh` uses the same real `hf`
 CLI to prove `xet-proxyd`'s whole reason to exist: upload+download through

@@ -30,7 +30,11 @@
 # Each test runs under a timeout (default 10s, override with
 # XET_IT_TEST_TIMEOUT) so a single hanging test - e.g. a network client that
 # doesn't respect NO_PROXY for localhost in a proxied environment - fails
-# that one test instead of blocking the whole suite indefinitely.
+# that one test instead of blocking the whole suite indefinitely. A script
+# that legitimately needs longer (the multi_client_*.sh tests move 32 MB
+# through several cold `hf` processes) declares its own budget in a header
+# comment, `# XET_IT_TEST_TIMEOUT: 45`, which applies unless the
+# environment variable is set explicitly.
 # =============================================================================
 
 set -u
@@ -89,14 +93,29 @@ TEST_TIMEOUT="${XET_IT_TEST_TIMEOUT:-10}"
 # Prefer GNU coreutils' `timeout` (Linux, or `brew install coreutils` on
 # macOS); fall back to `gtimeout`; if neither exists, run without a timeout
 # and warn once, since a hang then blocks the whole suite.
-TIMEOUT_CMD=""
+TIMEOUT_BIN=""
 if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="timeout ${TEST_TIMEOUT}s"
+    TIMEOUT_BIN="timeout"
 elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout ${TEST_TIMEOUT}s"
+    TIMEOUT_BIN="gtimeout"
 else
     echo -e "${YELLOW}WARN:${NC} no 'timeout' or 'gtimeout' found - tests cannot self-terminate if one hangs."
 fi
+
+# testTimeout <script>: the budget for one script - $XET_IT_TEST_TIMEOUT if
+# the caller set it, else the script's own `# XET_IT_TEST_TIMEOUT: N`
+# header line, else the 10s default.
+testTimeout() {
+    local declared
+    if [[ -z "${XET_IT_TEST_TIMEOUT:-}" ]]; then
+        declared="$(grep -m1 -oE '^# *XET_IT_TEST_TIMEOUT: *[0-9]+' "$1" | grep -oE '[0-9]+$' || true)"
+        if [[ -n "$declared" ]]; then
+            echo "$declared"
+            return
+        fi
+    fi
+    echo "$TEST_TIMEOUT"
+}
 
 # ---- auth environment isolation ---------------------------------------------
 #
@@ -236,6 +255,10 @@ for testFile in "${testFiles[@]}"; do
     mkdir -p "$WORKDIR"
     export WORKDIR
 
+    timeoutSecs="$(testTimeout "$testFile")"
+    TIMEOUT_CMD=""
+    [[ -n "$TIMEOUT_BIN" ]] && TIMEOUT_CMD="$TIMEOUT_BIN ${timeoutSecs}s"
+
     startTime=$(date +%s%N 2>/dev/null || echo 0)
     output=$($TIMEOUT_CMD bash "$testFile" 2>&1)
     exitCode=$?
@@ -255,7 +278,7 @@ for testFile in "${testFiles[@]}"; do
         ((passed++))
     else
         if [[ $exitCode -eq 124 ]]; then
-            echo -e "  Result: ${RED}TIMEOUT${NC} (exceeded ${TEST_TIMEOUT}s)"
+            echo -e "  Result: ${RED}TIMEOUT${NC} (exceeded ${timeoutSecs}s)"
         else
             echo -e "  Result: ${RED}FAIL${NC}"
         fi
