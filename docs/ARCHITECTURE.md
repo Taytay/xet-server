@@ -185,8 +185,8 @@ sequenceDiagram
     opt client doesn't recognize this chunk locally
         Client->>CAS: GET /v1/chunks/default-merkledb/{chunk_hash}
         alt some uploaded shard references this chunk
-            CAS-->>Client: raw bytes of that shard (200)
-            Note over Client: parses the shard itself to find every<br/>dedup-eligible chunk hash within it,<br/>not just the one it asked about
+            CAS-->>Client: a shard (200): xorb-info for the xorb<br/>this chunk lives in, then every xorb of<br/>every file that references that xorb
+            Note over Client: parses the shard itself and dedups<br/>against every chunk it lists,<br/>not just the one it asked about
         else never referenced by any uploaded shard
             CAS-->>Client: 404
         end
@@ -198,7 +198,7 @@ sequenceDiagram
     CAS-->>Client: {was_inserted}
 
     Client->>CAS: POST /v1/shards  (no footer,<br/>verification+metadata_ext flags set)
-    Note over CAS: index file to xorb/chunk-range entries,<br/>record sha256 to Xet-hash mapping,<br/>index every referenced chunk hash to<br/>these raw shard bytes (global dedup)
+    Note over CAS: index file to xorb/chunk-range entries,<br/>record sha256 to Xet-hash mapping,<br/>index every chunk hash and xorb this<br/>shard introduces (global dedup)
     CAS-->>Client: {result: 1}
 
     Client->>Hub: POST /api/{type}s/{repo}/commit/{rev}  (ndjson, lfsFile.oid = sha256)
@@ -216,7 +216,10 @@ previously-uploaded shard already reference this chunk), distinct from
 the within-this-upload dedup the xorb/shard steps below it already
 provide (a `Put`/hash check against what this same upload has already
 sent). See [PROTOCOL.md](PROTOCOL.md) #9 for why the response is a whole
-shard, not a simple boolean.
+shard, not a simple boolean, and why it is assembled to cover the file
+rather than being the shard that happened to introduce the chunk: a
+client asks about a file's first chunk and then at most once per 256
+chunks, so the first answer is most of what it will learn.
 
 ## Download flow
 
