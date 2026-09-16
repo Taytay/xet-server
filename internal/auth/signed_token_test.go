@@ -1,0 +1,148 @@
+package auth
+
+import (
+	"errors"
+	"net/http"
+	"testing"
+	"time"
+)
+
+// Every secret below is a hardcoded test fixture, not a real credential.
+const signedFixtureSecret = "signed-fixture-secret-not-real"
+
+func reqWithHeader(value string) *http.Request {
+	r, _ := http.NewRequest(http.MethodGet, "http://example/", nil)
+	if value != "" {
+		r.Header.Set("Authorization", value)
+	}
+	return r
+}
+
+func TestSignedTokenAuth_SharedSecretBearerGrantsEverything(t *testing.T) {
+	a := NewSignedTokenAuth(signedFixtureSecret)
+	p, err := a.Authenticate(reqWithHeader("Bearer " + signedFixtureSecret))
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if !p.HasScope(ScopeRead) || !p.HasScope(ScopeWrite) {
+		t.Error("shared secret should carry read and write")
+	}
+	if p.Subject() != SharedSecretSubject {
+		t.Errorf("Subject() = %q, want %q", p.Subject(), SharedSecretSubject)
+	}
+}
+
+func TestSignedTokenAuth_BasicWithSecretPasswordNamesTheUser(t *testing.T) {
+	a := NewSignedTokenAuth(signedFixtureSecret)
+	r := reqWithHeader("")
+	r.SetBasicAuth("alice", signedFixtureSecret)
+	p, err := a.Authenticate(r)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if p.Subject() != "alice" {
+		t.Errorf("Subject() = %q, want alice", p.Subject())
+	}
+	if !p.HasScope(ScopeWrite) {
+		t.Error("Basic with the shared secret should carry write")
+	}
+
+	r.SetBasicAuth("alice", "wrong-password")
+	if _, err := a.Authenticate(r); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("wrong Basic password: err = %v, want ErrUnauthenticated", err)
+	}
+}
+
+func TestSignedTokenAuth_MintedTokenRoundTrip(t *testing.T) {
+	a := NewSignedTokenAuth(signedFixtureSecret)
+	token, exp, err := a.MintToken(ScopeRead, "bob", time.Hour)
+	if err != nil {
+		t.Fatalf("MintToken() error = %v", err)
+	}
+	if until := time.Until(exp); until < 59*time.Minute || until > time.Hour {
+		t.Errorf("exp %v is not about an hour away", exp)
+	}
+	p, err := a.Authenticate(reqWithHeader("Bearer " + token))
+	if err != nil {
+		t.Fatalf("Authenticate(minted) error = %v", err)
+	}
+	if p.Subject() != "bob" {
+		t.Errorf("Subject() = %q, want bob", p.Subject())
+	}
+	if !p.HasScope(ScopeRead) || p.HasScope(ScopeWrite) {
+		t.Error("read token must grant read only")
+	}
+
+	// The same token as a Basic password is also accepted.
+	r := reqWithHeader("")
+	r.SetBasicAuth("ignored", token)
+	if _, err := a.Authenticate(r); err != nil {
+		t.Errorf("minted token as Basic password: err = %v", err)
+	}
+
+	// A write token grants both.
+	wtoken, _, _ := a.MintToken(ScopeWrite, "carol", time.Hour)
+	wp, err := a.Authenticate(reqWithHeader("Bearer " + wtoken))
+	if err != nil {
+		t.Fatalf("Authenticate(write token) error = %v", err)
+	}
+	if !wp.HasScope(ScopeRead) || !wp.HasScope(ScopeWrite) {
+		t.Error("write token must grant read and write")
+	}
+}
+
+func TestSignedTokenAuth_RejectsTamperedExpiredAndForeignTokens(t *testing.T) {
+	a := NewSignedTokenAuth(signedFixtureSecret)
+	token, _, _ := a.MintToken(ScopeRead, "bob", time.Hour)
+
+	// Flip the scope in the payload: MAC no longer matches.
+	tampered := []byte(token)
+	copy(tampered[len(mintedTokenPrefix)+1+10+1:], "writ")
+	if _, err := a.Authenticate(reqWithHeader("Bearer " + string(tampered))); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("tampered token: err = %v, want ErrUnauthenticated", err)
+	}
+
+	// Minted under a different secret.
+	other := NewSignedTokenAuth("a-different-fixture-secret")
+	foreign, _, _ := other.MintToken(ScopeWrite, "bob", time.Hour)
+	if _, err := a.Authenticate(reqWithHeader("Bearer " + foreign)); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("foreign token: err = %v, want ErrUnauthenticated", err)
+	}
+
+	// Expired: mint with a 1s ttl and back-date by rebuilding the MAC.
+	expired := mintedPayload(time.Now().Add(-time.Minute).Unix(), ScopeRead, "bob")
+	expired += "." + hexMAC(a, expired)
+	if _, err := a.Authenticate(reqWithHeader("Bearer " + expired)); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("expired token: err = %v, want ErrUnauthenticated", err)
+	}
+
+	// Garbage shapes.
+	for _, bad := range []string{"", "Bearer ", "Bearer xst1.a.b", "Bearer xst1.1.2.3.4.5", "Basic not-base64"} {
+		if _, err := a.Authenticate(reqWithHeader(bad)); !errors.Is(err, ErrUnauthenticated) {
+			t.Errorf("header %q: err = %v, want ErrUnauthenticated", bad, err)
+		}
+	}
+}
+
+func TestSignedTokenAuth_MintRefusesBadInputs(t *testing.T) {
+	a := NewSignedTokenAuth(signedFixtureSecret)
+	if _, _, err := a.MintToken(Scope("admin"), "x", time.Hour); err == nil {
+		t.Error("minting an unknown scope should fail")
+	}
+	if _, _, err := a.MintToken(ScopeRead, "x", 0); err == nil {
+		t.Error("minting with a zero ttl should fail")
+	}
+	if _, _, err := NewSignedTokenAuth("").MintToken(ScopeRead, "x", time.Hour); err == nil {
+		t.Error("minting with an empty secret should fail")
+	}
+}
+
+func hexMAC(a *SignedTokenAuth, payload string) string {
+	const hexdigits = "0123456789abcdef"
+	mac := a.mac(payload)
+	out := make([]byte, 0, len(mac)*2)
+	for _, b := range mac {
+		out = append(out, hexdigits[b>>4], hexdigits[b&0x0f])
+	}
+	return string(out)
+}

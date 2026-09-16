@@ -23,6 +23,10 @@ import (
 // bounded by the caller's own object count (never larger).
 func FuzzLFSBatchHandler(f *testing.F) {
 	f.Add(`{"operation":"upload","objects":[{"oid":"abc","size":1}]}`)
+	f.Add(`{"operation":"upload","transfers":["basic","xet"],"ref":{"name":"refs/heads/main"},"objects":[{"oid":"` + strings.Repeat("ab", 32) + `","size":1}],"hash_algo":"sha256"}`)
+	f.Add(`{"operation":"download","transfers":["basic"],"objects":[{"oid":"` + strings.Repeat("cd", 32) + `","size":7}]}`)
+	f.Add(`{"operation":"upload","transfers":["basic"],"objects":[{"oid":"` + strings.Repeat("ef", 32) + `","size":1}]}`)
+	f.Add(`{"operation":"upload","hash_algo":"sha1","objects":[]}`)
 	f.Add(`{"operation":"upload","objects":[]}`)
 	f.Add(`{"operation":"download","objects":[{"oid":"a","size":1}]}`)
 	f.Add(`{"operation":"upload"}`)
@@ -71,12 +75,18 @@ func FuzzLFSBatchHandler(f *testing.F) {
 			if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
 				t.Fatalf("200 response is not valid JSON: %v (body %q)", err, out.String())
 			}
-			if parsed.Transfer != "xet" {
-				t.Fatalf("200 response advertised transfer %q, want \"xet\"", parsed.Transfer)
-			}
 			var req lfsBatchRequest
 			if err := json.Unmarshal([]byte(body), &req); err != nil {
 				t.Fatalf("handler accepted a body that does not decode: %q", body)
+			}
+			// The server must pick a transfer the client listed (batch.md):
+			// "xet" only for an upload that offered it, "basic" otherwise.
+			want := "basic"
+			if req.Operation == "upload" && offersTransfer(req.Transfers, "xet") {
+				want = "xet"
+			}
+			if parsed.Transfer != want {
+				t.Fatalf("200 response advertised transfer %q, want %q for %q", parsed.Transfer, want, body)
 			}
 			if len(parsed.Objects) > len(req.Objects) {
 				t.Fatalf("response echoed %d objects for a request carrying %d - amplification",
@@ -86,7 +96,7 @@ func FuzzLFSBatchHandler(f *testing.F) {
 				t.Fatalf("response carried %d objects, over the %d cap",
 					len(parsed.Objects), maxLFSBatchObjects)
 			}
-		case http.StatusBadRequest, http.StatusRequestEntityTooLarge,
+		case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity,
 			http.StatusMethodNotAllowed, http.StatusUnauthorized, http.StatusForbidden:
 			// Expected rejection paths.
 		default:

@@ -788,6 +788,27 @@ Two knock-on details, both of which produce confusing failures if missed:
   there works right up until the first token expiry inside a long
   download, then fails against a model that doesn't exist.
 
+## 16. Newer clients POST shards to `/shards` and dedup under `default`
+
+Driving a real `git push` through git-xet 0.2.1 (xet-core 1.6) against
+this server showed two requests the openapi spec does not describe:
+
+    GET  /v1/chunks/default/<chunk hash>    -> was 400 "unsupported chunk-dedup prefix"
+    POST /shards                            -> was 404
+
+`cas_client/src/remote_client.rs` at that tag builds the dedup key with
+`PREFIX_DEFAULT` (`"default"`, the same prefix as xorb uploads) even
+though `openapi/cas.openapi.yaml` still says the only acceptable dedup
+prefix is `default-merkledb`, and `upload_shard` formats
+`"{endpoint}/shards"` with no version segment while the spec lists
+`/v1/shards`. The client treats a failed dedup query as "no dedup
+available" and carries on (so the first symptom was silent loss of
+cross-push dedup), but the shard 404 fails the push outright.
+
+Both are now served: `/shards` is mounted at the CAS mux root next to
+`/v1/shards`, and `handleChunkDedup` accepts either prefix. Older clients
+that use the documented paths are unaffected.
+
 ## How these were found: capture, don't guess
 
 Every fix above came from the same loop, not from re-reading the spec more

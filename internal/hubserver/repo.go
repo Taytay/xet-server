@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/guilt/xet-server/internal/auth"
 )
 
 type createRepoRequest struct {
@@ -162,19 +164,20 @@ type xetTokenResponse struct {
 // issues a CAS endpoint + bearer token, both as a JSON body (what hf_xet's
 // Rust client actually parses) and via the X-Xet-* response headers
 // (huggingface_hub's parse_xet_connection_info_from_headers, used on the
-// resolve/download path). Read vs write reach here via distinct routes
-// (see hubserver.go's dispatch) but get identical, unrestricted
-// treatment - auth is not modeled here at all; any request succeeds and
-// gets a fresh random token with a generous expiry.
-func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType, repoID string) {
+// resolve/download path). The token comes from s.minter, scoped to the
+// route (read for xet-read-token, write for xet-write-token) and bound to
+// the authenticated caller's subject; with the default randomTokenMinter
+// it is a fresh random string only a no-auth CAS accepts, matching this
+// server's behavior before tokens carried any meaning.
+func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType, repoID string, scope auth.Scope, subject string) {
 	s.getOrCreateRepo(repoType, repoID)
 
-	token, err := randomToken()
+	token, exp, err := s.mintToken(scope, subject)
 	if err != nil {
 		httpErrorJSON(w, "generate token: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	expiry := time.Now().Add(1 * time.Hour).Unix()
+	expiry := exp.Unix()
 
 	w.Header().Set("X-Xet-Cas-Url", s.CASBaseURL)
 	w.Header().Set("X-Xet-Access-Token", token)
@@ -184,6 +187,28 @@ func (s *Server) handleXetToken(w http.ResponseWriter, r *http.Request, repoType
 		Exp:         expiry,
 		AccessToken: token,
 	})
+}
+
+// mintToken is the one place this server asks its minter for a CAS
+// token, so the ttl and error handling are uniform across the token
+// routes and the git-lfs batch actions.
+func (s *Server) mintToken(scope auth.Scope, subject string) (string, time.Time, error) {
+	return s.minter.MintToken(scope, subject, s.tokenTTL)
+}
+
+// randomTokenMinter is the default auth.TokenMinter: a random 32-hex
+// string per call, carrying no verifiable meaning. Only an
+// auth.NoAuth CAS accepts such a token, which is the only configuration
+// in which this default is reached (cmd/xetd installs a real minter
+// whenever a shared secret is configured).
+type randomTokenMinter struct{}
+
+func (randomTokenMinter) MintToken(scope auth.Scope, subject string, ttl time.Duration) (string, time.Time, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token, time.Now().Add(ttl), nil
 }
 
 func randomToken() (string, error) {

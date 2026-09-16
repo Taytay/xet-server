@@ -1,7 +1,10 @@
 package hubserver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,10 +18,25 @@ import (
 type fakeCAS struct {
 	sha256ToXet map[string]merklehash.Hash
 	sizes       map[merklehash.Hash]int64
+	// content backs ReconstructFile for the LFS download tests; a file in
+	// sizes but not here fails reconstruction like an evicted xorb would.
+	content map[merklehash.Hash][]byte
 }
 
 func newFakeCAS() *fakeCAS {
-	return &fakeCAS{sha256ToXet: map[string]merklehash.Hash{}, sizes: map[merklehash.Hash]int64{}}
+	return &fakeCAS{sha256ToXet: map[string]merklehash.Hash{}, sizes: map[merklehash.Hash]int64{}, content: map[merklehash.Hash][]byte{}}
+}
+
+func (f *fakeCAS) ReconstructFile(_ context.Context, fileHash merklehash.Hash, start, end int64, w io.Writer) error {
+	data, ok := f.content[fileHash]
+	if !ok {
+		return errors.New("fakeCAS: no content for file")
+	}
+	if start < 0 || start > end || end >= int64(len(data)) {
+		return errors.New("fakeCAS: range not satisfiable")
+	}
+	_, err := w.Write(data[start : end+1])
+	return err
 }
 
 func (f *fakeCAS) XetHashForSHA256(sha256Hex string) (merklehash.Hash, bool) {

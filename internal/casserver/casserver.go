@@ -327,8 +327,14 @@ const (
 	V1 = "/v1"
 	V2 = "/v2"
 
-	XorbsPath             = V1 + "/xorbs/{prefix}/{hash}"
-	ShardsPath            = V1 + "/shards"
+	XorbsPath  = V1 + "/xorbs/{prefix}/{hash}"
+	ShardsPath = V1 + "/shards"
+	// ShardsPathUnversioned is where xet-core >= 1.5 (git-xet 0.2, recent
+	// hf_xet) POSTs shards: cas_client/src/remote_client.rs builds
+	// "{endpoint}/shards" with no version segment, while the openapi
+	// spec still documents /v1/shards. Both are served identically;
+	// cmd/xetd mounts this one at the root of the CAS mux.
+	ShardsPathUnversioned = "/shards"
 	ReconstructionsPath   = V1 + "/reconstructions/{file_id}"
 	ReconstructionsPathV2 = V2 + "/reconstructions/{file_id}"
 	ChunksPath            = V1 + "/chunks/{prefix}/{hash}"
@@ -346,6 +352,7 @@ func (s *Server) routes() {
 	routing.Apply(s.mux, []routing.Route{
 		routing.Mount("POST", XorbsPath, uploadXorb),
 		routing.Mount("POST", ShardsPath, uploadShard),
+		routing.Mount("POST", ShardsPathUnversioned, uploadShard),
 		routing.Mount("GET", XorbsPath, s.requireScope(auth.ScopeRead, s.handleFetchXorb)),
 		routing.Mount("HEAD", XorbsPath, s.requireScope(auth.ScopeRead, s.handleHeadXorb)),
 		routing.Mount("GET", ReconstructionsPath, s.requireScope(auth.ScopeRead, s.handleReconstructionV1)),

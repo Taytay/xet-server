@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased - Git LFS bridge
+
+- **Git LFS server** under `/{owner}/{name}.git/info/lfs` on the Hub port
+  (`docs/GIT_LFS.md`): batch responses now carry the per-object `actions`
+  the stock `git-lfs` client and `git-xet` need (`xet` transfer for
+  uploads, `basic` hrefs for downloads), `GET objects/{oid}` streams a file
+  reconstructed from xorbs with `Range` support, and the File Locking API
+  (`locks`, `locks/verify`, `locks/{id}/unlock`) is implemented and
+  persisted in the hub snapshot.
+- **`casserver.ReconstructFile`**: server-side reconstruction of a file
+  (or byte range) from its shard terms and xorb chunks, decompressing
+  LZ4/BG4 chunks on the way out. Only the LFS bridge uses it; real Xet
+  clients still reconstruct client-side.
+- **`auth.SignedTokenAuth`**: with a shared secret, the Hub shim now mints
+  HMAC-signed, scoped, expiring CAS tokens instead of random strings the
+  CAS could not accept when auth was on. Also accepts the secret as an
+  HTTP Basic password (the only shape git-lfs can send); the user name
+  becomes the Principal's subject and the owner of locks. `-token-ttl`
+  sets the lifetime.
+- **Newer xet-core clients**: `POST /shards` (unversioned, what git-xet
+  0.2.1 and recent hf_xet actually call) is served alongside
+  `/v1/shards`, and the global-dedup endpoint accepts the `default`
+  prefix those clients send in addition to the documented
+  `default-merkledb`.
+
+
 All notable changes to Xet Server will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

@@ -46,6 +46,7 @@ func main() {
 	rateLimitBurst := flag.Float64("rate-limit-burst", 20, "burst allowance for -rate-limit-rps - how many upload requests a source IP can make immediately before the per-second rate applies")
 	verifyDedup := flag.Bool("verify-dedup", false, "on every dedup hit, byte-compare the incoming upload against the stored blob instead of trusting the content hash alone (doubles I/O per dedup hit; off by default)")
 	snapshotInterval := flag.Duration("snapshot-interval", time.Minute, "how often to persist in-memory reconstruction/repo indices to -data as a durable checkpoint (0 disables periodic snapshotting; a final snapshot is still taken on graceful shutdown)")
+	tokenTTL := flag.Duration("token-ttl", time.Hour, "lifetime of the CAS access tokens the Hub shim mints for hf_xet, git-xet, and git-lfs download links; clients refresh through the xet-{read,write}-token routes when one nears expiry")
 	authToken := flag.String("auth-token", "None", "shared bearer token required on every request (CAS: read/write scope per endpoint; Hub: same). \"None\" (the default) disables auth enforcement entirely, matching this server's behavior prior to v0.8.0 - implement auth.Authenticator for anything beyond a single shared secret. Falls back to $XETD_AUTH_TOKEN, then $HF_TOKEN, if not passed; prefer an environment variable over this flag on any shared/multi-user machine, since flags are visible to other local users via `ps` and end up in shell history")
 	flag.Parse()
 
@@ -55,9 +56,17 @@ func main() {
 
 	resolvedAuthToken := resolveAuthToken(*authToken)
 
+	// With a shared secret configured, both servers use SignedTokenAuth:
+	// the CAS then accepts the scoped, expiring tokens the Hub shim
+	// mints (and the secret itself, as Bearer or as a git-lfs Basic
+	// password), so hf_xet, git-xet, and git-lfs all authenticate at the
+	// CAS with a token that never exposes the secret to the client.
 	var authenticator auth.Authenticator = auth.NoAuth{}
+	var minter auth.TokenMinter
 	if resolvedAuthToken != "" && resolvedAuthToken != "None" {
-		authenticator = auth.NewStaticTokenAuth(resolvedAuthToken)
+		signed := auth.NewSignedTokenAuth(resolvedAuthToken)
+		authenticator = signed
+		minter = signed
 	} else {
 		slog.Warn("xetd starting with no authentication enforced (-auth-token/$XETD_AUTH_TOKEN/$HF_TOKEN unset or \"None\"); any client can read and write. Pass -auth-token <secret> (or set $XETD_AUTH_TOKEN/$HF_TOKEN) to require a bearer token, or implement auth.Authenticator for anything beyond a single shared secret.")
 	}
@@ -117,6 +126,9 @@ func main() {
 		routing.Mount("", api.StatsPath, demoSrv),
 		routing.Mount("", casserver.V1+"/", casSrv),
 		routing.Mount("", casserver.V2+"/", casSrv),
+		// Newer xet-core clients upload shards to an unversioned path;
+		// see casserver.ShardsPathUnversioned.
+		routing.Mount("POST", casserver.ShardsPathUnversioned, casSrv),
 		routing.Mount("", "/", http.HandlerFunc(landingpage.CASHandler(*addr, *hubAddr))),
 	})
 
@@ -146,6 +158,8 @@ func main() {
 		}
 		hubSrv = hubserver.New(resolvedCASURL, casSrv)
 		hubSrv.SetAuthenticator(authenticator)
+		hubSrv.SetTokenMinter(minter)
+		hubSrv.SetTokenTTL(*tokenTTL)
 
 		hubSnapshotPath := filepath.Join(*dataDir, "hubserver-snapshot.json")
 		if err := hubSrv.LoadSnapshot(hubSnapshotPath); err != nil {

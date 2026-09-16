@@ -215,7 +215,7 @@ func baseURLFromRequest(r *http.Request) string {
 // chunks it can skip re-uploading. 404 if no uploaded shard has ever
 // referenced this chunk hash.
 func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
-	if r.PathValue("prefix") != chunkDedupPrefix {
+	if !isChunkDedupPrefix(r.PathValue("prefix")) {
 		httpError(w, "unsupported chunk-dedup prefix", http.StatusBadRequest)
 		return
 	}

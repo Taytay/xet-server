@@ -28,12 +28,15 @@
 package hubserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/guilt/xet-server/internal/auth"
 	"github.com/guilt/xet-server/internal/merklehash"
@@ -47,6 +50,10 @@ import (
 type casInfo interface {
 	XetHashForSHA256(sha256Hex string) (merklehash.Hash, bool)
 	FileSize(fileHash merklehash.Hash) (int64, bool)
+	// ReconstructFile streams bytes [start, end] (inclusive) of the file
+	// to w - the git-lfs download bridge (see lfsobjects.go) is the one
+	// caller; real Xet clients reconstruct client-side instead.
+	ReconstructFile(ctx context.Context, fileHash merklehash.Hash, start, end int64, w io.Writer) error
 }
 
 // Server implements the Hub API shim. CASBaseURL is the base URL of the
@@ -72,6 +79,15 @@ type Server struct {
 	// allowing every request - until SetAuthenticator is called with
 	// something else.
 	authenticator auth.Authenticator
+
+	// minter issues the CAS access tokens the xet-{read,write}-token
+	// routes and the git-lfs batch actions hand out. Defaults to
+	// randomTokenMinter - a fresh random string per call, which only
+	// auth.NoAuth accepts and which is exactly what this server issued
+	// before it had a minter. cmd/xetd installs the auth.SignedTokenAuth
+	// it also gave the CAS, so the tokens verify there.
+	minter   auth.TokenMinter
+	tokenTTL time.Duration
 }
 
 type repoKey struct {
@@ -101,6 +117,12 @@ const defaultRevision = "main"
 type repoState struct {
 	mu        sync.RWMutex
 	revisions map[string]*revisionState
+
+	// locks holds this repo's git-lfs file locks by lock id (see
+	// lfslocks.go); locksMu guards it independently of mu, since lock
+	// traffic never needs the revisions map.
+	locksMu sync.Mutex
+	locks   map[string]*lfsLock
 }
 
 // revisionState is one revision's (branch's) committed file set and
@@ -120,9 +142,35 @@ func New(casBaseURL string, cas casInfo) *Server {
 		mux:           http.NewServeMux(),
 		repos:         make(map[repoKey]*repoState),
 		authenticator: auth.NoAuth{},
+		minter:        randomTokenMinter{},
+		tokenTTL:      defaultTokenTTL,
 	}
 	s.routes()
 	return s
+}
+
+// defaultTokenTTL is how long a minted CAS token stays valid - long
+// enough that a single git push of a multi-GB file rarely needs the
+// refresh route, short enough that a leaked token from a log is not a
+// standing credential.
+const defaultTokenTTL = time.Hour
+
+// SetTokenMinter replaces the minter behind the xet-{read,write}-token
+// routes and the git-lfs batch actions. Pass the same auth.SignedTokenAuth
+// the paired CAS authenticates with, so tokens this server issues are
+// accepted there.
+func (s *Server) SetTokenMinter(m auth.TokenMinter) {
+	if m != nil {
+		s.minter = m
+	}
+}
+
+// SetTokenTTL sets the lifetime of minted tokens (default one hour).
+// Non-positive values are ignored.
+func (s *Server) SetTokenTTL(ttl time.Duration) {
+	if ttl > 0 {
+		s.tokenTTL = ttl
+	}
 }
 
 // SetAuthenticator replaces this server's Authenticator (default
@@ -145,6 +193,14 @@ func (s *Server) SetAuthenticator(a auth.Authenticator) {
 // need to parse the path before they know which scope applies, unlike
 // casserver's one-mux-pattern-per-endpoint routing.
 func (s *Server) requireScope(w http.ResponseWriter, r *http.Request, scope auth.Scope) bool {
+	_, ok := s.authenticate(w, r, scope)
+	return ok
+}
+
+// authenticate is requireScope returning the Principal too, for the
+// routes that need to know WHO passed (the token routes bind the minted
+// token to the caller's subject; git-lfs locks record it as the owner).
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, scope auth.Scope) (auth.Principal, bool) {
 	principal, err := s.authenticator.Authenticate(r)
 	if err != nil {
 		if errors.Is(err, auth.ErrUnauthenticated) {
@@ -152,13 +208,13 @@ func (s *Server) requireScope(w http.ResponseWriter, r *http.Request, scope auth
 		} else {
 			httpErrorJSON(w, "authentication failed: "+err.Error(), http.StatusForbidden)
 		}
-		return false
+		return nil, false
 	}
 	if !principal.HasScope(scope) {
 		httpErrorJSON(w, "principal lacks required scope: "+string(scope), http.StatusForbidden)
-		return false
+		return nil, false
 	}
-	return true
+	return principal, true
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
@@ -218,15 +274,17 @@ func (s *Server) handleAPIGet(w http.ResponseWriter, r *http.Request) {
 	}
 	switch tail[0] {
 	case "xet-read-token":
-		if !s.requireScope(w, r, auth.ScopeRead) {
+		principal, ok := s.authenticate(w, r, auth.ScopeRead)
+		if !ok {
 			return
 		}
-		s.handleXetToken(w, r, repoType, repoID)
+		s.handleXetToken(w, r, repoType, repoID, auth.ScopeRead, principal.Subject())
 	case "xet-write-token":
-		if !s.requireScope(w, r, auth.ScopeWrite) {
+		principal, ok := s.authenticate(w, r, auth.ScopeWrite)
+		if !ok {
 			return
 		}
-		s.handleXetToken(w, r, repoType, repoID)
+		s.handleXetToken(w, r, repoType, repoID, auth.ScopeWrite, principal.Subject())
 	case "revision":
 		if !s.requireScope(w, r, auth.ScopeRead) {
 			return
@@ -292,13 +350,6 @@ func (s *Server) handleAPIPost(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// lfsBatchPathSuffix is the git-lfs batch API route suffix that appears at
-// the end of every upload-negotiation URL this server serves: the path is
-// "{namespace}/{name}.git/info/lfs/objects/batch", matched inside the
-// catch-all "/{rest...}" route below (the same one that dispatches
-// resolve), since the ".git" segment makes the repo ID part of the path.
-const lfsBatchPathSuffix = "/info/lfs/objects/batch"
-
 // handleResolveDispatch dispatches GET/HEAD resolve requests and the
 // git-lfs batch endpoint. Unlike the /api/ routes, resolve URLs have no
 // leading /api/ segment. Three on-wire shapes are known:
@@ -316,10 +367,8 @@ const lfsBatchPathSuffix = "/info/lfs/objects/batch"
 // per type.
 func (s *Server) handleResolveDispatch(w http.ResponseWriter, r *http.Request) {
 	rest := r.PathValue("rest")
-	if strings.HasSuffix(rest, lfsBatchPathSuffix) {
-		repoID := extractRepoIDBefore(rest, lfsBatchPathSuffix)
-		repoID = strings.TrimSuffix(repoID, ".git")
-		s.handleLFSBatch(w, r, repoID)
+	if strings.Contains(rest, lfsPathMarker) {
+		s.handleLFS(w, r, rest)
 		return
 	}
 	repoType, repoID, revision, filename, ok := parseResolvePath(rest)
@@ -421,9 +470,10 @@ func (s *Server) getOrCreateRepo(repoType, repoID string) *repoState {
 	defer s.mu.Unlock()
 	rs, ok := s.repos[key]
 	if !ok {
-		rs = &repoState{revisions: map[string]*revisionState{
-			defaultRevision: newRevisionState(),
-		}}
+		rs = &repoState{
+			revisions: map[string]*revisionState{defaultRevision: newRevisionState()},
+			locks:     make(map[string]*lfsLock),
+		}
 		s.repos[key] = rs
 	}
 	return rs

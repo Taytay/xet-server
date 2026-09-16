@@ -11,11 +11,19 @@ import (
 	"github.com/guilt/xet-server/internal/shardformat"
 )
 
-// chunkDedupPrefix is the only prefix xet-core's real CAS API accepts for
-// GET /v1/chunks/{prefix}/{hash} (see openapi/cas.openapi.yaml's
-// PrefixGlobalDedupeParam) - distinct from xorbPrefix ("default"), which
-// is for a different endpoint.
+// chunkDedupPrefix is the prefix xet-core's openapi spec documents for
+// GET /v1/chunks/{prefix}/{hash} (PrefixGlobalDedupeParam). Real clients
+// disagree with the spec: cas_client/src/remote_client.rs in xet-core
+// >= 1.5 (git-xet 0.2.1, recent hf_xet) queries with PREFIX_DEFAULT
+// ("default", the same prefix as xorb uploads), so handleChunkDedup
+// accepts both - see isChunkDedupPrefix.
 const chunkDedupPrefix = "default-merkledb"
+
+// isChunkDedupPrefix reports whether prefix is one a real client uses on
+// the global dedup endpoint: the documented one or xorbPrefix.
+func isChunkDedupPrefix(prefix string) bool {
+	return prefix == chunkDedupPrefix || prefix == xorbPrefix
+}
 
 // maxShardBytes caps a single shard upload's body size. Shards describe
 // one or more whole files' chunk/xorb manifests, so their size scales with
