@@ -218,6 +218,12 @@ func (e *contentMismatchError) Offset() int64 {
 	return e.offset
 }
 
+// Unwrap implements Unwrapper: the backend underneath, for a caller that
+// needs a capability this decorator does not forward (Enumerator, used
+// by casserver's garbage collector). Every capability shim below embeds
+// *VerifyingStore, so all of them expose it.
+func (v *VerifyingStore) Unwrap() Store { return v.Inner }
+
 // --- capability shims -------------------------------------------------
 //
 // NewVerifyingStore must return a value whose type implements exactly the

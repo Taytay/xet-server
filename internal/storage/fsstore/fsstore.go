@@ -19,9 +19,10 @@ import (
 )
 
 var (
-	_ storage.Store   = (*Store)(nil)
-	_ storage.Deleter = (*Store)(nil)
-	_ storage.Sizer   = (*Store)(nil)
+	_ storage.Store      = (*Store)(nil)
+	_ storage.Deleter    = (*Store)(nil)
+	_ storage.Sizer      = (*Store)(nil)
+	_ storage.Enumerator = (*Store)(nil)
 )
 
 type Store struct {
@@ -242,14 +243,32 @@ func (s *Store) Delete(_ context.Context, key string) error {
 // excluded forever - so a temp file older than staleTempFileAge is
 // treated as orphaned: it's reaped (removed) here rather than skipped, so
 // disk space is actually reclaimed instead of just hidden from the count.
-func (s *Store) TotalBytes(_ context.Context) (int64, error) {
+func (s *Store) TotalBytes(ctx context.Context) (int64, error) {
 	var total int64
+	err := s.Enumerate(ctx, func(_ string, size int64, _ time.Time) error {
+		total += size
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// Enumerate implements storage.Enumerator: every completed blob under
+// Root, by key, size and modification time. Staging files are skipped
+// (and reaped once older than staleTempFileAge - see TotalBytes, whose
+// walk this is).
+func (s *Store) Enumerate(ctx context.Context, fn func(key string, size int64, modTime time.Time) error) error {
 	now := time.Now()
-	err := filepath.WalkDir(s.Root, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(s.Root, func(path string, d fs.DirEntry, err error) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if d.IsDir() {
@@ -268,11 +287,6 @@ func (s *Store) TotalBytes(_ context.Context) (int64, error) {
 			}
 			return nil
 		}
-		total += info.Size()
-		return nil
+		return fn(d.Name(), info.Size(), info.ModTime())
 	})
-	if err != nil {
-		return 0, err
-	}
-	return total, nil
 }
