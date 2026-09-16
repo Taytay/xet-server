@@ -233,6 +233,11 @@ func (s *Server) LoadSnapshot(path string) error {
 			if served, err := dedupShardBody(shard, body); err == nil {
 				snap.ShardBodies[hash] = served
 			}
+			for _, x := range shard.Xorbs {
+				if _, exists := s.xorbToShard[x.Header.XorbHash]; !exists {
+					s.xorbToShard[x.Header.XorbHash] = hash
+				}
+			}
 		}
 		s.shardBodies = snap.ShardBodies
 	}

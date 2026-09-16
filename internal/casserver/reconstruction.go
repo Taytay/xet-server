@@ -225,13 +225,7 @@ func (s *Server) handleChunkDedup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.chunkDedupMu.RLock()
-	shardHash, known := s.chunkHashToShard[hash]
-	var shardBytes []byte
-	if known {
-		shardBytes = s.shardBodies[shardHash]
-	}
-	s.chunkDedupMu.RUnlock()
+	shardBytes, known := s.dedupAnswer(hash)
 	if !known || shardBytes == nil {
 		// !known: no uploaded shard has ever referenced this chunk.
 		// shardBytes == nil: the shard's body was evicted or never

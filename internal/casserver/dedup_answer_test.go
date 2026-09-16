@@ -2,6 +2,7 @@ package casserver
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -153,4 +154,37 @@ func TestChunkDedup_AnswerCoversTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, ts2, chunksB[0], []merklehash.Hash{xorbB, xorbA})
+}
+
+// An answer never exceeds maxDedupAnswerChunks chunk entries; the xorb
+// the chunk lives in comes first and always fits, and further xorbs are
+// added whole or not at all.
+func TestChunkDedup_AnswerIsBounded(t *testing.T) {
+	ts, _ := newTestServer(t)
+	small := xorbEntryOf(merklehash.ComputeDataHash([]byte("xorb small")), []merklehash.Hash{merklehash.ComputeDataHash([]byte("the queried chunk"))}, [][]byte{[]byte("the queried chunk")})
+	var huge shardformat.XorbEntry
+	huge.Header.XorbHash = merklehash.ComputeDataHash([]byte("xorb huge"))
+	for i := 0; i < maxDedupAnswerChunks; i++ {
+		huge.Chunks = append(huge.Chunks, shardformat.XorbChunkSequenceEntry{ChunkHash: merklehash.ComputeDataHash([]byte(fmt.Sprintf("chunk %d", i))), ChunkByteRangeStart: uint32(i), UnpackedSegmentBytes: 1})
+	}
+	huge.Header.NumBytesInXorb = uint32(len(huge.Chunks))
+	file := shardformat.FileEntry{
+		Header: shardformat.FileDataSequenceHeader{FileHash: merklehash.ComputeDataHash([]byte("a file spanning both"))},
+		Entries: []shardformat.FileDataSequenceEntry{
+			{XorbHash: small.Header.XorbHash, UnpackedSegmentBytes: small.Header.NumBytesInXorb, ChunkIndexStart: 0, ChunkIndexEnd: 1},
+			{XorbHash: huge.Header.XorbHash, UnpackedSegmentBytes: huge.Header.NumBytesInXorb, ChunkIndexStart: 0, ChunkIndexEnd: uint32(len(huge.Chunks))},
+		},
+	}
+	uploadFooterlessShardOf(t, ts, []shardformat.FileEntry{file}, []shardformat.XorbEntry{small, huge})
+
+	shard := fetchDedupShard(t, ts, small.Chunks[0].ChunkHash)
+	if len(shard.Xorbs) != 1 || shard.Xorbs[0].Header.XorbHash != small.Header.XorbHash {
+		t.Fatalf("answer lists xorbs %v; the huge xorb would exceed the bound and must be left out whole", xorbHashes(shard))
+	}
+	// Queried from inside the huge xorb, that xorb is the home xorb and
+	// is served in full; the small one no longer fits.
+	shard = fetchDedupShard(t, ts, huge.Chunks[7].ChunkHash)
+	if len(shard.Xorbs) != 1 || shard.Footer.ChunkLookupNumEntry != uint64(maxDedupAnswerChunks) {
+		t.Fatalf("answer for a chunk of the huge xorb: xorbs %v, lookup %d", xorbHashes(shard), shard.Footer.ChunkLookupNumEntry)
+	}
 }
