@@ -34,6 +34,20 @@
   server failed with 401 on `GET /v1/xorbs/...` while uploads and
   git-lfs downloads worked. Only the xorb GET/HEAD routes accept a token
   from a URL (`integration-tests/multi_client_auth_gated.sh`).
+- **Garbage collection for a standalone server** (`xetd gc`, `POST
+  /v1/gc`): the operator supplies the LFS OIDs still reachable (`git
+  lfs ls-files --all --long` per repo), files committed through the Hub
+  shim are kept automatically, and everything else is dropped from the
+  shards and deleted from the store, followed by a snapshot. Only the
+  shared secret may run it (new `auth.ScopeAdmin`, never minted). A
+  grace period (22 days by default) protects any xorb uploaded, fetched
+  or advertised in a dedup answer since, and any file whose shard is
+  that recent, because a xet client dedups from its own cache for three
+  weeks without asking the server; dedup answers now carry a matching
+  three-week expiry instead of "never", and xorb last-access times are
+  persisted in the snapshot. The route is mounted by `cmd/xetd` only
+  (xet-proxyd is a cache; eviction is its tool) and refused with
+  `-sync-folder`. `integration-tests/gc_reclaims_unreferenced.sh`.
 - **`auth.SignedTokenAuth`**: with a shared secret, the Hub shim now mints
   HMAC-signed, scoped, expiring CAS tokens instead of random strings the
   CAS could not accept when auth was on. Also accepts the secret as an

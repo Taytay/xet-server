@@ -153,7 +153,7 @@ func (a *SignedTokenAuth) Authenticate(r *http.Request) (Principal, error) {
 	}
 	if token := bearerToken(r); token != "" {
 		if subtle.ConstantTimeCompare([]byte(token), a.secret) == 1 {
-			return &scopedPrincipal{subject: SharedSecretSubject, scope: ScopeWrite}, nil
+			return &scopedPrincipal{subject: SharedSecretSubject, scope: ScopeAdmin}, nil
 		}
 		return a.verifyMinted(token)
 	}
@@ -162,7 +162,7 @@ func (a *SignedTokenAuth) Authenticate(r *http.Request) (Principal, error) {
 			if user == "" {
 				user = SharedSecretSubject
 			}
-			return &scopedPrincipal{subject: user, scope: ScopeWrite}, nil
+			return &scopedPrincipal{subject: user, scope: ScopeAdmin}, nil
 		}
 		return a.verifyMinted(pass)
 	}
@@ -173,8 +173,11 @@ func (a *SignedTokenAuth) Authenticate(r *http.Request) (Principal, error) {
 // authenticated with the raw shared secret and no user name.
 const SharedSecretSubject = "shared-secret"
 
-// scopedPrincipal holds one scope; write implies read, matching how the
-// real CAS's scopes nest.
+// scopedPrincipal holds one scope; the scopes nest (admin implies write
+// implies read), matching how the real CAS's read and write nest. Only
+// the raw shared secret gets ScopeAdmin: MintToken refuses to mint it
+// and verifyMinted refuses to accept it, so a token handed to a client
+// can never reach an operator-only route.
 type scopedPrincipal struct {
 	subject string
 	scope   Scope
@@ -185,9 +188,11 @@ func (p *scopedPrincipal) Subject() string { return p.subject }
 func (p *scopedPrincipal) HasScope(scope Scope) bool {
 	switch scope {
 	case ScopeRead:
-		return p.scope == ScopeRead || p.scope == ScopeWrite
+		return p.scope == ScopeRead || p.scope == ScopeWrite || p.scope == ScopeAdmin
 	case ScopeWrite:
-		return p.scope == ScopeWrite
+		return p.scope == ScopeWrite || p.scope == ScopeAdmin
+	case ScopeAdmin:
+		return p.scope == ScopeAdmin
 	default:
 		return false
 	}

@@ -223,6 +223,41 @@ components:
         evictions_total: { type: integer, format: int64 }
         bytes_freed_total: { type: integer, format: int64 }
       required: [eviction_enabled]
+    GCRequest:
+      type: object
+      properties:
+        keep:
+          type: array
+          items: { type: string }
+          description: Hex SHA-256 OIDs of the files to keep (case-insensitive).
+        grace_seconds:
+          type: integer
+          format: int64
+          description: Overrides the server's -gc-grace for this run; 0 means no grace.
+        dry_run: { type: boolean }
+      required: [keep]
+    GCReport:
+      type: object
+      properties:
+        dry_run: { type: boolean }
+        grace_seconds: { type: integer, format: int64 }
+        keep_oids: { type: integer }
+        keep_unknown: { type: integer, description: Listed OIDs no shard describes. }
+        keep_unknown_sample: { type: array, items: { type: string } }
+        files_kept: { type: integer }
+        files_recent: { type: integer, description: Kept only because their shard arrived within the grace. }
+        files_dropped: { type: integer }
+        shards_kept: { type: integer }
+        shards_rewritten: { type: integer }
+        shards_deleted: { type: integer }
+        xorbs_kept: { type: integer }
+        xorbs_kept_bytes: { type: integer, format: int64 }
+        xorbs_deleted: { type: integer }
+        xorbs_deleted_bytes: { type: integer, format: int64 }
+        xorbs_deferred: { type: integer, description: Unreferenced but inside the grace or being fetched. }
+        xorbs_deferred_bytes: { type: integer, format: int64 }
+        errors: { type: array, items: { type: string } }
+      required: [dry_run, grace_seconds, keep_oids, keep_unknown, files_kept, files_recent, files_dropped, shards_kept, shards_rewritten, shards_deleted, xorbs_kept, xorbs_kept_bytes, xorbs_deleted, xorbs_deleted_bytes, xorbs_deferred, xorbs_deferred_bytes]
     CreateRepoRequest:
       type: object
       properties:
@@ -668,6 +703,42 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StorageStatsResponse' }
+  /v1/gc:
+    post:
+      tags: [CAS]
+      summary: Garbage collection by keep set (operator; `xetd gc`)
+      description: >-
+        Requires the `admin` scope, which only the operator's shared
+        secret carries (no minted token does; with no auth configured
+        every request has it). Not part of the real Xet CAS API, and
+        mounted by `xetd` only - never by `xet-proxyd`, which is a cache
+        and bounds itself with eviction. Keeps every file whose SHA-256
+        OID the body lists plus every file the Hub shim's registry
+        lists, drops all other files from the shards, deletes every xorb
+        no kept file references, and snapshots. A xorb uploaded,
+        fetched or advertised in a dedup answer within the grace period
+        is never deleted, and a shard that arrived within it keeps its
+        files: xet clients dedup from their own cache for three weeks
+        without asking. Refused (409) with `-sync-folder`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GCRequest' }
+      responses:
+        '200':
+          description: What the run did, or (dry_run) would do.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GCReport' }
+        '400':
+          description: Malformed body.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Disabled on this server (synced-folder mode).
+        '501':
+          description: The storage backend cannot enumerate and delete blobs.
   /api/repos/create:
     post:
       tags: [Hub]

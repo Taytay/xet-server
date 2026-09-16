@@ -3,6 +3,7 @@ package casserver
 import (
 	"bytes"
 	"sort"
+	"time"
 
 	"github.com/guilt/xet-server/internal/merklehash"
 	"github.com/guilt/xet-server/internal/shardformat"
@@ -45,7 +46,19 @@ func (s *Server) dedupAnswer(chunk merklehash.Hash) ([]byte, bool) {
 	parsed := map[merklehash.Hash]*shardformat.Shard{}
 	home, ok := s.xorbEntryForChunk(shardHash, body, chunk, parsed)
 	if !ok {
-		return body, true
+		// A shard indexed by an older build: serve it whole, but with
+		// this build's expiry and access bookkeeping, since the client
+		// will dedup against every xorb it lists.
+		shard, parsedOK := parseMemo(shardHash, body, parsed)
+		if !parsedOK {
+			return body, true
+		}
+		var buf bytes.Buffer
+		if _, err := shardformat.WriteShardExpiring(&buf, shard.Files, shard.Xorbs, dedupAnswerExpiry()); err != nil {
+			return body, true
+		}
+		s.touchXorbs(shard.Xorbs)
+		return buf.Bytes(), true
 	}
 
 	xorbs := []shardformat.XorbEntry{home}
@@ -68,10 +81,34 @@ func (s *Server) dedupAnswer(chunk merklehash.Hash) ([]byte, bool) {
 	}
 
 	var buf bytes.Buffer
-	if _, err := shardformat.WriteShard(&buf, nil, xorbs); err != nil {
+	if _, err := shardformat.WriteShardExpiring(&buf, nil, xorbs, dedupAnswerExpiry()); err != nil {
 		return body, true
 	}
+	s.touchXorbs(xorbs)
 	return buf.Bytes(), true
+}
+
+// dedupAnswerExpiry is the ShardKeyExpiry written into every answer:
+// now plus dedupAnswerTTL, as Unix seconds. After it the client's shard
+// cache no longer loads the answer, so it asks again - which is what
+// lets Collect (gc.go) delete a xorb that has not been advertised for
+// longer than that.
+func dedupAnswerExpiry() uint64 {
+	return uint64(time.Now().Add(dedupAnswerTTL).Unix())
+}
+
+// touchXorbs records that every xorb in xorbs was just advertised in a
+// dedup answer: a client may reference any of them in a shard it uploads
+// later without asking again, for as long as the answer is valid, so
+// each one's last access moves to now and Collect's grace period
+// protects it from that moment.
+func (s *Server) touchXorbs(xorbs []shardformat.XorbEntry) {
+	now := time.Now()
+	s.xorbMu.Lock()
+	for _, x := range xorbs {
+		s.xorbLastAccess[x.Header.XorbHash] = now
+	}
+	s.xorbMu.Unlock()
 }
 
 // xorbsOfFilesReferencing returns, in term order, the xorb hashes of

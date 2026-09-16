@@ -41,6 +41,12 @@ const (
 	// upload, commit, repo create) - mirrors the real protocol's `write`
 	// scope.
 	ScopeWrite Scope = "write"
+	// ScopeAdmin gates this project's own operator routes that destroy
+	// data (garbage collection). Not part of the real protocol: no
+	// minted token ever carries it, only the operator's shared secret
+	// itself (SignedTokenAuth) or a deployment with no auth at all
+	// (NoAuth, where every scope is granted).
+	ScopeAdmin Scope = "admin"
 )
 
 // Principal is the authenticated identity/permission set an Authenticator

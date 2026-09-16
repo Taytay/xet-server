@@ -146,6 +146,7 @@ func CASHandler(addr, hubAddr string) http.HandlerFunc {
 			{casserver.ReconstructionsPathV2, "GET", "Multi-range-optimized reconstruction map"},
 			{casserver.ChunksPath, "GET", "Global chunk-dedup lookup"},
 			{casserver.StoragestatsPath, "GET", "Eviction/storage policy stats"},
+			{casserver.GCPath, "POST", "Garbage collection by keep set (operator; `xetd gc`)"},
 			{api.UploadPath, "POST", "Xet Data API: chunk, dedup, and store a file"},
 			{api.FilesPrefix + "{id}", "GET", "Xet Data API: download a file"},
 			{api.StatsPath, "GET", "Xet Data API: store-wide dedup stats"},

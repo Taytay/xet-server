@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/guilt/xet-server/internal/merklehash"
 	"github.com/guilt/xet-server/internal/shardformat"
@@ -109,6 +110,8 @@ func (s *Server) IngestShard(body []byte) error {
 	if _, err := shardformat.ReadShard(bytes.NewReader(body)); err != nil {
 		return err
 	}
+	s.gcMu.RLock()
+	defer s.gcMu.RUnlock()
 	shardHash := merklehash.ComputeDataHash(body)
 	if err := s.persistShard(shardHash, body); err != nil {
 		return fmt.Errorf("persist shard: %w", err)
@@ -165,6 +168,11 @@ func (s *Server) indexShard(body []byte, shardHash merklehash.Hash) error {
 	s.chunkDedupMu.Lock()
 	if _, exists := s.shardBodies[shardHash]; !exists {
 		s.shardBodies[shardHash] = served
+	}
+	if _, exists := s.shardIndexedAt[shardHash]; !exists {
+		// Kept across Collect's rebuild, so a collection does not make
+		// every surviving shard look freshly pushed.
+		s.shardIndexedAt[shardHash] = time.Now()
 	}
 	for _, x := range shard.Xorbs {
 		if _, exists := s.xorbToShard[x.Header.XorbHash]; !exists {

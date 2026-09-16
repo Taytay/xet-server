@@ -422,6 +422,20 @@ the same xorb-only shape xet-core's own reference client serves
 (about 3 MB; the chunk's own xorb always fits) because the client caches
 every answer as a shard file.
 
+That cache is also why the answer's footer carries an expiry
+(`shard_key_expiry`, Unix seconds; `casserver.dedupAnswerExpiry`, three
+weeks out). The client's `MDBShardFile::load_managed_directory` does
+not load a cached shard past its expiry and deletes it a week later, so
+the expiry bounds how long a client may keep deduplicating against a
+xorb without asking the server again - the same three weeks
+(`MDB_SHARD_LOCAL_CACHE_EXPIRATION`) it keeps the shards of its own
+uploads. xet-core's reference server writes an expiry the same way
+(`LocalClient::query_for_global_dedup_shard`,
+`serialize_xorb_subset_with_expiry`). An earlier build of this server
+wrote "never", which was harmless only because nothing ever deleted a
+xorb; the garbage collector (`xetd gc`, docs/GIT_LFS.md) relies on the
+bound and records every xorb an answer lists as accessed at that moment.
+
 ## 10. V2 reconstruction is a response-shape optimization, not new data
 
 `GET /v2/reconstructions/{file_id}` (per xet-core's

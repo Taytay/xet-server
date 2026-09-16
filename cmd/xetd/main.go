@@ -36,11 +36,19 @@ import (
 )
 
 func main() {
+	// `xetd gc ...` is the garbage collector's client (gc.go); anything
+	// else runs the server.
+	if len(os.Args) > 1 && os.Args[1] == "gc" {
+		runGC(os.Args[2:])
+		return
+	}
+
 	addr := flag.String("addr", ":8420", "listen address for the CAS + Xet Data API server")
 	hubAddr := flag.String("hub-addr", "", "listen address for the Hub API shim (empty = disabled)")
 	casURL := flag.String("cas-url", "", "externally-reachable CAS base URL to hand out from the Hub shim (defaults to http://localhost<addr>)")
 	dataDir := flag.String("data", "./xet-data", "directory for chunks, xorbs, and manifests")
-	maxStorageBytes := flag.Int64("max-storage-bytes", 0, "if > 0, periodically evict least-recently-accessed xorbs once total xorb storage exceeds this many bytes")
+	maxStorageBytes := flag.Int64("max-storage-bytes", 0, "if > 0, periodically evict least-recently-accessed xorbs once total xorb storage exceeds this many bytes. This is cache behavior: it deletes xorbs that files still reference. For a server that is the only copy of its data, leave it off and reclaim space with `xetd gc` (see -gc-grace)")
+	gcGrace := flag.Duration("gc-grace", casserver.DefaultGCGrace, "default grace period for POST /v1/gc (`xetd gc`): a xorb uploaded, fetched, or advertised in a dedup answer more recently than this is never deleted, whatever the keep set says. The default is the 3 weeks a xet client keeps its own shards in its cache (and dedups from them without asking), plus a day; a client whose cache outlives a shorter grace can push a file that references a deleted xorb. A request may override it per run")
 	evictionInterval := flag.Duration("eviction-interval", 5*time.Minute, "how often to check storage usage against -max-storage-bytes")
 	rateLimitRPS := flag.Float64("rate-limit-rps", 0, "if > 0, cap sustained xorb/shard uploads per source IP to this many requests/second (burst allowance via -rate-limit-burst)")
 	rateLimitBurst := flag.Float64("rate-limit-burst", 20, "burst allowance for -rate-limit-rps - how many upload requests a source IP can make immediately before the per-second rate applies")
@@ -137,9 +145,21 @@ func main() {
 		slog.Info("upload rate limiting enabled", "requestsPerSecond", *rateLimitRPS, "burst", *rateLimitBurst)
 	}
 
+	// Garbage collection is wired here and never in casserver.Server's
+	// own routes, so the Server that xet-proxyd embeds (a cache, where
+	// LRU eviction is the right tool) cannot get it. The Hub shim's
+	// registry (if enabled) is added to every keep set below.
+	gcConfig := casserver.GCHandlerConfig{DefaultGrace: *gcGrace}
+	if *syncFolder {
+		gcConfig.Disabled = "this xetd serves a synced folder (-sync-folder), where other replicas may still reference what one replica deletes"
+	} else {
+		gcConfig.AfterCollect = func() error { return casSrv.Snapshot(casSnapshotPath) }
+	}
+
 	mux := http.NewServeMux()
 	routing.Apply(mux, []routing.Route{
 		routing.Mount("", "/api-docs/", http.StripPrefix("/api-docs/", apidocs.Handler())),
+		routing.Mount("POST", casserver.GCPath, gcHandlerFor(casSrv, &gcConfig)),
 		// demoSrv's own literal /v1 sub-paths (api.UploadPath,
 		// api.FilesPrefix, api.StatsPath) are registered on this shared
 		// mux ahead of casSrv's api.V1+"/" wildcard - Go's http.ServeMux
@@ -189,6 +209,9 @@ func main() {
 		hubSrv.SetAuthenticator(authenticator)
 		hubSrv.SetTokenMinter(minter)
 		hubSrv.SetTokenTTL(*tokenTTL)
+		// Files committed through the Hub shim have no git repo to list
+		// them from; the registry is what says they are still wanted.
+		gcConfig.ExtraKeep = hubSrv.FileSHA256s
 
 		hubSnapshotPath := filepath.Join(*dataDir, "hubserver-snapshot.json")
 		if *syncFolder {
@@ -279,6 +302,19 @@ func main() {
 			slog.Error("final snapshot failed", "server", target.name, "error", err)
 		}
 	}
+}
+
+// gcHandlerFor builds the GC handler lazily, on the first request, so
+// the config can still gain the Hub registry hook after the route table
+// is assembled (the Hub shim is constructed later in main than the CAS
+// mux).
+func gcHandlerFor(casSrv *casserver.Server, cfg *casserver.GCHandlerConfig) http.Handler {
+	var once sync.Once
+	var h http.Handler
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { h = casSrv.GCHandler(*cfg) })
+		h.ServeHTTP(w, r)
+	})
 }
 
 // withLandingPage wraps next so an exact "GET /" request is answered by

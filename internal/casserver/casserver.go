@@ -124,6 +124,12 @@ type Server struct {
 	// derived, never snapshotted: LoadSnapshot rebuilds it from
 	// ShardBodies. dedupAnswer uses it to describe a file's other xorbs.
 	xorbToShard map[merklehash.Hash]merklehash.Hash
+	// shardIndexedAt is when each shard body was first indexed by this
+	// process (guarded by chunkDedupMu; not snapshotted - the shard
+	// file's mtime is the durable record). Collect treats a shard
+	// younger than the grace period as a push still in progress: its
+	// files stay whether or not the keep set names them yet.
+	shardIndexedAt map[merklehash.Hash]time.Time
 
 	// evictionStats, if set via SetEvictionStats, backs GET
 	// /v1/storage-stats. nil (the default, when no eviction.Sweeper is
@@ -157,6 +163,13 @@ type Server struct {
 	// folder is the synced-folder support (shard dir, rescans); see
 	// folder.go. Zero value means shards live only in memory/snapshot.
 	folder folderState
+
+	// gcMu is held for reading by every path that adds to the indices
+	// (an upload, a shard scan, a proxy ingest) and for writing by
+	// Collect while it rebuilds them (gc.go). The per-index locks above
+	// keep each map consistent on its own; this one keeps a shard from
+	// being indexed halfway through a rebuild that would then forget it.
+	gcMu sync.RWMutex
 }
 
 func New(xorbs storage.Store) *Server {
@@ -172,6 +185,7 @@ func New(xorbs storage.Store) *Server {
 		chunkHashToShard: make(map[merklehash.Hash]merklehash.Hash),
 		shardBodies:      make(map[merklehash.Hash][]byte),
 		xorbToShard:      make(map[merklehash.Hash]merklehash.Hash),
+		shardIndexedAt:   make(map[merklehash.Hash]time.Time),
 		authenticator:    auth.NoAuth{},
 	}
 	s.routes()
