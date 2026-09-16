@@ -86,13 +86,16 @@ export no_proxy="localhost,127.0.0.1,${no_proxy:-}"
 MC_SERVER_DATA="$WORKDIR/server-data"
 MC_SERVER_LOG="$WORKDIR/xetd.log"
 
-# startXetd <cas-port> <hub-port>: start this test's private xetd with
-# DEBUG=1 and wait for it. Sets MC_HUB_URL. Killed on exit.
+# startXetd <cas-port> <hub-port> [xetd flags...]: start this test's
+# private xetd with DEBUG=1 and wait for it. Sets MC_HUB_URL. Killed on
+# exit. Extra flags go to xetd (e.g. -auth-token, with MC_HF_TOKEN set to
+# the same secret so every client authenticates).
 startXetd() {
     local casPort=$1 hubPort=$2
+    shift 2
     MC_HUB_URL="http://127.0.0.1:${hubPort}"
     mkdir -p "$MC_SERVER_DATA"
-    DEBUG=1 "$XETD" -addr ":${casPort}" -hub-addr ":${hubPort}" -data "$MC_SERVER_DATA" >"$MC_SERVER_LOG" 2>&1 &
+    DEBUG=1 "$XETD" -addr ":${casPort}" -hub-addr ":${hubPort}" -data "$MC_SERVER_DATA" "$@" >"$MC_SERVER_LOG" 2>&1 &
     MC_SERVER_PID=$!
     trap 'kill "$MC_SERVER_PID" 2>/dev/null || true; wait "$MC_SERVER_PID" 2>/dev/null || true' EXIT
     local ready=false
@@ -117,7 +120,7 @@ asClient() {
     local name=$1; shift
     local home="$WORKDIR/clients/$name"
     mkdir -p "$home/hf" "$home/xet"
-    HF_HOME="$home/hf" HF_XET_CACHE="$home/xet" HF_TOKEN="fixture-token-$name" \
+    HF_HOME="$home/hf" HF_XET_CACHE="$home/xet" HF_TOKEN="${MC_HF_TOKEN:-fixture-token-$name}" \
     HF_ENDPOINT="$MC_HUB_URL" HF_XET_LOG_PATH="${HF_XET_LOG_PATH:-/dev/null}" \
         pipenv run $TIMEOUT_CMD hf "$@"
 }
