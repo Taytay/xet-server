@@ -139,6 +139,8 @@ func (s *Server) IngestXorb(ctx context.Context, claimedHash merklehash.Hash, r 
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return false, fmt.Errorf("store xorb: %w", err)
 	}
+	s.gcMu.RLock()
+	defer s.gcMu.RUnlock()
 	written, err = s.xorbs.Put(ctx, claimedHash.Hex(), tmp, size)
 	if err != nil {
 		return false, fmt.Errorf("store xorb: %w", err)

@@ -64,6 +64,8 @@ func (s *Server) reconstructionWindow(fileID merklehash.Hash, rangeHeader string
 // whole file, and a caller that violates that would silently truncate
 // every future request for it.
 func (s *Server) IngestFileRecon(fileID merklehash.Hash, entries []shardformat.FileDataSequenceEntry) {
+	s.gcMu.RLock()
+	defer s.gcMu.RUnlock()
 	s.fileReconMu.Lock()
 	s.fileRecon[fileID] = entries
 	s.fileReconMu.Unlock()

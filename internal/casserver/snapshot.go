@@ -51,14 +51,17 @@ type snapshot struct {
 	ChunkHashToShard map[merklehash.Hash]merklehash.Hash `json:"chunk_hash_to_shard"`
 	ShardBodies      map[merklehash.Hash][]byte          `json:"shard_bodies"`
 
-	// xorbLastAccess/xorbInFlight are deliberately NOT persisted:
-	// xorbInFlight is inherently a live-process concept (no fetch can
-	// possibly be "in flight" across a restart), and xorbLastAccess
-	// resetting to zero-value on restart just means the next eviction
-	// sweep treats every restored xorb as equally stale - a one-time,
-	// self-correcting cost (the sweep's LRU ordering catches up to real
-	// access patterns again after the first restart-following sweep),
-	// not a correctness issue.
+	// XorbLastAccess is when each xorb was last uploaded, fetched, or
+	// listed in a global-dedup answer. It used to be deliberately left
+	// out (for eviction, a reset to zero on restart only made every
+	// xorb equally stale once), but the garbage collector's grace
+	// period is measured from it, and a restart that forgot a xorb was
+	// advertised yesterday would let GC delete what a client's cache
+	// still points at. Additive (a v2 snapshot without it loads with
+	// zero times, which GC treats as older than any grace).
+	// xorbInFlight stays unpersisted: nothing is in flight across a
+	// restart.
+	XorbLastAccess map[merklehash.Hash]time.Time `json:"xorb_last_access,omitempty"`
 }
 
 // snapshotVersion is bumped whenever a field's meaning or type changes in
@@ -108,6 +111,12 @@ func (s *Server) Snapshot(path string) error {
 	snap.XorbRawLength = make(map[merklehash.Hash]int64, len(s.xorbRawLength))
 	for k, v := range s.xorbRawLength {
 		snap.XorbRawLength[k] = v
+	}
+	snap.XorbLastAccess = make(map[merklehash.Hash]time.Time, len(s.xorbLastAccess))
+	for k, v := range s.xorbLastAccess {
+		if !v.IsZero() {
+			snap.XorbLastAccess[k] = v
+		}
 	}
 	s.xorbMu.RUnlock()
 
@@ -212,7 +221,7 @@ func (s *Server) LoadSnapshot(path string) error {
 		// matching this file's top-level comment on why that's fine.
 		for hash := range snap.XorbRawLength {
 			if _, ok := s.xorbLastAccess[hash]; !ok {
-				s.xorbLastAccess[hash] = time.Time{}
+				s.xorbLastAccess[hash] = snap.XorbLastAccess[hash]
 			}
 		}
 	}

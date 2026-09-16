@@ -222,7 +222,7 @@ func TestSnapshot_NoTempFileLeftBehindOnSuccess(t *testing.T) {
 	}
 }
 
-func TestSnapshot_RestoredEvictionCandidatesHaveBackfilledLastAccess(t *testing.T) {
+func TestSnapshot_RestoredEvictionCandidatesKeepTheirLastAccess(t *testing.T) {
 	store, err := fsstore.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("fsstore.New() error = %v", err)
@@ -238,6 +238,13 @@ func TestSnapshot_RestoredEvictionCandidatesHaveBackfilledLastAccess(t *testing.
 	}
 	resp.Body.Close()
 
+	srv.xorbMu.RLock()
+	uploaded := srv.xorbLastAccess[xorbHash]
+	srv.xorbMu.RUnlock()
+	if uploaded.IsZero() {
+		t.Fatal("upload did not record a last access")
+	}
+
 	path := filepath.Join(t.TempDir(), "snapshot.json")
 	if err := srv.Snapshot(path); err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
@@ -248,13 +255,17 @@ func TestSnapshot_RestoredEvictionCandidatesHaveBackfilledLastAccess(t *testing.
 		t.Fatalf("LoadSnapshot() error = %v", err)
 	}
 
+	// Last access survives the restart (the garbage collector's grace
+	// period is measured from it; see snapshot.go). A snapshot from a
+	// build that did not persist it restores as zero, which sorts as
+	// oldest for eviction and as "outside any grace" for GC.
 	candidates := restored.EvictionCandidates()
 	found := false
 	for _, c := range candidates {
 		if c.Key == xorbHash.Hex() {
 			found = true
-			if !c.LastAccess.IsZero() {
-				t.Errorf("restored xorb's LastAccess = %v, want zero-value (backfilled, no real access recorded yet)", c.LastAccess)
+			if !c.LastAccess.Equal(uploaded) {
+				t.Errorf("restored xorb's LastAccess = %v, want the upload time %v", c.LastAccess, uploaded)
 			}
 		}
 	}

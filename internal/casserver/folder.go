@@ -147,6 +147,8 @@ func (s *Server) ScanShards(ctx context.Context) (added int, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("casserver: list shard dir: %w", err)
 	}
+	s.gcMu.RLock()
+	defer s.gcMu.RUnlock()
 	s.folder.mu.Lock()
 	s.folder.scannedMtime = mtime
 	s.folder.mu.Unlock()

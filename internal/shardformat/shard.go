@@ -42,6 +42,21 @@ type Shard struct {
 // (+ bookend), xorb-info section (+ bookend), file lookup table, xorb
 // lookup table, chunk lookup table, footer.
 func WriteShard(w io.Writer, files []FileEntry, xorbs []XorbEntry) (Footer, error) {
+	return WriteShardExpiring(w, files, xorbs, NoExpiry)
+}
+
+// NoExpiry is the ShardKeyExpiry of a shard that never expires: what a
+// client writes for its own shards, and what WriteShard uses.
+const NoExpiry = ^uint64(0)
+
+// WriteShardExpiring is WriteShard with the footer's ShardKeyExpiry set
+// to expiry, a Unix time in seconds. A client's shard cache does not
+// load a shard past its expiry (MDBShardFile::load_managed_directory in
+// xet-core skips it, and deletes it a week later), so a server that
+// hands out shards in global-dedup answers uses this to bound how long
+// a client may keep deduplicating against them without asking again -
+// the horizon a garbage collector on that server has to respect.
+func WriteShardExpiring(w io.Writer, files []FileEntry, xorbs []XorbEntry, expiry uint64) (Footer, error) {
 	var buf countingWriter
 	cw := io.MultiWriter(w, &buf)
 
@@ -137,7 +152,7 @@ func WriteShard(w io.Writer, files []FileEntry, xorbs []XorbEntry) (Footer, erro
 	}
 
 	footer.FooterOffset = buf.n
-	footer.ShardKeyExpiry = ^uint64(0)
+	footer.ShardKeyExpiry = expiry
 	if err := WriteFooter(cw, footer); err != nil {
 		return Footer{}, err
 	}
