@@ -388,10 +388,18 @@ This server's implementation (`casserver.handleUploadShard`,
 `handleChunkDedup`) mirrors that: every chunk hash referenced by any
 uploaded shard's xorb-info section is indexed against that shard's raw
 uploaded bytes (`Server.chunkHashToShard`), and a dedup query for a known
-chunk hash returns those exact bytes verbatim - the same shard a client
-already knows how to parse, since it's the identical format
-`internal/shardformat` reads/writes for `POST /v1/shards` uploads. A
-chunk hash no uploaded shard has ever referenced returns `404`.
+chunk hash returns that shard - **rebuilt as a complete shard file**
+(`casserver.dedupShardBody`), not the uploaded bytes verbatim. The two
+are not the same format: an upload has its footer and lookup tables
+stripped (`read_shard_to_bytes_remove_footer`), while the client loads a
+dedup response with `MDBShardInfo::load_from_reader`, which seeks to a
+footer at EOF and requires footer version 1. Serving uploads back
+unchanged only ever appeared to work because a client that uploaded a
+shard dedups against its own local copy and never fetches it; the first
+push from a *second* machine failed with git-xet's "Expected footer
+version 1, got 0". The rebuilt shard leaves the HMAC key zero, so the
+client matches raw chunk hashes. A chunk hash no uploaded shard has
+ever referenced returns `404`.
 
 One second-order consequence worth calling out: because the response is
 literally "hand back a shard someone already uploaded," a global dedup
