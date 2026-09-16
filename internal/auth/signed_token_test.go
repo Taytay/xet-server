@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"testing"
@@ -16,6 +17,11 @@ func reqWithHeader(value string) *http.Request {
 		r.Header.Set("Authorization", value)
 	}
 	return r
+}
+
+// basicCredential is the base64 half of a "Basic ..." header.
+func basicCredential(user, pass string) string {
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 }
 
 func TestSignedTokenAuth_SharedSecretBearerGrantsEverything(t *testing.T) {
@@ -121,6 +127,40 @@ func TestSignedTokenAuth_RejectsTamperedExpiredAndForeignTokens(t *testing.T) {
 		if _, err := a.Authenticate(reqWithHeader(bad)); !errors.Is(err, ErrUnauthenticated) {
 			t.Errorf("header %q: err = %v, want ErrUnauthenticated", bad, err)
 		}
+	}
+}
+
+// TestSignedTokenAuth_AdminScopeIsTheSecretOnly: the raw secret (Bearer
+// or Basic password) holds every scope including admin; a minted token
+// never does, and one forged to claim it is refused outright.
+func TestSignedTokenAuth_AdminScopeIsTheSecretOnly(t *testing.T) {
+	a := NewSignedTokenAuth(signedFixtureSecret)
+	for _, header := range []string{"Bearer " + signedFixtureSecret, "Basic " + basicCredential("operator", signedFixtureSecret)} {
+		p, err := a.Authenticate(reqWithHeader(header))
+		if err != nil {
+			t.Fatalf("%s: %v", header, err)
+		}
+		for _, scope := range []Scope{ScopeRead, ScopeWrite, ScopeAdmin} {
+			if !p.HasScope(scope) {
+				t.Errorf("secret via %q lacks %s", header[:6], scope)
+			}
+		}
+	}
+	minted, _, err := a.MintToken(ScopeWrite, "alice", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := a.Authenticate(reqWithHeader("Bearer " + minted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.HasScope(ScopeAdmin) || !p.HasScope(ScopeWrite) {
+		t.Errorf("minted write token: admin = %v, write = %v", p.HasScope(ScopeAdmin), p.HasScope(ScopeWrite))
+	}
+	forged := mintedPayload(time.Now().Add(time.Hour).Unix(), ScopeAdmin, "alice")
+	forged += "." + hexMAC(a, forged)
+	if _, err := a.Authenticate(reqWithHeader("Bearer " + forged)); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("token claiming admin scope: err = %v, want ErrUnauthenticated", err)
 	}
 }
 
