@@ -183,8 +183,12 @@ func TestXetToken_RewritesCasURLButPassesAccessTokenThrough(t *testing.T) {
 }
 
 func TestXetToken_OfflineAfterCacheStillServesRewrittenToken(t *testing.T) {
+	// The cached token's exp must be comfortably in the future: the
+	// stale-fallback guard (token.go's tokenSafetyMargin) refuses to serve an
+	// expired cached token, so this offline test only stays valid while the
+	// cached token is still usable.
 	hubTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(hfclient.XetToken{CasURL: "https://real-cas.example.invalid", Exp: 123, AccessToken: "real-upstream-token"})
+		json.NewEncoder(w).Encode(hfclient.XetToken{CasURL: "https://real-cas.example.invalid", Exp: time.Now().Add(time.Hour).Unix(), AccessToken: "real-upstream-token"})
 	}))
 
 	s := newTestServer(hubTS, "http://localhost:8420")

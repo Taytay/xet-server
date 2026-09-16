@@ -380,6 +380,23 @@ uses a credential of its own). `-auth-token`/`$XET_PROXYD_AUTH_TOKEN`
 gates access to **this proxy itself** - a separate concern from the
 upstream credential entirely.
 
+**Expired Xet access tokens are healed transparently.** Xet's per-repo
+access tokens are short-lived, and on a long, high-concurrency download
+(e.g. `hf download` of a 900+-file dataset) a token can expire between
+the client's refresh and the moment a file's reconstruction is requested
+from the real CAS - which answers `401 Unauthorized` for a repo the client
+was just downloading from successfully. `xet-proxyd` detects that 401 on
+the CAS-facing port, mints a fresh replacement token from the real Hub
+using the **same credential the client already presented** (never a secret
+this proxy holds itself), and retries the request once - so the failure is
+invisible to the client instead of aborting the download. The replacement
+is scoped to the same repo/ref/read-vs-write kind as the original, so this
+can only ever restore access the client already had. Relatedly, the
+stale-fallback for cached xet tokens refuses to serve a token whose `exp`
+has already passed: a transient upstream `xet-{read,write}-token` failure
+can never hand the client a token that is dead on arrival, it surfaces the
+upstream error instead (a clean, retryable failure).
+
 **Any upstream failure - network error, timeout, 5xx - falls back to
 whatever is already cached, no matter how old**, rather than erroring;
 this fallback is the whole reason the proxy exists. `-cache-ttl` (default

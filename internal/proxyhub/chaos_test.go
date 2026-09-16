@@ -103,7 +103,11 @@ func repoInfoHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func xetTokenHandler(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(hfclient.XetToken{CasURL: "https://real-cas.example.invalid", Exp: 123, AccessToken: "real-upstream-token"})
+	// Exp must stay comfortably in the future: since the stale-fallback guard
+	// (token.go's tokenSafetyMargin) refuses to serve an expired cached token,
+	// a stale-token test only exercises the offline path if the cached token
+	// is still usable when it's served.
+	json.NewEncoder(w).Encode(hfclient.XetToken{CasURL: "https://real-cas.example.invalid", Exp: time.Now().Add(time.Hour).Unix(), AccessToken: "real-upstream-token"})
 }
 
 func resolveHandler(w http.ResponseWriter, r *http.Request) {

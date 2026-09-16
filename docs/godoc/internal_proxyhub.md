@@ -111,6 +111,18 @@ func (s *Server) FileSize(xetHash merklehash.Hash) (int64, bool)
     IngestFileSize), remembered so the same answer can be given again without a
     repeat upstream call.
 
+func (s *Server) FreshXetTokenFor(ctx context.Context, presentedToken string) (string, bool)
+    FreshXetTokenFor mints a freshly-issued replacement xet access token for the
+    repo/ref that presentedToken was originally issued to, authenticating to the
+    real Hub with the SAME credential that client used to obtain the original
+    token (stored by recordAccessToken when the token was relayed). ok=false -
+    and the caller should relay the upstream 401 as-is - when presentedToken
+    isn't a token this proxy relayed, or the refresh call to the real Hub fails
+    (including a revoked/expired client credential). Because the replacement
+    is minted with the client's own credential for the same repo/ref/scope,
+    this can never widen anyone's access - it only restores access the client
+    already held.
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) SetAuthenticator(a auth.Authenticator)
